@@ -49,10 +49,10 @@ pub fn render_servers_view(app: &mut LauncherAppState, ui: &mut egui::Ui) {
             bottom: 0,
         }))
         .show(ui, |ui| {
-            ui.heading(RichText::new("Máy chủ cục bộ").size(17.0).strong());
+            ui.heading(RichText::new(app.i18n.t("nav.servers")).size(17.0).strong());
             ui.add_space(6.0);
 
-            if primary_button(ui, "➕  Tạo Máy chủ mới").clicked() {
+            if primary_button(ui, format!("➕  {}", app.i18n.t("server.create"))).clicked() {
                 app.click_sfx();
                 let eng = app.servers.new_draft.engine;
                 app.ensure_engine_versions(eng);
@@ -155,7 +155,7 @@ pub fn render_servers_view(app: &mut LauncherAppState, ui: &mut egui::Ui) {
         ServerTab::Console => render_tab_console(app, ui, &srv),
         ServerTab::Files => render_tab_files(app, ui, &srv),
         ServerTab::PluginsMods => render_tab_plugins_mods(app, ui, &srv),
-        ServerTab::Properties => render_tab_properties(app, ui),
+        ServerTab::Properties => render_tab_properties(app, ui, &srv),
         ServerTab::AccessControl => render_tab_access_control(app, ui),
         ServerTab::Network => render_tab_network(app, ui, &srv),
     }
@@ -268,12 +268,30 @@ fn render_server_header(app: &mut LauncherAppState, ui: &mut egui::Ui, srv: &Man
 
 fn render_server_tabs_bar(app: &mut LauncherAppState, ui: &mut egui::Ui) {
     let tabs = [
-        (ServerTab::Console, "🖥 Bảng điều khiển (Console)"),
-        (ServerTab::Files, "📁 Quản lý Tệp"),
-        (ServerTab::PluginsMods, "🧩 Plugins / Mods"),
-        (ServerTab::Properties, "⚙ server.properties"),
-        (ServerTab::AccessControl, "🛡 Whitelist & Banlist"),
-        (ServerTab::Network, "🌐 Mạng & Bore Tunnel"),
+        (
+            ServerTab::Console,
+            format!("🖥 {}", app.i18n.t("server.console")),
+        ),
+        (
+            ServerTab::Files,
+            format!("📁 {}", app.i18n.t("server.files")),
+        ),
+        (
+            ServerTab::PluginsMods,
+            format!("🧩 {}", app.i18n.t("server.plugins")),
+        ),
+        (
+            ServerTab::Properties,
+            format!("⚙ {}", app.i18n.t("server.properties")),
+        ),
+        (
+            ServerTab::AccessControl,
+            "🛡 Whitelist & Banlist".to_string(),
+        ),
+        (
+            ServerTab::Network,
+            format!("🌐 {}", app.i18n.t("server.network")),
+        ),
     ];
 
     ui.horizontal_wrapped(|ui| {
@@ -659,45 +677,162 @@ fn render_tab_plugins_mods(app: &mut LauncherAppState, ui: &mut egui::Ui, srv: &
         });
 }
 
-fn render_tab_properties(app: &mut LauncherAppState, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Thêm khoá mới:").strong());
-        ui.add(
-            egui::TextEdit::singleline(&mut app.servers.new_prop_key)
-                .hint_text("Ví dụ: online-mode")
-                .desired_width(170.0),
-        );
-        ui.add(
-            egui::TextEdit::singleline(&mut app.servers.new_prop_val)
-                .hint_text("false")
-                .desired_width(170.0),
-        );
-        if primary_button(ui, "💾 Lưu server.properties").clicked() {
-            app.save_server_properties_edits();
-        }
-    });
+fn render_tab_properties(app: &mut LauncherAppState, ui: &mut egui::Ui, srv: &ManagedServer) {
+    if app.servers.edit_draft.loaded_for_id != srv.id {
+        app.sync_server_edit_draft();
+    }
 
-    ui.separator();
-
-    let keys: Vec<String> = app.servers.properties_map.keys().cloned().collect();
     ScrollArea::vertical()
-        .id_salt("server_properties_scroll")
+        .id_salt("server_properties_outer_scroll")
         .show(ui, |ui| {
-            egui::Grid::new("server_properties_grid")
-                .num_columns(2)
-                .spacing([16.0, 6.0])
-                .striped(true)
+            Frame::group(ui.style())
+                .inner_margin(Margin::same(12))
                 .show(ui, |ui| {
-                    for key in keys {
-                        ui.label(RichText::new(&key).monospace().size(12.5));
-                        if let Some(val) = app.servers.properties_map.get_mut(&key) {
+                    ui.label(
+                        RichText::new(app.i18n.tr(
+                            "Cấu hình Phần cứng, Cổng & Tham số JVM Máy chủ",
+                            "Server Hardware, Port & JVM Arguments",
+                        ))
+                        .size(14.5)
+                        .strong(),
+                    );
+                    ui.add_space(6.0);
+
+                    egui::Grid::new("server_hw_edit_grid")
+                        .num_columns(2)
+                        .spacing([14.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label(app.i18n.tr("Tên máy chủ:", "Server Name:"));
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut app.servers.edit_draft.name)
+                                        .desired_width(240.0),
+                                );
+                                ui.label("Port:");
+                                ui.add(
+                                    egui::DragValue::new(&mut app.servers.edit_draft.port)
+                                        .range(1024..=65535),
+                                );
+                            });
+                            ui.end_row();
+
+                            ui.label(app.i18n.tr("RAM tối thiểu / tối đa:", "Min / Max RAM:"));
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut app.servers.edit_draft.ram_min_mb,
+                                        512..=16384,
+                                    )
+                                    .step_by(256.0)
+                                    .suffix(" MB"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut app.servers.edit_draft.ram_max_mb,
+                                        1024..=32768,
+                                    )
+                                    .step_by(512.0)
+                                    .suffix(" MB"),
+                                );
+                            });
+                            ui.end_row();
+
+                            ui.label(app.i18n.t("profile.java_path"));
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(
+                                        &mut app.servers.edit_draft.java_path_str,
+                                    )
+                                    .hint_text(app.i18n.tr(
+                                        "Mặc định tự động chọn Java phù hợp",
+                                        "Auto-select compatible Java runtime",
+                                    ))
+                                    .desired_width(260.0),
+                                );
+                                if ui.button(app.i18n.tr("Chọn...", "Browse...")).clicked() {
+                                    if let Some(f) = rfd::FileDialog::new().pick_file() {
+                                        app.servers.edit_draft.java_path_str =
+                                            f.to_string_lossy().to_string();
+                                    }
+                                }
+                                if !app.servers.edit_draft.java_path_str.is_empty()
+                                    && ui.button(app.i18n.tr("Mặc định", "Auto")).clicked()
+                                {
+                                    app.servers.edit_draft.java_path_str.clear();
+                                }
+                            });
+                            ui.end_row();
+
+                            ui.label(app.i18n.t("profile.jvm_args"));
                             ui.add(
-                                egui::TextEdit::singleline(val)
-                                    .desired_width(320.0),
+                                egui::TextEdit::singleline(&mut app.servers.edit_draft.jvm_flags)
+                                    .hint_text("-XX:+UseG1GC -XX:+ParallelRefProcEnabled")
+                                    .desired_width(360.0),
                             );
-                        }
-                        ui.end_row();
+                            ui.end_row();
+                        });
+
+                    ui.add_space(8.0);
+                    if primary_button(
+                        ui,
+                        app.i18n.tr(
+                            "💾 Lưu cấu hình Phần cứng & JVM",
+                            "💾 Save Hardware & JVM Settings",
+                        ),
+                    )
+                    .clicked()
+                    {
+                        app.save_server_config_edits();
                     }
+                });
+
+            ui.add_space(10.0);
+            Frame::group(ui.style())
+                .inner_margin(Margin::same(12))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("server.properties").size(14.5).strong());
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(app.i18n.tr("Thêm khoá:", "Add key:")).strong());
+                        ui.add(
+                            egui::TextEdit::singleline(&mut app.servers.new_prop_key)
+                                .hint_text("online-mode")
+                                .desired_width(160.0),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut app.servers.new_prop_val)
+                                .hint_text("false")
+                                .desired_width(160.0),
+                        );
+                        if primary_button(
+                            ui,
+                            app.i18n
+                                .tr("💾 Lưu server.properties", "💾 Save server.properties"),
+                        )
+                        .clicked()
+                        {
+                            app.save_server_properties_edits();
+                        }
+                    });
+
+                    ui.separator();
+
+                    let keys: Vec<String> = app.servers.properties_map.keys().cloned().collect();
+                    egui::Grid::new("server_properties_grid")
+                        .num_columns(2)
+                        .spacing([16.0, 6.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for key in keys {
+                                ui.label(RichText::new(&key).monospace().size(12.5));
+                                if let Some(val) = app.servers.properties_map.get_mut(&key) {
+                                    ui.add(
+                                        egui::TextEdit::singleline(val).desired_width(320.0),
+                                    );
+                                }
+                                ui.end_row();
+                            }
+                        });
                 });
         });
 }

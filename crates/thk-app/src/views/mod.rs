@@ -17,11 +17,29 @@ pub fn render_root_ui(
     render_left_nav_rail(app, ui);
     render_bottom_status_bar(app, ui);
 
+    let bg_tex_id = app.custom_bg_tex.as_ref().map(|(_, tex)| tex.id());
+    let central_frame = if bg_tex_id.is_some() {
+        let scrim = match app.settings.theme {
+            thk_core::models::ThemeMode::Dark => Color32::from_rgba_unmultiplied(11, 15, 23, 212),
+            thk_core::models::ThemeMode::Light => {
+                Color32::from_rgba_unmultiplied(245, 247, 250, 218)
+            }
+        };
+        Frame::central_panel(ui.style())
+            .fill(scrim)
+            .inner_margin(Margin::symmetric(18, 14))
+    } else {
+        Frame::central_panel(ui.style()).inner_margin(Margin::symmetric(18, 14))
+    };
+
+    if let Some(tex_id) = bg_tex_id {
+        let avail = ui.available_rect_before_wrap();
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        ui.painter().image(tex_id, avail, uv, Color32::WHITE);
+    }
+
     egui::CentralPanel::default()
-        .frame(
-            Frame::central_panel(ui.style())
-                .inner_margin(Margin::symmetric(18, 14)),
-        )
+        .frame(central_frame)
         .show(ui, |ui| match app.section {
             ActiveSection::Home => home::render_home_view(app, ui),
             ActiveSection::Modpacks => modpacks::render_modpacks_view(app, ui),
@@ -119,7 +137,12 @@ fn render_left_nav_rail(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                 ui.add_space(16.0);
                 ui.separator();
                 ui.add_space(8.0);
-                ui.label(RichText::new("CÔNG CỤ HỆ THỐNG").size(10.5).weak().strong());
+                ui.label(
+                    RichText::new(app.i18n.tr("CÔNG CỤ HỆ THỐNG", "SYSTEM TOOLS"))
+                        .size(10.5)
+                        .weak()
+                        .strong(),
+                );
                 ui.add_space(4.0);
 
                 let java_label = format!("☕  {}", app.i18n.t("nav.java"));
@@ -165,9 +188,10 @@ fn render_left_nav_rail(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                             .weak(),
                     );
                     if let Some(acct) = app.selected_account() {
+                        let prefix = app.i18n.tr("Đang chọn", "Active");
                         ui.label(
                             RichText::new(format!(
-                                "Đang chọn: {} ({})",
+                                "{prefix}: {} ({})",
                                 acct.username,
                                 acct.account_type.as_str()
                             ))
@@ -175,7 +199,11 @@ fn render_left_nav_rail(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                             .color(ACCENT_EMERALD),
                         );
                     } else {
-                        ui.label(RichText::new("Chưa chọn tài khoản").size(11.5).weak());
+                        ui.label(
+                            RichText::new(app.i18n.tr("Chưa chọn tài khoản", "No account selected"))
+                                .size(11.5)
+                                .weak(),
+                        );
                     }
                 });
             });

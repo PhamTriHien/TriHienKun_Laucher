@@ -50,19 +50,35 @@ pub fn render_modpacks_view(app: &mut LauncherAppState, ui: &mut egui::Ui) {
 
         egui::ComboBox::from_id_salt("modpack_sort_combo")
             .selected_text(match app.modpacks.sort {
-                SearchSort::Downloads => "Lượt tải cao nhất",
-                SearchSort::Relevance => "Độ liên quan",
-                SearchSort::Updated => "Mới cập nhật",
-                SearchSort::Newest => "Mới phát hành",
+                SearchSort::Downloads => app.i18n.tr("Lượt tải cao nhất", "Most Downloads"),
+                SearchSort::Relevance => app.i18n.tr("Độ liên quan", "Relevance"),
+                SearchSort::Updated => app.i18n.tr("Mới cập nhật", "Recently Updated"),
+                SearchSort::Newest => app.i18n.tr("Mới phát hành", "Newest"),
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut app.modpacks.sort, SearchSort::Downloads, "Lượt tải cao nhất");
-                ui.selectable_value(&mut app.modpacks.sort, SearchSort::Relevance, "Độ liên quan");
-                ui.selectable_value(&mut app.modpacks.sort, SearchSort::Updated, "Mới cập nhật");
-                ui.selectable_value(&mut app.modpacks.sort, SearchSort::Newest, "Mới phát hành");
+                ui.selectable_value(
+                    &mut app.modpacks.sort,
+                    SearchSort::Downloads,
+                    app.i18n.tr("Lượt tải cao nhất", "Most Downloads"),
+                );
+                ui.selectable_value(
+                    &mut app.modpacks.sort,
+                    SearchSort::Relevance,
+                    app.i18n.tr("Độ liên quan", "Relevance"),
+                );
+                ui.selectable_value(
+                    &mut app.modpacks.sort,
+                    SearchSort::Updated,
+                    app.i18n.tr("Mới cập nhật", "Recently Updated"),
+                );
+                ui.selectable_value(
+                    &mut app.modpacks.sort,
+                    SearchSort::Newest,
+                    app.i18n.tr("Mới phát hành", "Newest"),
+                );
             });
 
-        if primary_button(ui, "🔍 Tìm kiếm").clicked() {
+        if primary_button(ui, app.i18n.tr("🔍 Tìm kiếm", "🔍 Search")).clicked() {
             app.search_modpacks();
         }
     });

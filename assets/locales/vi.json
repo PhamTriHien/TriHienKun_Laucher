@@ -66,7 +66,12 @@
   "settings.close_ask": "Luôn hỏi xác nhận",
   "settings.close_tray": "Thu nhỏ xuống khay hệ thống",
   "settings.close_quit": "Thoát hoàn toàn ứng dụng",
+  "settings.close_ask_title": "Đóng cửa sổ TriHienKun Laucher?",
+  "settings.close_ask_desc": "Bạn muốn thu nhỏ xuống khay hệ thống (giữ game/máy chủ tiếp tục chạy nền) hay thoát hoàn toàn?",
+  "settings.remember_choice": "Ghi nhớ lựa chọn này cho những lần sau",
+  "settings.custom_bg": "Ảnh nền tuỳ chỉnh",
   "settings.discord_rpc": "Hiển thị trạng thái trên Discord (Rich Presence)",
   "settings.sfx": "Âm thanh hiệu ứng giao diện",
-  "settings.check_update": "Kiểm tra bản cập nhật mới"
+  "settings.check_update": "Kiểm tra bản cập nhật mới",
+  "common.cancel": "Huỷ"
 }

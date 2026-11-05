@@ -56,4 +56,27 @@ impl I18n {
         }
         base
     }
+
+    pub fn tr<'a>(&self, vi: &'a str, en: &'a str) -> &'a str {
+        match self.current {
+            Language::Vi => vi,
+            Language::En => en,
+        }
+    }
+
+    pub fn mismatched_keys(&self) -> Vec<String> {
+        let mut diff = Vec::new();
+        for k in self.vi.keys() {
+            if !self.en.contains_key(k) {
+                diff.push(format!("missing_in_en:{k}"));
+            }
+        }
+        for k in self.en.keys() {
+            if !self.vi.contains_key(k) {
+                diff.push(format!("missing_in_vi:{k}"));
+            }
+        }
+        diff.sort();
+        diff
+    }
 }

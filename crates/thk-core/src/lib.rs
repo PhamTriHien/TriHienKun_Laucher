@@ -114,9 +114,23 @@ mod tests {
     fn i18n_keys_synchronized() {
         let vi = I18n::new(Language::Vi);
         let en = I18n::new(Language::En);
+        assert!(
+            vi.mismatched_keys().is_empty(),
+            "Locale key mismatch: {:?}",
+            vi.mismatched_keys()
+        );
         assert_eq!(vi.t("app.name"), "TriHienKun Laucher");
         assert_eq!(en.t("app.name"), "TriHienKun Laucher");
-        assert_ne!(vi.t("home.play"), "home.play");
-        assert_ne!(en.t("home.play"), "home.play");
+        for key in [
+            "home.play",
+            "settings.close_ask_title",
+            "settings.close_ask_desc",
+            "settings.remember_choice",
+            "settings.custom_bg",
+            "common.cancel",
+        ] {
+            assert_ne!(vi.t(key), key);
+            assert_ne!(en.t(key), key);
+        }
     }
 }

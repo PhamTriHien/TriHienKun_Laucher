@@ -1,83 +1,109 @@
 # TriHienKun Laucher
 
-**TriHienKun Laucher** là trình khởi chạy và quản trị hệ sinh thái Minecraft Desktop độc lập 100% viết thuần bằng **Rust** (`eframe` / `egui 0.37` + `wgpu 30` + `tokio` + `rusqlite`), không phụ thuộc Electron, WebView hay máy chủ trung gian đóng kín.
+**TriHienKun Laucher** là trình khởi chạy và quản trị hệ sinh thái Minecraft Desktop độc lập 100% viết thuần bằng **Rust** (`eframe` / `egui 0.37` + `wgpu 30` + `tokio` + `rusqlite`), biên dịch trực tiếp ra một tệp thực thi gốc duy nhất và không phụ thuộc Electron, Node.js, WebView hay máy chủ trung gian đóng kín.
 
 ---
 
-## Tính năng cốt lõi
+## Điểm Nổi Bật Cốt Lõi
 
-- **100% Native Rust & GPU `wgpu` 30**: Giao diện phản hồi tức thì, tiêu thụ RAM tối thiểu, tích hợp bộ kết xuất mô hình nhân vật 3D (Wide / Slim, Outer Overlay Layer, Áo choàng Cape, Cánh Elytra uốn động, đi bộ và xoay quỹ đạo 360°) bằng WGSL shader trực tiếp trên phần cứng GPU.
+- **100% Native Rust & Đồ Họa GPU `wgpu 30.0.1`**:
+  - Khởi động tức thì, toàn bộ 9 crates tuân thủ nghiêm ngặt `#![deny(unsafe_code)]`.
+  - Tích hợp khung xem mô hình nhân vật 3D thời gian thực bằng WGSL shader: hỗ trợ khung xương `Wide (4px)` / `Slim (3px)`, lớp giáp ngoài (`Outer Overlay`), áo choàng `Cape`, cánh `Elytra`, hoạt ảnh bước đi và xoay quỹ đạo 360°.
 - **Đa Profile & Chạy Song Song Nhiều Phiên Bản (`InstanceSupervisor`)**:
-  - Hỗ trợ đầy đủ **5 Mod Loaders**: `Vanilla`, `Fabric` (tự động cài đặt gói tối ưu FPS: Sodium, Lithium, FerriteCore, EntityCulling, ModMenu), `Quilt`, `Forge` (kể cả `ForgeWrapper` cho các bản 1.13+) và `NeoForge`.
-  - Hỗ trợ khởi chạy đồng thời nhiều tài khoản / Profile, QuickPlay vào thẳng máy chủ, lưu thống kê thời lượng chơi 14 ngày gần nhất vào SQLite (chế độ WAL).
-- **Xác Thực Tài Khoản & Máy Chủ Skin Yggdrasil Cục Bộ**:
-  - **Microsoft OAuth2**: Hỗ trợ đăng nhập bằng Mã Thiết Bị (`microsoft.com/link`), Desktop Redirect PKCE và Loopback PKCE tuỳ chỉnh; chuỗi xác thực trực tiếp `Xbox Live -> XSTS -> Minecraft Services`; lưu khóa làm mới an toàn trong **OS Keychain** (`Windows Credential Manager` / `macOS Keychain` / `Secret Service`).
-  - **Offline + Custom Skin/Cape/Elytra**: Tạo UUID v3 chuẩn `OfflinePlayer:` và tự động khởi chạy máy chủ HTTP Yggdrasil cục bộ (`axum` trên `127.0.0.1:0` kèm `authlib-injector`) để hiển thị đầy đủ Skin, Cape và Elytra trong game.
-- **Quản Lý Java Đa Phân Phối Tự Động (`thk-java`)**:
-  - Tự động phát hiện và tải Mojang JRE chính thức theo từng phiên bản Minecraft (từ 1.7.10 đến 1.21.x / 26.x).
-  - Trình cài đặt thủ công các bản `Java 8 / 11 / 17 / 21 / 25` từ **Eclipse Temurin (Adoptium)**, **Azul Zulu** và **GraalVM Community**.
-- **Kho Nội Dung 4 Nền Tảng + Cài Đặt Phụ Thuộc Đệ Quy (`thk-mods`)**:
-  - Duyệt, tìm kiếm và cài đặt trực tiếp Modpack, Mod, Shader, ResourcePack và Plugin từ **Modrinth**, **CurseForge**, **FTB Modpacks**, **Technic Platform (+ Solder)** và **Spiget**.
-  - Nhập/xuất trực tiếp gói `.mrpack` và CurseForge `.zip` từ ổ cứng; tự động đối chiếu băm `SHA-1` với Modrinth cho các tệp `.jar` chép tay.
+  - Hỗ trợ trọn vẹn **5 Mod Loaders**: `Vanilla`, `Fabric` (tự động cài gói tối ưu FPS: *Sodium, Lithium, FerriteCore, EntityCulling, ModMenu*), `Quilt`, `Forge` (tích hợp `ForgeWrapper` cho `1.13+`) và `NeoForge`.
+  - Cho phép chọn thư mục lưu trữ tùy chỉnh cho từng Profile, chạy đồng thời nhiều tài khoản/phiên bản, vào thẳng máy chủ qua `QuickPlay` và thống kê biểu đồ giờ chơi 14 ngày gần nhất trên **SQLite WAL**.
+- **Xác Thực Tài Khoản An Toàn & Máy Chủ Skin Yggdrasil Cục Bộ**:
+  - **Microsoft OAuth2**: Hỗ trợ đăng nhập bằng Mã Thiết Bị (`microsoft.com/link`), Desktop Redirect PKCE `S256` và Loopback PKCE tùy chỉnh; lưu trữ khóa làm mới mã hóa trong **OS Keyring** (`Windows Credential Manager` / `macOS Keychain` / `Linux Secret Service`).
+  - **Offline + Custom Skin / Cape / Elytra**: Tạo Offline UUID v3 chuẩn `OfflinePlayer:` và tự động khởi chạy máy chủ HTTP Yggdrasil cục bộ (`axum` trên `127.0.0.1:0` kèm `authlib-injector`) để hiển thị đầy đủ ngoại hình trong game.
+- **Quản Lý & Tải Tự Động Đa Phân Phối Java (`thk-java`)**:
+  - Tự động phát hiện và tải Mojang JRE chính thức theo từng thế hệ Minecraft (`Java 8 / 17 / 21 / 25`, hỗ trợ từ `1.7.10` đến `1.21.x` và `26.x`).
+  - Trình quản lý tải thủ công các bản JRE/JDK từ **Eclipse Temurin (Adoptium)**, **Azul Zulu** và **GraalVM Community**.
+- **Kho Nội Dung 5 Nguồn + Phân Giải Phụ Thuộc Đệ Quy (`thk-mods`)**:
+  - Tìm kiếm và cài đặt trực tiếp Modpack, Mod, Shader, ResourcePack và Plugin từ **Modrinth**, **CurseForge**, **FTB Modpacks**, **Technic Platform (+ Solder)** và **Spiget**.
+  - Nhập trực tiếp gói `.mrpack` và CurseForge `.zip` từ ổ cứng; tự động nhận diện các tệp `.jar` chép tay thông qua đối chiếu băm `SHA-1` trên Modrinth.
 - **Trình Quản Trị Máy Chủ Minecraft Chuyên Dụng (`thk-server`)**:
   - Cài đặt tự động **10 lõi máy chủ**: `Paper`, `Purpur`, `Folia`, `Vanilla`, `Fabric`, `Forge`, `NeoForge`, `Arclight`, `Mohist`, `SpongeVanilla`.
-  - Bảng điều khiển trực tiếp có gợi ý lệnh bằng phím `Tab`, biểu đồ tài nguyên thực `CPU % / RAM MB / Số người chơi / Uptime`, trình quản lý tệp chống thoát thư mục (`SafePath`), trình sửa mã tích hợp, chỉnh sửa `server.properties`, `Whitelist` và `Banned Players`.
-- **Mạng An Toàn, Ping Máy Chủ & Đường Hầm TCP Bore (`thk-network`)**:
-  - Giao thức Minecraft Server List Ping (hỗ trợ bản ghi DNS `SRV` qua `hickory-resolver` và phân tích màu MOTD).
-  - Quét thế giới `Open to LAN` qua UDP Multicast `224.0.2.60:4445` có xác minh địa chỉ IP card mạng nội bộ (chặn gói quảng bá giả mạo từ máy khác) kết hợp client `bore-cli` nhúng thuần Rust mở địa chỉ công khai qua `bore.pub`.
-- **Chẩn Đoán Crash & Tự Khắc Phục 1 Chạm**: Phân tích nhật ký lỗi JVM/Fabric/Forge/NeoForge và tự động tải Mod phụ thuộc còn thiếu từ Modrinth.
-- **Tiện Ích Hệ Thống**: Discord Rich Presence, Khay hệ thống (System Tray), Hiệu ứng âm thanh tổng hợp thời gian thực (`rodio`), Đa ngôn ngữ Việt / Anh, và Trình cập nhật tự động xác thực băm `SHA-256`.
+  - Bảng điều khiển trực tiếp hỗ trợ gợi ý lệnh bằng phím `Tab`, đo `CPU % / RAM MB / Số người chơi / Uptime` thực tế, cấu hình phần cứng & JVM sau khi tạo, trình quản lý tệp chống thoát thư mục (`SafePath`), trình sửa mã tích hợp, chỉnh sửa `server.properties`, `Whitelist` và `Banned Players`.
+- **Mạng An Toàn, Ping Máy Chủ & Đường Hầm TCP Bore Nhúng (`thk-network`)**:
+  - Giao thức Minecraft Server List Ping có phân giải bản ghi DNS `SRV` (`hickory-resolver`) và hiển thị màu MOTD.
+  - Quét thế giới `Open to LAN` qua UDP Multicast `224.0.2.60:4445` có xác minh địa chỉ IP card mạng nội bộ (chặn gói quảng bá giả mạo từ máy khác) kết hợp thư viện `bore-cli` nhúng thuần Rust mở cổng công khai qua `bore.pub`.
+- **Cá Nhân Hóa & Tiện Ích Hệ Thống**:
+  - Chẩn đoán sự cố `CrashAnalyzer` kèm nút tự tải Mod thiếu 1 chạm từ Modrinth.
+  - Tùy chỉnh ảnh nền giao diện (`PNG / JPG / WEBP`), âm thanh giao diện tổng hợp + nhạc nền riêng (`MP3 / OGG / WAV` qua `rodio`), điều chỉnh động số luồng tải song song (`2–32` luồng), Discord Rich Presence, Khay hệ thống (`System Tray`), Đa ngôn ngữ Việt / Anh và Trình cập nhật xác thực băm `SHA-256`.
 
 ---
 
-## Kiến trúc Cargo Workspace
+## Cấu Trúc Kho Mã Nguồn
 
-| Crate | Vai trò |
-| :--- | :--- |
-| `crates/thk-core` | Đường dẫn chuẩn `.TriHienKunLaucher`, bảo vệ đường dẫn `SafePath`, kho lưu trữ SQLite WAL, trình tải song song xác thực `SHA-1`/`SHA-256`/`SHA-512`, nén/giải nén an toàn chống Zip-Slip và đa ngôn ngữ `vi`/`en`. |
-| `crates/thk-auth` | Luồng đăng nhập Microsoft OAuth2/Xbox/MC, lưu trữ OS Keyring, Offline UUID v3 và máy chủ Yggdrasil cục bộ (`axum` + `authlib-injector`). |
-| `crates/thk-java` | Dò tìm Java hệ thống, tải Mojang JRE theo manifest và trình cài đặt Adoptium / Azul Zulu / GraalVM. |
-| `crates/thk-mods` | Client API thống nhất cho Modrinth, CurseForge, FTB, Technic/Solder, Spiget và quản lý Mod/Shader/ResourcePack/World cục bộ. |
-| `crates/thk-launcher` | Trình hợp nhất đối số khởi chạy Vanilla + 5 Mod Loaders, giám sát đa tiến trình `InstanceSupervisor` và bộ phân tích `CrashAnalyzer`. |
-| `crates/thk-server` | Trình cài đặt 10 lõi máy chủ, giám sát tài nguyên `LocalServerSupervisor`, cấu hình `server.properties`/Whitelist/Banlist và quản lý tệp máy chủ. |
-| `crates/thk-network` | Minecraft TCP Ping + DNS SRV, bộ quét LAN Multicast an toàn, đường hầm TCP `bore` nhúng và dịch vụ Discord RPC. |
-| `crates/thk-renderer3d` | Đường ống đồ họa WGSL `wgpu` 30 hiển thị mô hình nhân vật Minecraft 3D hai lớp kèm Cape & Elytra. |
-| `crates/thk-app` | Ứng dụng Desktop `trihienkun-laucher` kết nối toàn bộ dịch vụ bất đồng bộ `tokio` với giao diện `eframe` / `egui`, âm thanh `rodio`, khay hệ thống và bộ cập nhật `SHA-256`. |
+```text
+trihienkun-laucher/
+├── Cargo.toml                  # Cấu hình Cargo Workspace (9 crates, LTO Release)
+├── assets/
+│   ├── icons/                  # Biểu tượng thương hiệu (icon.png, icon.ico)
+│   └── locales/                # Từ điển đa ngôn ngữ đồng bộ (vi.json, en.json)
+├── crates/
+│   ├── thk-core/               # AppPaths, SafePath, SQLite WAL, DownloadManager, Archive, I18n
+│   ├── thk-auth/               # Microsoft OAuth2 PKCE, OS Keyring, Offline UUID v3, Local Yggdrasil
+│   ├── thk-java/               # Trình quét Java hệ thống, Mojang JRE, Adoptium / Zulu / GraalVM
+│   ├── thk-mods/               # Modrinth, CurseForge, FTB, Technic/Solder, Spiget & đồng bộ cục bộ
+│   ├── thk-launcher/           # Vanilla + 5 Mod Loaders, InstanceSupervisor, CrashAnalyzer
+│   ├── thk-server/             # 10 lõi máy chủ, LocalServerSupervisor, Quản lý tệp & cấu hình
+│   ├── thk-network/            # Minecraft Ping + DNS SRV, LAN Multicast an toàn, Bore, Discord RPC
+│   ├── thk-renderer3d/         # Đường ống đồ họa WGSL wgpu 30 hiển thị nhân vật 3D + Cape/Elytra
+│   └── thk-app/                # Ứng dụng Desktop eframe/egui, âm thanh rodio, Tray & SHA-256 Updater
+├── docs/
+│   ├── ARCHITECTURE.md         # Kiến trúc chi tiết, sơ đồ phụ thuộc & luồng khởi chạy
+│   ├── DATABASE_SCHEMA.md      # Lược đồ 7 bảng SQLite WAL, AppPaths & OS Keyring
+│   ├── SECURITY.md             # Mô hình bảo mật & bảng đối chiếu các lớp phòng thủ
+│   └── USER_GUIDE.md           # Hướng dẫn sử dụng từng tính năng từ cơ bản đến nâng cao
+├── CONTRIBUTING.md             # Quy chuẩn phát triển, kiểm thử và phát hành CI/CD
+└── .github/workflows/
+    └── release.yml             # Pipeline kiểm thử & đóng gói đa nền tảng kèm SHA256SUMS.txt
+```
 
 ---
 
-## Yêu cầu & Hướng dẫn Biên dịch
+## Tài Liệu Dự Án Chi Tiết
+
+- [Kiến trúc Hệ thống & Luồng vận hành (`docs/ARCHITECTURE.md`)](docs/ARCHITECTURE.md)
+- [Đặc tả Cơ sở dữ liệu SQLite WAL, Thư mục & Keyring (`docs/DATABASE_SCHEMA.md`)](docs/DATABASE_SCHEMA.md)
+- [Mô hình Bảo mật & Kiểm soát An toàn (`docs/SECURITY.md`)](docs/SECURITY.md)
+- [Hướng dẫn Sử dụng Toàn diện (`docs/USER_GUIDE.md`)](docs/USER_GUIDE.md)
+- [Hướng dẫn Đóng góp & Quy trình CI/CD (`CONTRIBUTING.md`)](CONTRIBUTING.md)
+
+---
+
+## Hướng Dẫn Biên Dịch & Kiểm Thử Nhanh
 
 ### Yêu cầu môi trường
-- **Rust Toolchain**: `1.85+` (`stable`, `msvc` trên Windows).
-- **Linux** (nếu biên dịch trên Ubuntu/Debian):
+- **Rust**: `1.85+` (`stable`, `msvc` trên Windows).
+- **Linux (Ubuntu/Debian)**:
   ```bash
   sudo apt-get install -y pkg-config libasound2-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
   ```
 
-### Kiểm thử, Kiểm tra tĩnh & Đóng gói
+### Kiểm thử, Phân tích Tĩnh & Đóng gói Release
 ```bash
-# Chạy toàn bộ bộ kiểm thử đơn vị (Unit Tests) trên cả 9 crates
+# Chạy trọn bộ 26 bài kiểm thử đơn vị trên toàn bộ 9 crates
 cargo test --workspace
 
 # Kiểm tra chất lượng mã nguồn nghiêm ngặt với Clippy (0 cảnh báo)
 cargo clippy --workspace --all-targets -- -D warnings
 
-# Biên dịch bản thực thi tối ưu hóa Release
+# Biên dịch tệp thực thi tối ưu hóa Release
 cargo build --release -p thk-app
 ```
 
-Tệp thực thi sau khi biên dịch nằm tại:
-- **Windows**: `target/release/trihienkun-laucher.exe`
-- **Linux / macOS**: `target/release/trihienkun-laucher`
-
-Dữ liệu người dùng, cơ sở dữ liệu SQLite, các Profile, Máy chủ cục bộ và Java Runtime được lưu trữ độc lập tại:
-- **Windows**: `%APPDATA%\.TriHienKunLaucher`
-- **macOS**: `~/Library/Application Support/TriHienKunLaucher`
-- **Linux**: `~/.local/share/TriHienKunLaucher`
+- **Tệp thực thi sau biên dịch**:
+  - Windows: `target/release/trihienkun-laucher.exe`
+  - Linux / macOS: `target/release/trihienkun-laucher`
+- **Thư mục lưu trữ dữ liệu người dùng (`AppPaths::resolve_default`)**:
+  - Windows: `%APPDATA%\.TriHienKunLaucher`
+  - macOS: `~/Library/Application Support/.TriHienKunLaucher`
+  - Linux: `~/.config/.TriHienKunLaucher` (hoặc `$XDG_CONFIG_HOME/.TriHienKunLaucher`)
 
 ---
 
-## Giấy phép
+## Giấy Phép
 
 Phát hành theo giấy phép **MIT License**.

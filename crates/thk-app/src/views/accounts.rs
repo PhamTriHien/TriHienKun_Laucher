@@ -23,11 +23,18 @@ pub fn render_accounts_view(
             bottom: 0,
         }))
         .show(ui, |ui| {
-            ui.heading(RichText::new("Mô hình Nhân vật 3D (wgpu)").size(17.5).strong());
+            ui.heading(
+                RichText::new(app.i18n.tr("Mô hình Nhân vật 3D (wgpu)", "3D Character Preview (wgpu)"))
+                    .size(17.5)
+                    .strong(),
+            );
             ui.label(
-                RichText::new("Kéo chuột để xoay 360° • Cuộn để thu phóng • Nhấp đúp để đặt lại góc nhìn")
-                    .size(11.5)
-                    .weak(),
+                RichText::new(app.i18n.tr(
+                    "Kéo chuột để xoay 360° • Cuộn để thu phóng • Nhấp đúp để đặt lại góc nhìn",
+                    "Drag to orbit 360° • Scroll to zoom • Double-click to reset camera",
+                ))
+                .size(11.5)
+                .weak(),
             );
             ui.add_space(6.0);
 
@@ -116,7 +123,7 @@ pub fn render_accounts_view(
     ScrollArea::vertical()
         .id_salt("accounts_left_scroll")
         .show(ui, |ui| {
-            ui.heading(RichText::new("Quản lý Tài khoản").size(20.0).strong());
+            ui.heading(RichText::new(app.i18n.t("nav.accounts")).size(20.0).strong());
             ui.add_space(8.0);
 
             Frame::group(ui.style())

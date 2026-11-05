@@ -240,7 +240,7 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Bộ nhớ RAM cấp phát:").strong());
+                ui.label(RichText::new(app.i18n.t("profile.ram")).strong());
                 ui.add(
                     egui::Slider::new(&mut app.home.new_draft.ram_mb, 1024..=16384)
                         .step_by(512.0)
@@ -248,12 +248,42 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                 );
             });
 
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(app.i18n.tr("Thư mục lưu trữ:", "Instance Folder:")).strong());
+                let dir_label = app
+                    .home
+                    .new_draft
+                    .custom_dir
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| {
+                        app.i18n
+                            .tr("Mặc định (instances/)", "Default (instances/)")
+                            .to_string()
+                    });
+                ui.label(RichText::new(dir_label).size(11.5).weak());
+                if ui
+                    .button(app.i18n.tr("📂 Chọn thư mục...", "📂 Choose Folder..."))
+                    .clicked()
+                {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        app.home.new_draft.custom_dir = Some(folder);
+                    }
+                }
+                if app.home.new_draft.custom_dir.is_some()
+                    && ui.button(app.i18n.tr("Mặc định", "Reset")).clicked()
+                {
+                    app.home.new_draft.custom_dir = None;
+                }
+            });
+
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if primary_button(ui, "✔ Tạo Profile").clicked() {
+                if primary_button(ui, format!("✔ {}", app.i18n.t("home.new_profile"))).clicked() {
                     app.create_profile_from_draft();
                 }
-                if ui.button("Huỷ").clicked() {
+                if ui.button(app.i18n.t("common.cancel")).clicked() {
                     app.show_new_profile_modal = false;
                 }
             });
@@ -357,15 +387,48 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
 
             ui.checkbox(
                 &mut app.servers.new_draft.install_immediately,
-                "Tự động tải lõi JAR và chuẩn bị môi trường ngay sau khi tạo",
+                app.i18n.tr(
+                    "Tự động tải lõi JAR và chuẩn bị môi trường ngay sau khi tạo",
+                    "Automatically download server JAR and initialize directory on creation",
+                ),
             );
+
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(app.i18n.tr("Thư mục máy chủ:", "Server Folder:")).strong());
+                let dir_label = app
+                    .servers
+                    .new_draft
+                    .custom_dir
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| {
+                        app.i18n
+                            .tr("Mặc định (servers/)", "Default (servers/)")
+                            .to_string()
+                    });
+                ui.label(RichText::new(dir_label).size(11.5).weak());
+                if ui
+                    .button(app.i18n.tr("📂 Chọn thư mục...", "📂 Choose Folder..."))
+                    .clicked()
+                {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        app.servers.new_draft.custom_dir = Some(folder);
+                    }
+                }
+                if app.servers.new_draft.custom_dir.is_some()
+                    && ui.button(app.i18n.tr("Mặc định", "Reset")).clicked()
+                {
+                    app.servers.new_draft.custom_dir = None;
+                }
+            });
 
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if primary_button(ui, "✔ Tạo Máy chủ").clicked() {
+                if primary_button(ui, format!("✔ {}", app.i18n.t("server.create"))).clicked() {
                     app.create_server_from_draft();
                 }
-                if ui.button("Huỷ").clicked() {
+                if ui.button(app.i18n.t("common.cancel")).clicked() {
                     app.show_new_server_modal = false;
                 }
             });
@@ -817,9 +880,34 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                     .selectable_value(
                                         &mut app.settings.close_behavior,
                                         CloseBehavior::Quit,
-                                        "Thoát hẳn",
+                                        app.i18n.t("settings.close_quit"),
                                     )
                                     .changed();
+                            });
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(format!("{}:", app.i18n.t("settings.custom_bg")));
+                                let bg_status = app
+                                    .settings
+                                    .custom_background_path
+                                    .as_ref()
+                                    .and_then(|p| p.file_name())
+                                    .map(|f| f.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| {
+                                        app.i18n.tr("Mặc định", "Default").to_string()
+                                    });
+                                badge(ui, &bg_status, ACCENT_BLUE);
+                                if ui
+                                    .button(app.i18n.tr("🖼 Chọn ảnh...", "🖼 Choose Image..."))
+                                    .clicked()
+                                {
+                                    app.pick_custom_background();
+                                }
+                                if app.settings.custom_background_path.is_some()
+                                    && ui.button(app.i18n.tr("Xoá ảnh nền", "Clear")).clicked()
+                                {
+                                    app.clear_custom_background();
+                                }
                             });
                         });
 
@@ -857,11 +945,24 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                     .changed();
                             });
                             if app.settings.music_enabled {
-                                ui.horizontal(|ui| {
-                                    ui.label("Âm lượng nhạc nền:");
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(app.i18n.tr("Âm lượng nhạc nền:", "Music Volume:"));
                                     changed |= ui
                                         .add(egui::Slider::new(&mut app.settings.music_volume, 0.05..=1.0))
                                         .changed();
+                                    if ui
+                                        .button(app.i18n.tr("🎵 Tệp nhạc riêng...", "🎵 Custom Audio..."))
+                                        .clicked()
+                                    {
+                                        app.pick_custom_music_file();
+                                    }
+                                    if app.has_custom_music_file()
+                                        && ui
+                                            .button(app.i18n.tr("Dùng Ambient gốc", "Default Synth"))
+                                            .clicked()
+                                    {
+                                        app.clear_custom_music_file();
+                                    }
                                 });
                             }
 
@@ -998,7 +1099,7 @@ fn render_close_confirm_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
         ui.add_space(8.0);
         ui.checkbox(
             &mut app.remember_close_choice,
-            "Ghi nhớ lựa chọn này cho những lần sau",
+            app.i18n.t("settings.remember_choice"),
         );
         ui.add_space(10.0);
 

@@ -177,6 +177,8 @@ pub enum AppAsyncEvent {
     },
     UpdateCheckCompleted(Result<Option<UpdateReleaseInfo>, String>),
     UpdateDownloaded(Result<PathBuf, String>),
+    CustomBackgroundSaved(PathBuf),
+    CustomMusicSaved,
 }
 
 pub struct NewProfileDraft {
@@ -186,6 +188,7 @@ pub struct NewProfileDraft {
     pub loader_version: String,
     pub ram_mb: u32,
     pub auto_perf_mods: bool,
+    pub custom_dir: Option<PathBuf>,
 }
 
 impl Default for NewProfileDraft {
@@ -197,6 +200,7 @@ impl Default for NewProfileDraft {
             loader_version: String::new(),
             ram_mb: 4096,
             auto_perf_mods: true,
+            custom_dir: None,
         }
     }
 }
@@ -317,6 +321,7 @@ pub struct NewServerDraft {
     pub ram_min_mb: u32,
     pub ram_max_mb: u32,
     pub install_immediately: bool,
+    pub custom_dir: Option<PathBuf>,
 }
 
 impl Default for NewServerDraft {
@@ -329,6 +334,31 @@ impl Default for NewServerDraft {
             ram_min_mb: 1024,
             ram_max_mb: 4096,
             install_immediately: true,
+            custom_dir: None,
+        }
+    }
+}
+
+pub struct ServerEditDraft {
+    pub loaded_for_id: String,
+    pub name: String,
+    pub port: u16,
+    pub ram_min_mb: u32,
+    pub ram_max_mb: u32,
+    pub java_path_str: String,
+    pub jvm_flags: String,
+}
+
+impl Default for ServerEditDraft {
+    fn default() -> Self {
+        Self {
+            loaded_for_id: String::new(),
+            name: String::new(),
+            port: 25565,
+            ram_min_mb: 1024,
+            ram_max_mb: 4096,
+            java_path_str: String::new(),
+            jvm_flags: String::new(),
         }
     }
 }
@@ -338,6 +368,7 @@ pub struct ServersViewState {
     pub selected_server_id: Option<String>,
     pub active_tab: ServerTab,
     pub new_draft: NewServerDraft,
+    pub edit_draft: ServerEditDraft,
     pub engine_versions: HashMap<ServerEngine, Vec<String>>,
     pub console_input: String,
     pub server_logs: HashMap<String, Vec<String>>,
@@ -371,6 +402,7 @@ impl Default for ServersViewState {
             selected_server_id: None,
             active_tab: ServerTab::Console,
             new_draft: NewServerDraft::default(),
+            edit_draft: ServerEditDraft::default(),
             engine_versions: HashMap::new(),
             console_input: String::new(),
             server_logs: HashMap::new(),
@@ -511,6 +543,7 @@ pub struct LauncherAppState {
     pub active_progress: Option<DownloadProgress>,
     pub busy_message: Option<String>,
     pub toasts: VecDeque<ToastMessage>,
+    pub custom_bg_tex: Option<(PathBuf, egui::TextureHandle)>,
 
     pub home: HomeViewState,
     pub modpacks: ModpacksViewState,
@@ -532,8 +565,13 @@ impl LauncherAppState {
         let settings = db.load_settings().unwrap_or_default();
         let i18n = I18n::new(settings.language);
         let downloader = DownloadManager::new().expect("HTTP DownloadManager init");
+        downloader.set_max_concurrency(settings.max_concurrent_downloads);
         let audio = AudioEngine::start();
-        audio.sync_music(settings.music_enabled, settings.music_volume, None);
+        audio.sync_music(
+            settings.music_enabled,
+            settings.music_volume,
+            resolve_custom_bgm_file(&paths),
+        );
 
         let discord_rpc = DiscordRpcService::start();
         if settings.discord_rpc_enabled {
@@ -627,6 +665,7 @@ impl LauncherAppState {
             active_progress: None,
             busy_message: None,
             toasts: VecDeque::new(),
+            custom_bg_tex: None,
             home: HomeViewState {
                 profiles,
                 selected_profile_id,
@@ -651,7 +690,9 @@ impl LauncherAppState {
         };
 
         app.home.new_draft.ram_mb = app.settings.default_ram_mb;
+        app.sync_custom_background_texture();
         app.sync_profile_edit_draft();
+        app.sync_server_edit_draft();
         app.refresh_mojang_versions();
         app.refresh_selected_profile_tabs();
         app.refresh_selected_server_tabs();
@@ -707,11 +748,14 @@ impl LauncherAppState {
 
     pub fn persist_settings(&mut self) {
         self.i18n.set_language(self.settings.language);
+        self.downloader
+            .set_max_concurrency(self.settings.max_concurrent_downloads);
         apply_theme(&self.egui_ctx, self.settings.theme);
+        self.sync_custom_background_texture();
         self.audio.sync_music(
             self.settings.music_enabled,
             self.settings.music_volume,
-            None,
+            resolve_custom_bgm_file(&self.paths),
         );
         if self.settings.discord_rpc_enabled {
             self.discord_rpc
@@ -720,6 +764,116 @@ impl LauncherAppState {
             self.discord_rpc.set_presence(None, DiscordPresenceState::Disabled);
         }
         let _ = self.db.save_settings(&self.settings);
+    }
+
+    pub fn sync_custom_background_texture(&mut self) {
+        let Some(ref bg_path) = self.settings.custom_background_path else {
+            self.custom_bg_tex = None;
+            return;
+        };
+        if self
+            .custom_bg_tex
+            .as_ref()
+            .is_some_and(|(loaded_p, _)| loaded_p == bg_path)
+        {
+            return;
+        }
+        let Ok(dyn_img) = image::open(bg_path) else {
+            self.custom_bg_tex = None;
+            return;
+        };
+        let rgba = dyn_img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        let color_img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
+        let tex = self.egui_ctx.load_texture(
+            "thk_custom_background",
+            color_img,
+            egui::TextureOptions::LINEAR,
+        );
+        self.custom_bg_tex = Some((bg_path.clone(), tex));
+    }
+
+    pub fn pick_custom_background(&mut self) {
+        let bg_dir = self.paths.backgrounds_dir.clone();
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        self.rt.spawn(async move {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title("Select Background Image (PNG / JPG / WEBP)")
+                .add_filter("Image", &["png", "jpg", "jpeg", "webp"])
+                .pick_file()
+                .await;
+            let Some(file) = picked else {
+                return;
+            };
+            let src = file.path().to_path_buf();
+            let ext = src
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase())
+                .filter(|s| matches!(s.as_str(), "png" | "jpg" | "jpeg" | "webp"))
+                .unwrap_or_else(|| "png".into());
+            let fname = format!("wallpaper.{ext}");
+            if let Ok(dest) = SafePath::resolve_child(&bg_dir, &fname) {
+                if tokio::fs::copy(&src, &dest).await.is_ok() {
+                    let _ = tx.send(AppAsyncEvent::CustomBackgroundSaved(dest));
+                    ctx.request_repaint();
+                }
+            }
+        });
+    }
+
+    pub fn clear_custom_background(&mut self) {
+        self.settings.custom_background_path = None;
+        self.custom_bg_tex = None;
+        self.persist_settings();
+    }
+
+    pub fn has_custom_music_file(&self) -> bool {
+        resolve_custom_bgm_file(&self.paths).is_some()
+    }
+
+    pub fn pick_custom_music_file(&mut self) {
+        let bg_dir = self.paths.backgrounds_dir.clone();
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        self.rt.spawn(async move {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title("Select Ambient Music (MP3 / OGG / WAV)")
+                .add_filter("Audio", &["mp3", "ogg", "wav"])
+                .pick_file()
+                .await;
+            let Some(file) = picked else {
+                return;
+            };
+            let src = file.path().to_path_buf();
+            let ext = src
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase())
+                .filter(|s| matches!(s.as_str(), "mp3" | "ogg" | "wav"))
+                .unwrap_or_else(|| "mp3".into());
+            for old_ext in ["mp3", "ogg", "wav"] {
+                if let Ok(old) = SafePath::resolve_child(&bg_dir, format!("custom_bgm.{old_ext}")) {
+                    let _ = tokio::fs::remove_file(old).await;
+                }
+            }
+            if let Ok(dest) = SafePath::resolve_child(&bg_dir, format!("custom_bgm.{ext}")) {
+                if tokio::fs::copy(&src, &dest).await.is_ok() {
+                    let _ = tx.send(AppAsyncEvent::CustomMusicSaved);
+                    ctx.request_repaint();
+                }
+            }
+        });
+    }
+
+    pub fn clear_custom_music_file(&mut self) {
+        for ext in ["mp3", "ogg", "wav"] {
+            if let Ok(p) = SafePath::resolve_child(&self.paths.backgrounds_dir, format!("custom_bgm.{ext}")) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        self.persist_settings();
     }
 
     pub fn selected_profile(&self) -> Option<&GameProfile> {
@@ -753,7 +907,73 @@ impl LauncherAppState {
         self.servers.selected_server_id = Some(server_id);
         self.servers.current_rel_dir.clear();
         self.servers.editing_file_rel = None;
+        self.sync_server_edit_draft();
         self.refresh_selected_server_tabs();
+    }
+
+    pub fn sync_server_edit_draft(&mut self) {
+        if let Some(s) = self.selected_server().cloned() {
+            self.servers.edit_draft = ServerEditDraft {
+                loaded_for_id: s.id,
+                name: s.name,
+                port: s.port,
+                ram_min_mb: s.ram_min_mb,
+                ram_max_mb: s.ram_max_mb,
+                java_path_str: s
+                    .java_path
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                jvm_flags: s.jvm_flags,
+            };
+        }
+    }
+
+    pub fn save_server_config_edits(&mut self) {
+        let Some(mut srv) = self.selected_server().cloned() else {
+            return;
+        };
+        if self.servers.edit_draft.name.trim().is_empty() {
+            self.push_toast(
+                ToastKind::Error,
+                self.i18n.tr(
+                    "Tên máy chủ không được để trống.",
+                    "Server name cannot be empty.",
+                ),
+            );
+            return;
+        }
+        srv.name = self.servers.edit_draft.name.trim().to_string();
+        srv.port = self.servers.edit_draft.port.max(1024);
+        srv.ram_min_mb = self.servers.edit_draft.ram_min_mb.max(512);
+        srv.ram_max_mb = self
+            .servers
+            .edit_draft
+            .ram_max_mb
+            .max(srv.ram_min_mb);
+        let j_trim = self.servers.edit_draft.java_path_str.trim();
+        srv.java_path = (!j_trim.is_empty()).then(|| PathBuf::from(j_trim));
+        srv.jvm_flags = self.servers.edit_draft.jvm_flags.trim().to_string();
+
+        let mut port_patch = BTreeMap::new();
+        port_patch.insert("server-port".into(), srv.port.to_string());
+        let _ = write_server_properties_patch(&srv.server_dir, &port_patch);
+        self.servers
+            .properties_map
+            .insert("server-port".into(), srv.port.to_string());
+
+        match self.db.upsert_server(&srv) {
+            Ok(()) => {
+                self.servers.servers = self.db.list_servers().unwrap_or_default();
+                self.push_toast(
+                    ToastKind::Success,
+                    self.i18n.tr(
+                        "Đã lưu cấu hình phần cứng & JVM máy chủ!",
+                        "Saved server hardware & JVM configuration!",
+                    ),
+                );
+            }
+            Err(e) => self.push_toast(ToastKind::Error, format!("{e}")),
+        }
     }
 
     pub fn sync_profile_edit_draft(&mut self) {
@@ -828,10 +1048,16 @@ impl LauncherAppState {
             return;
         }
         let id = Uuid::new_v4().to_string();
-        let slug = format!("{}-{}", SafePath::slugify_dir_name(&name), &id[..8]);
-        let Ok(instance_path) = SafePath::resolve_child(&self.paths.instances_dir, &slug) else {
-            self.push_toast(ToastKind::Error, "Đường dẫn thư mục Profile không hợp lệ.");
-            return;
+        let (instance_path, is_custom_path) = match self.home.new_draft.custom_dir.take() {
+            Some(dir) => (dir, true),
+            None => {
+                let slug = format!("{}-{}", SafePath::slugify_dir_name(&name), &id[..8]);
+                let Ok(default_dir) = SafePath::resolve_child(&self.paths.instances_dir, &slug) else {
+                    self.push_toast(ToastKind::Error, "Đường dẫn thư mục Profile không hợp lệ.");
+                    return;
+                };
+                (default_dir, false)
+            }
         };
         let _ = std::fs::create_dir_all(&instance_path);
 
@@ -851,7 +1077,7 @@ impl LauncherAppState {
             loader,
             loader_version,
             instance_path,
-            is_custom_path: false,
+            is_custom_path,
             ram_mb: self.home.new_draft.ram_mb.max(512),
             java_path: None,
             jvm_args: String::new(),
@@ -1535,9 +1761,15 @@ impl LauncherAppState {
         }
 
         let id = Uuid::new_v4().to_string();
-        let folder = format!("{}-{}", SafePath::slugify_dir_name(&name), &id[..8]);
-        let Ok(srv_dir) = SafePath::resolve_child(&self.paths.servers_dir, &folder) else {
-            return;
+        let (srv_dir, is_custom_dir) = match self.servers.new_draft.custom_dir.take() {
+            Some(dir) => (dir, true),
+            None => {
+                let folder = format!("{}-{}", SafePath::slugify_dir_name(&name), &id[..8]);
+                let Ok(default_dir) = SafePath::resolve_child(&self.paths.servers_dir, &folder) else {
+                    return;
+                };
+                (default_dir, false)
+            }
         };
         let _ = std::fs::create_dir_all(&srv_dir);
         let port = self.servers.new_draft.port.max(1024);
@@ -1552,7 +1784,7 @@ impl LauncherAppState {
             engine: self.servers.new_draft.engine,
             game_version: mc_ver,
             server_dir: srv_dir,
-            is_custom_dir: false,
+            is_custom_dir,
             port,
             ram_min_mb: self.servers.new_draft.ram_min_mb.max(512),
             ram_max_mb: self
@@ -1742,6 +1974,7 @@ impl LauncherAppState {
         let _ = self.db.delete_server(&srv.id);
         self.servers.servers = self.db.list_servers().unwrap_or_default();
         self.servers.selected_server_id = self.servers.servers.first().map(|s| s.id.clone());
+        self.sync_server_edit_draft();
         self.refresh_selected_server_tabs();
         self.push_toast(ToastKind::Info, format!("Đã xóa máy chủ '{}'.", srv.name));
     }
@@ -2852,6 +3085,25 @@ impl LauncherAppState {
                     }
                     Err(e) => self.push_toast(ToastKind::Error, e),
                 },
+                AppAsyncEvent::CustomBackgroundSaved(dest) => {
+                    self.custom_bg_tex = None;
+                    self.settings.custom_background_path = Some(dest);
+                    self.persist_settings();
+                    self.push_toast(
+                        ToastKind::Success,
+                        self.i18n
+                            .tr("Đã cập nhật ảnh nền giao diện!", "Updated custom background!"),
+                    );
+                }
+                AppAsyncEvent::CustomMusicSaved => {
+                    self.settings.music_enabled = true;
+                    self.persist_settings();
+                    self.push_toast(
+                        ToastKind::Success,
+                        self.i18n
+                            .tr("Đã áp dụng nhạc nền tuỳ chỉnh!", "Applied custom background music!"),
+                    );
+                }
             }
         }
     }
@@ -3032,4 +3284,14 @@ fn build_profile_from_imported_pack(
         last_played_at: None,
         created_at: Utc::now().timestamp(),
     }
+}
+
+fn resolve_custom_bgm_file(paths: &AppPaths) -> Option<PathBuf> {
+    for ext in ["mp3", "ogg", "wav"] {
+        let candidate = paths.backgrounds_dir.join(format!("custom_bgm.{ext}"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }

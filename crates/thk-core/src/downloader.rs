@@ -86,6 +86,7 @@ impl SpeedMeter {
 #[derive(Clone)]
 pub struct DownloadManager {
     client: Client,
+    max_concurrency: Arc<AtomicUsize>,
 }
 
 impl DownloadManager {
@@ -94,9 +95,21 @@ impl DownloadManager {
             .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(300))
-            .pool_max_idle_per_host(16)
+            .pool_max_idle_per_host(32)
             .build()?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            max_concurrency: Arc::new(AtomicUsize::new(12)),
+        })
+    }
+
+    pub fn set_max_concurrency(&self, limit: usize) {
+        self.max_concurrency
+            .store(limit.clamp(2, 32), Ordering::Relaxed);
+    }
+
+    pub fn max_concurrency(&self) -> usize {
+        self.max_concurrency.load(Ordering::Relaxed).clamp(2, 32)
     }
 
     pub fn client(&self) -> &Client {
@@ -337,7 +350,11 @@ impl DownloadManager {
         let meter = Arc::new(SpeedMeter::new());
         let phase_str = phase.to_string();
         let cb = Arc::new(on_progress);
-        let worker_limit = concurrency.clamp(1, 32);
+        let worker_limit = if concurrency <= 1 || total_files <= 1 {
+            1
+        } else {
+            self.max_concurrency()
+        };
 
         futures_util::stream::iter(tasks.into_iter().map(|task| {
             let mgr = self.clone();
