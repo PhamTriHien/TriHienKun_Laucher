@@ -286,7 +286,13 @@ fn render_left_nav_rail(app: &mut LauncherAppState, ui: &mut egui::Ui) {
 }
 
 fn render_bottom_status_bar(app: &mut LauncherAppState, ui: &mut egui::Ui) {
-    if app.active_progress.is_none() && app.busy_message.is_none() {
+    let minimized_mp_title = app
+        .modpacks
+        .install_modal
+        .as_ref()
+        .filter(|m| m.installing && m.minimized)
+        .map(|m| m.detail.summary.title.clone());
+    if app.active_progress.is_none() && app.busy_message.is_none() && minimized_mp_title.is_none() {
         return;
     }
 
@@ -317,6 +323,43 @@ fn render_bottom_status_bar(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                 } else if let Some(ref msg) = app.busy_message {
                     ui.spinner();
                     ui.label(RichText::new(msg).size(12.5).strong());
+                } else if let Some(ref mp_title) = minimized_mp_title {
+                    ui.spinner();
+                    ui.label(
+                        RichText::new(format!(
+                            "{}: {mp_title}",
+                            app.i18n.tr("Đang chuẩn bị cài đặt", "Preparing installation")
+                        ))
+                        .size(12.4)
+                        .strong(),
+                    );
+                }
+
+                if minimized_mp_title.is_some() {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if danger_icon_button(
+                            ui,
+                            VectorIcon::Close,
+                            app.i18n.tr("Hủy", "Cancel"),
+                        )
+                        .clicked()
+                        {
+                            app.click_sfx();
+                            app.cancel_modpack_modal_install();
+                        }
+                        if secondary_icon_button(
+                            ui,
+                            VectorIcon::Download,
+                            app.i18n.tr("Mở cửa sổ cài đặt", "Show Installer"),
+                        )
+                        .clicked()
+                        {
+                            app.click_sfx();
+                            if let Some(m) = app.modpacks.install_modal.as_mut() {
+                                m.minimized = false;
+                            }
+                        }
+                    });
                 }
             });
         });

@@ -168,6 +168,22 @@ fn map_ftb_summary(raw: &FtbPackRaw) -> Option<ProjectSummary> {
         .updated
         .and_then(|ts| DateTime::from_timestamp(ts, 0).map(|d| d.to_rfc3339()));
 
+    let mut categories: Vec<String> = Vec::new();
+    if let Some(latest) = raw.versions.last() {
+        for t in &latest.targets {
+            if t.target_type == "modloader" && !t.name.is_empty() {
+                categories.push(t.name.to_ascii_lowercase());
+            } else if t.target_type == "game" && !t.version.is_empty() {
+                categories.push(t.version.clone());
+            }
+        }
+    }
+    for tag in &raw.tags {
+        if !tag.name.is_empty() && !categories.iter().any(|c| c.eq_ignore_ascii_case(&tag.name)) {
+            categories.push(tag.name.clone());
+        }
+    }
+
     Some(ProjectSummary {
         provider: ProviderSource::Ftb,
         project_id: id.to_string(),
@@ -181,7 +197,7 @@ fn map_ftb_summary(raw: &FtbPackRaw) -> Option<ProjectSummary> {
             .unwrap_or_else(|| "FTB Team".into()),
         downloads: raw.installs,
         icon_url,
-        categories: raw.tags.iter().map(|t| t.name.clone()).collect(),
+        categories,
         updated_at,
         content_kind: ContentKind::Modpack,
     })

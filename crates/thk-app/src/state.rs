@@ -143,12 +143,23 @@ pub enum AppAsyncEvent {
         profile: GameProfile,
     },
     ModpackSearchCompleted {
-        hits: Vec<ProjectSummary>,
-        total: usize,
+        seq: u64,
+        append: bool,
+        result: Result<(Vec<ProjectSummary>, usize), String>,
     },
     ModpackProjectLoaded {
-        detail: ProjectDetail,
-        versions: Vec<ProjectVersion>,
+        seq: u64,
+        open_install_after: bool,
+        result: Result<(ProjectDetail, Vec<ProjectVersion>), String>,
+    },
+    ModpackRemoteImageLoaded {
+        cache_key: String,
+        image: Option<egui::ColorImage>,
+    },
+    ModpackCustomDirPicked(PathBuf),
+    ModpackInstallFinished {
+        result: Result<ModpackInstallOutcome, String>,
+        cancelled: bool,
     },
     EngineVersionsLoaded {
         engine: ServerEngine,
@@ -285,15 +296,75 @@ impl Default for HomeViewState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModpackDetailTab {
+    Overview,
+    Versions,
+    Gallery,
+}
+
+pub enum ModpackInstallOutcome {
+    NewProfile(GameProfile),
+    AddonInstalled {
+        profile_id: String,
+        profile_name: String,
+        kind: ContentKind,
+        title: String,
+        file_count: usize,
+    },
+}
+
+#[derive(Clone)]
+pub struct ModpackInstallModalState {
+    pub content_kind: ContentKind,
+    pub detail: ProjectDetail,
+    pub versions: Vec<ProjectVersion>,
+    pub chosen_version_idx: usize,
+    pub profile_name: String,
+    pub ram_mb: u32,
+    pub custom_dir: Option<PathBuf>,
+    pub target_profile_id: Option<String>,
+    pub installing: bool,
+    pub minimized: bool,
+    pub error_msg: Option<String>,
+}
+
+pub const MODPACKS_PER_PAGE: usize = 24;
+const MAX_REMOTE_TEXTURES: usize = 180;
+
 pub struct ModpacksViewState {
     pub provider: ProviderSource,
+    pub content_kind: ContentKind,
     pub query: String,
     pub mc_version_filter: String,
+    pub mc_group_filter: String,
+    pub mc_version_search: String,
+    pub loader_filter: Option<LoaderType>,
     pub sort: SearchSort,
+    pub view_grid: bool,
+    pub show_filter_sidebar: bool,
+    pub page: usize,
     pub hits: Vec<ProjectSummary>,
     pub total_hits: usize,
+    pub searching: bool,
+    pub search_seq: u64,
+    pub last_error: Option<String>,
+    pub selected_preview: Option<ProjectSummary>,
+    pub detail_loading: bool,
+    pub detail_seq: u64,
     pub selected: Option<(ProjectDetail, Vec<ProjectVersion>)>,
-    pub chosen_version_idx: usize,
+    pub detail_tab: ModpackDetailTab,
+    pub detail_loader_filter: Option<LoaderType>,
+    pub detail_channel_filter: String,
+    pub detail_mc_filter: String,
+    pub lightbox_idx: Option<usize>,
+    pub install_modal: Option<ModpackInstallModalState>,
+    pub install_cancel: Option<CancellationToken>,
+    pub image_semaphore: Arc<tokio::sync::Semaphore>,
+    pub textures: HashMap<String, egui::TextureHandle>,
+    pub texture_order: VecDeque<String>,
+    pub pending_textures: HashSet<String>,
+    pub failed_textures: HashSet<String>,
     pub md_cache: CommonMarkCache,
 }
 
@@ -301,13 +372,37 @@ impl Default for ModpacksViewState {
     fn default() -> Self {
         Self {
             provider: ProviderSource::Modrinth,
+            content_kind: ContentKind::Modpack,
             query: String::new(),
             mc_version_filter: String::new(),
+            mc_group_filter: "all".into(),
+            mc_version_search: String::new(),
+            loader_filter: None,
             sort: SearchSort::Downloads,
+            view_grid: true,
+            show_filter_sidebar: true,
+            page: 0,
             hits: Vec::new(),
             total_hits: 0,
+            searching: false,
+            search_seq: 0,
+            last_error: None,
+            selected_preview: None,
+            detail_loading: false,
+            detail_seq: 0,
             selected: None,
-            chosen_version_idx: 0,
+            detail_tab: ModpackDetailTab::Overview,
+            detail_loader_filter: None,
+            detail_channel_filter: "all".into(),
+            detail_mc_filter: "all".into(),
+            lightbox_idx: None,
+            install_modal: None,
+            install_cancel: None,
+            image_semaphore: Arc::new(tokio::sync::Semaphore::new(6)),
+            textures: HashMap::new(),
+            texture_order: VecDeque::new(),
+            pending_textures: HashSet::new(),
+            failed_textures: HashSet::new(),
             md_cache: CommonMarkCache::default(),
         }
     }
@@ -1547,95 +1642,286 @@ impl LauncherAppState {
     }
 
     pub fn search_modpacks(&mut self) {
+        self.search_modpacks_page(0, false);
+    }
+
+    pub fn search_modpacks_page(&mut self, page: usize, append: bool) {
+        if !matches!(
+            self.modpacks.provider,
+            ProviderSource::Modrinth | ProviderSource::CurseForge
+        ) {
+            self.modpacks.content_kind = ContentKind::Modpack;
+        }
+
+        self.modpacks.search_seq += 1;
+        let seq = self.modpacks.search_seq;
+        self.modpacks.page = page;
+        self.modpacks.searching = true;
+        self.modpacks.last_error = None;
+        if !append {
+            self.modpacks.hits.clear();
+        }
+
         let provider = self.modpacks.provider;
+        let content_kind = self.modpacks.content_kind;
         let gv = {
             let t = self.modpacks.mc_version_filter.trim();
             (!t.is_empty()).then(|| t.to_string())
         };
+        let loader = matches!(content_kind, ContentKind::Modpack | ContentKind::Mod)
+            .then_some(self.modpacks.loader_filter)
+            .flatten();
+
         let query = SearchQuery {
             query: self.modpacks.query.trim().to_string(),
-            content_kind: ContentKind::Modpack,
+            content_kind,
             game_version: gv,
-            loader: None,
+            loader,
             sort: self.modpacks.sort,
-            offset: 0,
-            limit: 24,
+            offset: page * MODPACKS_PER_PAGE,
+            limit: MODPACKS_PER_PAGE,
         };
+
         let cf_key = self.settings.curseforge_api_key.clone();
         let dl = self.downloader.clone();
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
-        self.busy_message = Some(format!(
-            "Đang tải danh sách Modpack từ {}...",
-            provider.display_name()
-        ));
 
         self.rt.spawn(async move {
-            let res = search_provider(&dl, provider, &query, cf_key.as_deref()).await;
-            let _ = tx.send(AppAsyncEvent::BusyStatus(None));
-            match res {
-                Ok(page) => {
-                    let _ = tx.send(AppAsyncEvent::ModpackSearchCompleted {
-                        hits: page.hits,
-                        total: page.total_hits,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(AppAsyncEvent::Toast {
-                        kind: ToastKind::Error,
-                        text: format!("Không thể tải {}: {e}", provider.display_name()),
-                    });
-                }
-            }
+            let res = search_provider(&dl, provider, &query, cf_key.as_deref())
+                .await
+                .map(|p| (p.hits, p.total_hits))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppAsyncEvent::ModpackSearchCompleted {
+                seq,
+                append,
+                result: res,
+            });
             ctx.request_repaint();
         });
     }
 
+    pub fn reset_modpack_filters(&mut self) {
+        self.modpacks.query.clear();
+        self.modpacks.mc_version_filter.clear();
+        self.modpacks.mc_group_filter = "all".into();
+        self.modpacks.mc_version_search.clear();
+        self.modpacks.loader_filter = None;
+        self.modpacks.sort = SearchSort::Downloads;
+        self.search_modpacks();
+    }
+
     pub fn open_modpack_detail(&mut self, summary: ProjectSummary) {
+        self.load_modpack_project(summary, false);
+    }
+
+    pub fn quick_install_from_card(&mut self, summary: ProjectSummary) {
+        self.load_modpack_project(summary, true);
+    }
+
+    fn load_modpack_project(&mut self, summary: ProjectSummary, open_install_after: bool) {
+        self.modpacks.detail_seq += 1;
+        let seq = self.modpacks.detail_seq;
+        self.modpacks.selected = None;
+        self.modpacks.selected_preview = Some(summary.clone());
+        self.modpacks.detail_loading = true;
+        self.modpacks.lightbox_idx = None;
+        self.modpacks.detail_tab = ModpackDetailTab::Overview;
+
         let dl = self.downloader.clone();
         let cf_key = self.settings.curseforge_api_key.clone();
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
-        let gv_filter = {
-            let t = self.modpacks.mc_version_filter.trim();
-            (!t.is_empty()).then(|| t.to_string())
-        };
-        self.busy_message = Some(format!("Đang tải chi tiết '{}'...", summary.title));
 
         self.rt.spawn(async move {
             let (d_res, v_res) = tokio::join!(
-                fetch_provider_project(&dl, summary.provider, &summary.project_id, cf_key.as_deref()),
+                fetch_provider_project(
+                    &dl,
+                    summary.provider,
+                    &summary.project_id,
+                    cf_key.as_deref()
+                ),
                 fetch_provider_versions(
                     &dl,
                     summary.provider,
                     &summary.project_id,
-                    gv_filter.as_deref(),
+                    None,
                     None,
                     cf_key.as_deref()
                 )
             );
-            let _ = tx.send(AppAsyncEvent::BusyStatus(None));
-            match (d_res, v_res) {
-                (Ok(detail), Ok(versions)) => {
-                    let _ = tx.send(AppAsyncEvent::ModpackProjectLoaded { detail, versions });
-                }
-                (Err(e), _) | (_, Err(e)) => {
-                    let _ = tx.send(AppAsyncEvent::Toast {
-                        kind: ToastKind::Error,
-                        text: format!("Không thể tải chi tiết Modpack: {e}"),
-                    });
-                }
-            }
+            let result = match (d_res, v_res) {
+                (Ok(detail), Ok(versions)) => Ok((detail, versions)),
+                (Err(e), _) | (_, Err(e)) => Err(e.to_string()),
+            };
+            let _ = tx.send(AppAsyncEvent::ModpackProjectLoaded {
+                seq,
+                open_install_after,
+                result,
+            });
             ctx.request_repaint();
         });
     }
 
-    pub fn install_selected_modpack(&mut self) {
+    pub fn open_modpack_install_modal(&mut self, preferred_version_id: Option<&str>) {
+        if self
+            .modpacks
+            .install_modal
+            .as_ref()
+            .is_some_and(|m| m.installing)
+        {
+            if let Some(m) = self.modpacks.install_modal.as_mut() {
+                m.minimized = false;
+            }
+            let msg = self
+                .i18n
+                .tr(
+                    "Đang có tiến trình cài đặt chạy nền.",
+                    "An installation is already running in the background.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Info, msg);
+            return;
+        }
+
         let Some((detail, versions)) = self.modpacks.selected.clone() else {
             return;
         };
-        let Some(version) = versions.get(self.modpacks.chosen_version_idx).cloned() else {
-            self.push_toast(ToastKind::Error, "Modpack này chưa có phiên bản khả dụng.");
+        if versions.is_empty() {
+            let msg = self
+                .i18n
+                .tr(
+                    "Dự án này hiện chưa có tệp phiên bản khả dụng.",
+                    "No downloadable versions are available for this project.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
+            return;
+        }
+
+        let gv_pref = self.modpacks.mc_version_filter.trim();
+        let ldr_pref = self.modpacks.loader_filter;
+
+        let chosen_version_idx = if let Some(pref_id) = preferred_version_id {
+            versions.iter().position(|v| v.id == pref_id).unwrap_or(0)
+        } else {
+            let matches_prefs = |v: &ProjectVersion| {
+                let gv_ok = gv_pref.is_empty() || v.game_versions.iter().any(|g| g == gv_pref);
+                let ldr_ok = match ldr_pref {
+                    Some(ldr) => {
+                        v.loaders.is_empty()
+                            || v.loaders
+                                .iter()
+                                .any(|l| l.eq_ignore_ascii_case(ldr.as_str()))
+                    }
+                    None => true,
+                };
+                gv_ok && ldr_ok
+            };
+            versions
+                .iter()
+                .position(|v| matches_prefs(v) && v.release_channel.eq_ignore_ascii_case("release"))
+                .or_else(|| versions.iter().position(matches_prefs))
+                .or_else(|| {
+                    versions
+                        .iter()
+                        .position(|v| v.release_channel.eq_ignore_ascii_case("release"))
+                })
+                .unwrap_or(0)
+        };
+
+        let content_kind = detail.summary.content_kind;
+        let chosen_ver = &versions[chosen_version_idx];
+        let is_profile_compatible = |p: &GameProfile| {
+            let gv_ok = chosen_ver.game_versions.is_empty()
+                || chosen_ver
+                    .game_versions
+                    .iter()
+                    .any(|g| g == &p.game_version);
+            let ldr_ok = if content_kind == ContentKind::Mod {
+                chosen_ver.loaders.is_empty()
+                    || chosen_ver
+                        .loaders
+                        .iter()
+                        .any(|l| l.eq_ignore_ascii_case(p.loader.as_str()))
+            } else {
+                true
+            };
+            gv_ok && ldr_ok
+        };
+
+        let target_profile_id = self
+            .selected_profile()
+            .filter(|p| is_profile_compatible(p))
+            .map(|p| p.id.clone())
+            .or_else(|| {
+                self.home
+                    .profiles
+                    .iter()
+                    .find(|p| is_profile_compatible(p))
+                    .map(|p| p.id.clone())
+            })
+            .or_else(|| self.selected_profile().map(|p| p.id.clone()))
+            .or_else(|| self.home.profiles.first().map(|p| p.id.clone()));
+
+        self.modpacks.install_modal = Some(ModpackInstallModalState {
+            content_kind,
+            profile_name: detail.summary.title.clone(),
+            ram_mb: self.settings.default_ram_mb.max(4096),
+            custom_dir: None,
+            target_profile_id,
+            detail,
+            versions,
+            chosen_version_idx,
+            installing: false,
+            minimized: false,
+            error_msg: None,
+        });
+    }
+
+    pub fn pick_modpack_custom_dir(&mut self) {
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        self.rt.spawn(async move {
+            if let Some(folder) = rfd::AsyncFileDialog::new()
+                .set_title("Chọn thư mục cài đặt Modpack riêng")
+                .pick_folder()
+                .await
+            {
+                let _ = tx.send(AppAsyncEvent::ModpackCustomDirPicked(
+                    folder.path().to_path_buf(),
+                ));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    pub fn cancel_modpack_modal_install(&mut self) {
+        if let Some(tok) = self.modpacks.install_cancel.take() {
+            tok.cancel();
+        }
+    }
+
+    pub fn start_modpack_modal_install(&mut self) {
+        let Some(modal_snapshot) = self.modpacks.install_modal.clone() else {
+            return;
+        };
+        if modal_snapshot.installing {
+            return;
+        }
+        let Some(version) = modal_snapshot
+            .versions
+            .get(modal_snapshot.chosen_version_idx)
+            .cloned()
+        else {
+            let msg = self
+                .i18n
+                .tr(
+                    "Vui lòng chọn một phiên bản hợp lệ để cài đặt.",
+                    "Please choose a valid version to install.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
             return;
         };
 
@@ -1644,96 +1930,311 @@ impl LauncherAppState {
         let cache_dir = self.paths.cache_dir.clone();
         let instances_dir = self.paths.instances_dir.clone();
         let cf_key = self.settings.curseforge_api_key.clone();
-        let default_ram = self.settings.default_ram_mb;
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+
+        let cancel = CancellationToken::new();
+        self.modpacks.install_cancel = Some(cancel.clone());
+
+        if modal_snapshot.content_kind == ContentKind::Modpack {
+            let desired_name = {
+                let trimmed = modal_snapshot.profile_name.trim();
+                if trimmed.is_empty() {
+                    modal_snapshot.detail.summary.title.clone()
+                } else {
+                    trimmed.to_string()
+                }
+            };
+            let desired_ram = modal_snapshot.ram_mb.max(2048);
+            let custom_dir = modal_snapshot.custom_dir.clone();
+            let detail = modal_snapshot.detail;
+
+            if let Some(modal) = self.modpacks.install_modal.as_mut() {
+                modal.installing = true;
+                modal.error_msg = None;
+            }
+
+            self.rt.spawn(async move {
+                let id = Uuid::new_v4().to_string();
+                let (inst_dir, is_custom_dir) = match custom_dir {
+                    Some(dir) => (dir, true),
+                    None => {
+                        let folder = format!(
+                            "{}-{}",
+                            SafePath::slugify_dir_name(&desired_name),
+                            &id[..8]
+                        );
+                        let Ok(default_dir) = SafePath::resolve_child(&instances_dir, &folder)
+                        else {
+                            let _ = tx.send(AppAsyncEvent::ModpackInstallFinished {
+                                result: Err("Invalid instance directory path".into()),
+                                cancelled: false,
+                            });
+                            ctx.request_repaint();
+                            return;
+                        };
+                        (default_dir, false)
+                    }
+                };
+
+                let tx_p = tx.clone();
+                let ctx_p = ctx.clone();
+                let on_prog = move |p: DownloadProgress| {
+                    let _ = tx_p.send(AppAsyncEvent::TaskProgress(Some(p)));
+                    ctx_p.request_repaint();
+                };
+
+                let icon = detail.summary.icon_url.clone();
+                let cancel_tok = Some(cancel.clone());
+                let res = match detail.summary.provider {
+                    ProviderSource::Modrinth => {
+                        install_modrinth_modpack_version(
+                            &dl, &version, &cache_dir, &inst_dir, icon, cancel_tok, on_prog,
+                        )
+                        .await
+                    }
+                    ProviderSource::CurseForge => {
+                        install_curseforge_modpack_version(
+                            &dl,
+                            &version,
+                            &cache_dir,
+                            &inst_dir,
+                            icon,
+                            cf_key.as_deref(),
+                            cancel_tok,
+                            on_prog,
+                        )
+                        .await
+                    }
+                    ProviderSource::Ftb => {
+                        install_ftb_modpack_version(
+                            &dl,
+                            &detail.summary.project_id,
+                            &version.id,
+                            &detail.summary.title,
+                            icon,
+                            &inst_dir,
+                            cf_key.as_deref(),
+                            cancel_tok,
+                            on_prog,
+                        )
+                        .await
+                    }
+                    ProviderSource::Technic => {
+                        install_technic_modpack_version(
+                            &dl,
+                            &detail.summary.slug,
+                            &version.id,
+                            &cache_dir,
+                            &inst_dir,
+                            cancel_tok,
+                            on_prog,
+                        )
+                        .await
+                    }
+                    _ => Err(thk_core::ThkError::InvalidInput(
+                        "Unsupported modpack provider".into(),
+                    )),
+                };
+
+                let _ = tx.send(AppAsyncEvent::TaskProgress(None));
+                match res {
+                    Ok(mut meta) => {
+                        meta.name = desired_name;
+                        let mut profile =
+                            build_profile_from_imported_pack(id, inst_dir, meta, desired_ram);
+                        profile.ram_mb = desired_ram;
+                        profile.is_custom_path = is_custom_dir;
+                        let outcome = db
+                            .upsert_profile(&profile)
+                            .map(|()| ModpackInstallOutcome::NewProfile(profile))
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(AppAsyncEvent::ModpackInstallFinished {
+                            result: outcome,
+                            cancelled: false,
+                        });
+                    }
+                    Err(e) => {
+                        let was_cancelled =
+                            cancel.is_cancelled() || matches!(e, thk_core::ThkError::Cancelled);
+                        if !is_custom_dir {
+                            let _ = tokio::fs::remove_dir_all(&inst_dir).await;
+                        }
+                        let _ = tx.send(AppAsyncEvent::ModpackInstallFinished {
+                            result: Err(e.to_string()),
+                            cancelled: was_cancelled,
+                        });
+                    }
+                }
+                ctx.request_repaint();
+            });
+        } else {
+            let Some(ref target_id) = modal_snapshot.target_profile_id else {
+                let msg = self
+                    .i18n
+                    .tr(
+                        "Hãy tạo hoặc chọn một Profile đích trước khi cài nội dung này.",
+                        "Please create or select a target profile first.",
+                    )
+                    .to_string();
+                if let Some(modal) = self.modpacks.install_modal.as_mut() {
+                    modal.error_msg = Some(msg);
+                }
+                self.modpacks.install_cancel = None;
+                return;
+            };
+            let Some(profile) = self
+                .home
+                .profiles
+                .iter()
+                .find(|p| &p.id == target_id)
+                .cloned()
+            else {
+                let msg = self
+                    .i18n
+                    .tr("Không tìm thấy Profile đích đã chọn.", "Selected target profile not found.")
+                    .to_string();
+                if let Some(modal) = self.modpacks.install_modal.as_mut() {
+                    modal.error_msg = Some(msg);
+                }
+                self.modpacks.install_cancel = None;
+                return;
+            };
+
+            let kind = modal_snapshot.content_kind;
+            let summary = modal_snapshot.detail.summary;
+
+            if let Some(modal) = self.modpacks.install_modal.as_mut() {
+                modal.installing = true;
+                modal.error_msg = None;
+            }
+
+            self.rt.spawn(async move {
+                let tx_p = tx.clone();
+                let ctx_p = ctx.clone();
+                let on_prog = move |p: DownloadProgress| {
+                    let _ = tx_p.send(AppAsyncEvent::TaskProgress(Some(p)));
+                    ctx_p.request_repaint();
+                };
+
+                let cancel_tok = Some(cancel.clone());
+                let res = match summary.provider {
+                    ProviderSource::Modrinth => {
+                        install_modrinth_content(
+                            &dl, &db, &profile, kind, &summary, &version, cancel_tok, on_prog,
+                        )
+                        .await
+                    }
+                    ProviderSource::CurseForge => {
+                        install_curseforge_content(
+                            &dl,
+                            &db,
+                            &profile,
+                            kind,
+                            &summary,
+                            &version,
+                            cf_key.as_deref(),
+                            cancel_tok,
+                            on_prog,
+                        )
+                        .await
+                    }
+                    _ => Err(thk_core::ThkError::InvalidInput(
+                        "Provider does not support direct addon installation".into(),
+                    )),
+                };
+
+                let _ = tx.send(AppAsyncEvent::TaskProgress(None));
+                match res {
+                    Ok(files) => {
+                        let _ = tx.send(AppAsyncEvent::ModpackInstallFinished {
+                            result: Ok(ModpackInstallOutcome::AddonInstalled {
+                                profile_id: profile.id,
+                                profile_name: profile.name,
+                                kind,
+                                title: summary.title,
+                                file_count: files.len(),
+                            }),
+                            cancelled: false,
+                        });
+                    }
+                    Err(e) => {
+                        let was_cancelled =
+                            cancel.is_cancelled() || matches!(e, thk_core::ThkError::Cancelled);
+                        let _ = tx.send(AppAsyncEvent::ModpackInstallFinished {
+                            result: Err(e.to_string()),
+                            cancelled: was_cancelled,
+                        });
+                    }
+                }
+                ctx.request_repaint();
+            });
+        }
+    }
+
+    pub fn request_modpack_texture(
+        &mut self,
+        url: &str,
+        max_dim: u32,
+    ) -> Option<egui::TextureHandle> {
+        let trimmed = url.trim();
+        if trimmed.is_empty()
+            || (!trimmed.starts_with("https://") && !trimmed.starts_with("http://"))
+        {
+            return None;
+        }
+        let cache_key = format!("{max_dim}:{trimmed}");
+        if let Some(tex) = self.modpacks.textures.get(&cache_key) {
+            return Some(tex.clone());
+        }
+        if self.modpacks.pending_textures.contains(&cache_key)
+            || self.modpacks.failed_textures.contains(&cache_key)
+        {
+            return None;
+        }
+
+        self.modpacks.pending_textures.insert(cache_key.clone());
+        let sem = Arc::clone(&self.modpacks.image_semaphore);
+        let dl = self.downloader.clone();
+        let fetch_url = trimmed.to_string();
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
 
         self.rt.spawn(async move {
-            let id = Uuid::new_v4().to_string();
-            let folder = format!(
-                "{}-{}",
-                SafePath::slugify_dir_name(&detail.summary.title),
-                &id[..8]
-            );
-            let Ok(inst_dir) = SafePath::resolve_child(&instances_dir, &folder) else {
-                return;
-            };
-
-            let tx_p = tx.clone();
-            let ctx_p = ctx.clone();
-            let on_prog = move |p: DownloadProgress| {
-                let _ = tx_p.send(AppAsyncEvent::TaskProgress(Some(p)));
-                ctx_p.request_repaint();
-            };
-
-            let icon = detail.summary.icon_url.clone();
-            let res = match detail.summary.provider {
-                ProviderSource::Modrinth => {
-                    install_modrinth_modpack_version(
-                        &dl, &version, &cache_dir, &inst_dir, icon, None, on_prog,
-                    )
-                    .await
-                }
-                ProviderSource::CurseForge => {
-                    install_curseforge_modpack_version(
-                        &dl,
-                        &version,
-                        &cache_dir,
-                        &inst_dir,
-                        icon,
-                        cf_key.as_deref(),
-                        None,
-                        on_prog,
-                    )
-                    .await
-                }
-                ProviderSource::Ftb => {
-                    install_ftb_modpack_version(
-                        &dl,
-                        &detail.summary.project_id,
-                        &version.id,
-                        &detail.summary.title,
-                        icon,
-                        &inst_dir,
-                        cf_key.as_deref(),
-                        None,
-                        on_prog,
-                    )
-                    .await
-                }
-                ProviderSource::Technic => {
-                    install_technic_modpack_version(
-                        &dl,
-                        &detail.summary.slug,
-                        &version.id,
-                        &cache_dir,
-                        &inst_dir,
-                        None,
-                        on_prog,
-                    )
-                    .await
-                }
-                _ => return,
-            };
-
-            let _ = tx.send(AppAsyncEvent::TaskProgress(None));
-            match res {
-                Ok(meta) => {
-                    let profile = build_profile_from_imported_pack(id, inst_dir, meta, default_ram);
-                    if db.upsert_profile(&profile).is_ok() {
-                        let _ = tx.send(AppAsyncEvent::PackImported { profile });
+            let _permit = sem.acquire_owned().await.ok();
+            let decoded = match dl.get_bytes(&fetch_url).await {
+                Ok(bytes) => tokio::task::spawn_blocking(move || {
+                    let dyn_img = image::load_from_memory(&bytes).ok()?;
+                    let scaled =
+                        if dyn_img.width() > max_dim || dyn_img.height() > max_dim {
+                            dyn_img.thumbnail(max_dim, max_dim)
+                        } else {
+                            dyn_img
+                        };
+                    let rgba = scaled.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    if w == 0 || h == 0 {
+                        return None;
                     }
-                }
-                Err(e) => {
-                    let _ = tokio::fs::remove_dir_all(&inst_dir).await;
-                    let _ = tx.send(AppAsyncEvent::Toast {
-                        kind: ToastKind::Error,
-                        text: format!("Cài đặt Modpack thất bại: {e}"),
-                    });
-                }
-            }
+                    Some(egui::ColorImage::from_rgba_unmultiplied(
+                        [w as usize, h as usize],
+                        rgba.as_raw(),
+                    ))
+                })
+                .await
+                .ok()
+                .flatten(),
+                Err(_) => None,
+            };
+
+            let _ = tx.send(AppAsyncEvent::ModpackRemoteImageLoaded {
+                cache_key,
+                image: decoded,
+            });
             ctx.request_repaint();
         });
+
+        None
     }
 
     pub fn ensure_engine_versions(&mut self, engine: ServerEngine) {
@@ -2971,13 +3472,200 @@ impl LauncherAppState {
                         format!("Đã cài đặt Modpack '{pname}' sẵn sàng chơi!"),
                     );
                 }
-                AppAsyncEvent::ModpackSearchCompleted { hits, total } => {
-                    self.modpacks.hits = hits;
-                    self.modpacks.total_hits = total;
+                AppAsyncEvent::ModpackSearchCompleted {
+                    seq,
+                    append,
+                    result,
+                } => {
+                    if seq == self.modpacks.search_seq {
+                        self.modpacks.searching = false;
+                        match result {
+                            Ok((new_hits, total)) => {
+                                self.modpacks.total_hits = total;
+                                self.modpacks.last_error = None;
+                                if append {
+                                    for hit in new_hits {
+                                        if !self
+                                            .modpacks
+                                            .hits
+                                            .iter()
+                                            .any(|existing| existing.project_id == hit.project_id)
+                                        {
+                                            self.modpacks.hits.push(hit);
+                                        }
+                                    }
+                                } else {
+                                    self.modpacks.hits = new_hits;
+                                }
+                            }
+                            Err(err) => {
+                                let prov_name = self.modpacks.provider.display_name();
+                                let toast_msg = format!(
+                                    "{} {prov_name}: {err}",
+                                    self.i18n.tr("Không thể tải từ", "Failed to load from")
+                                );
+                                self.modpacks.last_error = Some(err);
+                                self.push_toast(ToastKind::Error, toast_msg);
+                            }
+                        }
+                    }
                 }
-                AppAsyncEvent::ModpackProjectLoaded { detail, versions } => {
-                    self.modpacks.chosen_version_idx = 0;
-                    self.modpacks.selected = Some((detail, versions));
+                AppAsyncEvent::ModpackProjectLoaded {
+                    seq,
+                    open_install_after,
+                    result,
+                } => {
+                    if seq == self.modpacks.detail_seq {
+                        self.modpacks.detail_loading = false;
+                        match result {
+                            Ok((mut detail, versions)) => {
+                                if let Some(ref preview) = self.modpacks.selected_preview {
+                                    detail.summary.content_kind = preview.content_kind;
+                                    if detail.summary.author.trim().is_empty() {
+                                        detail.summary.author = preview.author.clone();
+                                    }
+                                    if detail.summary.icon_url.is_none() {
+                                        detail.summary.icon_url = preview.icon_url.clone();
+                                    }
+                                    if detail.summary.downloads == 0 && preview.downloads > 0 {
+                                        detail.summary.downloads = preview.downloads;
+                                    }
+                                    if detail.summary.categories.is_empty() {
+                                        detail.summary.categories = preview.categories.clone();
+                                    }
+                                    if detail.summary.updated_at.is_none() {
+                                        detail.summary.updated_at = preview.updated_at.clone();
+                                    }
+                                }
+                                self.modpacks.detail_channel_filter = "all".into();
+                                self.modpacks.detail_mc_filter =
+                                    if self.modpacks.mc_version_filter.trim().is_empty() {
+                                        "all".into()
+                                    } else {
+                                        self.modpacks.mc_version_filter.trim().to_string()
+                                    };
+                                self.modpacks.detail_loader_filter = self.modpacks.loader_filter;
+                                self.modpacks.selected = Some((detail, versions));
+                                if open_install_after {
+                                    self.open_modpack_install_modal(None);
+                                }
+                            }
+                            Err(err) => {
+                                self.modpacks.selected_preview = None;
+                                let msg = format!(
+                                    "{}: {err}",
+                                    self.i18n.tr(
+                                        "Không thể tải chi tiết dự án",
+                                        "Failed to load project details"
+                                    )
+                                );
+                                self.push_toast(ToastKind::Error, msg);
+                            }
+                        }
+                    }
+                }
+                AppAsyncEvent::ModpackRemoteImageLoaded { cache_key, image } => {
+                    self.modpacks.pending_textures.remove(&cache_key);
+                    if let Some(color_img) = image {
+                        while self.modpacks.textures.len() >= MAX_REMOTE_TEXTURES {
+                            if let Some(oldest) = self.modpacks.texture_order.pop_front() {
+                                self.modpacks.textures.remove(&oldest);
+                            } else {
+                                break;
+                            }
+                        }
+                        let tex = self.egui_ctx.load_texture(
+                            format!("thk_mp_img_{cache_key}"),
+                            color_img,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.modpacks.textures.insert(cache_key.clone(), tex);
+                        self.modpacks.texture_order.push_back(cache_key);
+                    } else {
+                        self.modpacks.failed_textures.insert(cache_key);
+                    }
+                }
+                AppAsyncEvent::ModpackCustomDirPicked(dir) => {
+                    if let Some(modal) = self.modpacks.install_modal.as_mut() {
+                        modal.custom_dir = Some(dir);
+                    }
+                }
+                AppAsyncEvent::ModpackInstallFinished { result, cancelled } => {
+                    self.modpacks.install_cancel = None;
+                    if cancelled {
+                        let cancel_msg = self
+                            .i18n
+                            .tr("Đã hủy cài đặt theo yêu cầu.", "Installation cancelled.")
+                            .to_string();
+                        if let Some(modal) = self.modpacks.install_modal.as_mut() {
+                            modal.installing = false;
+                            modal.minimized = false;
+                            modal.error_msg = Some(cancel_msg.clone());
+                        }
+                        self.push_toast(ToastKind::Info, cancel_msg);
+                    } else {
+                        match result {
+                            Ok(ModpackInstallOutcome::NewProfile(profile)) => {
+                                let pname = profile.name.clone();
+                                let pid = profile.id.clone();
+                                self.modpacks.install_modal = None;
+                                self.modpacks.selected = None;
+                                self.modpacks.selected_preview = None;
+                                self.home.profiles = self.db.list_profiles().unwrap_or_default();
+                                self.section = ActiveSection::Home;
+                                self.select_profile(pid);
+                                let msg = format!(
+                                    "{} '{pname}'!",
+                                    self.i18n.tr(
+                                        "Đã cài đặt thành công Modpack",
+                                        "Successfully installed Modpack"
+                                    )
+                                );
+                                self.push_toast(ToastKind::Success, msg);
+                            }
+                            Ok(ModpackInstallOutcome::AddonInstalled {
+                                profile_id,
+                                profile_name,
+                                kind,
+                                title,
+                                file_count,
+                            }) => {
+                                self.modpacks.install_modal = None;
+                                if self.home.selected_profile_id.as_deref() == Some(&profile_id) {
+                                    self.refresh_selected_profile_tabs();
+                                }
+                                let kind_lbl = match kind {
+                                    ContentKind::Mod => "Mod",
+                                    ContentKind::Shader => "Shader",
+                                    ContentKind::ResourcePack => "Resource Pack",
+                                    ContentKind::Modpack => "Modpack",
+                                    ContentKind::Plugin => "Plugin",
+                                };
+                                let msg = if self.settings.language == thk_core::models::Language::Vi {
+                                    format!(
+                                        "Đã cài {kind_lbl} '{title}' ({file_count} tệp) vào '{profile_name}'!"
+                                    )
+                                } else {
+                                    format!(
+                                        "Installed {kind_lbl} '{title}' ({file_count} files) into '{profile_name}'!"
+                                    )
+                                };
+                                self.push_toast(ToastKind::Success, msg);
+                            }
+                            Err(err) => {
+                                if let Some(modal) = self.modpacks.install_modal.as_mut() {
+                                    modal.installing = false;
+                                    modal.minimized = false;
+                                    modal.error_msg = Some(err.clone());
+                                }
+                                let msg = format!(
+                                    "{}: {err}",
+                                    self.i18n.tr("Cài đặt thất bại", "Installation failed")
+                                );
+                                self.push_toast(ToastKind::Error, msg);
+                            }
+                        }
+                    }
                 }
                 AppAsyncEvent::EngineVersionsLoaded { engine, versions } => {
                     if self.servers.new_draft.engine == engine

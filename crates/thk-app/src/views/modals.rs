@@ -44,6 +44,7 @@ pub fn render_all_modals(app: &mut LauncherAppState, ctx: &egui::Context) {
     if app.show_close_confirm_modal {
         render_close_confirm_modal(app, ctx);
     }
+    crate::views::modpacks::render_modpack_modals(app, ctx);
 }
 
 fn render_initial_setup_modal(app: &mut LauncherAppState, ctx: &egui::Context) {

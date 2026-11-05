@@ -46,6 +46,10 @@ pub enum VectorIcon {
     Sliders,
     Chart,
     Cube,
+    Grid,
+    List,
+    Image,
+    Close,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -803,6 +807,50 @@ pub fn paint_vector_icon(painter: &egui::Painter, rect: Rect, icon: VectorIcon, 
                 st,
             );
         }
+        VectorIcon::Grid => {
+            for gx in [-0.46f32, 0.46] {
+                for gy in [-0.46f32, 0.46] {
+                    let sq = Rect::from_center_size(
+                        pos2(c.x + r * gx, c.y + r * gy),
+                        Vec2::splat(r * 0.66),
+                    );
+                    painter.rect_stroke(sq, CornerRadius::same(1), st, StrokeKind::Inside);
+                }
+            }
+        }
+        VectorIcon::List => {
+            for gy in [-0.56f32, 0.0, 0.56] {
+                let y = c.y + r * gy;
+                painter.circle_filled(pos2(c.x - r * 0.72, y), r * 0.16, color);
+                painter.line_segment([pos2(c.x - r * 0.34, y), pos2(c.x + r * 0.85, y)], st);
+            }
+        }
+        VectorIcon::Image => {
+            let frame = Rect::from_min_max(
+                pos2(c.x - r * 0.90, c.y - r * 0.72),
+                pos2(c.x + r * 0.90, c.y + r * 0.72),
+            );
+            painter.rect_stroke(frame, CornerRadius::same(2), st, StrokeKind::Inside);
+            painter.circle_filled(pos2(c.x - r * 0.40, c.y - r * 0.28), r * 0.18, color);
+            let peaks = vec![
+                pos2(c.x - r * 0.75, c.y + r * 0.55),
+                pos2(c.x - r * 0.22, c.y - r * 0.02),
+                pos2(c.x + r * 0.14, c.y + r * 0.32),
+                pos2(c.x + r * 0.48, c.y - r * 0.12),
+                pos2(c.x + r * 0.78, c.y + r * 0.55),
+            ];
+            painter.add(Shape::line(peaks, st));
+        }
+        VectorIcon::Close => {
+            painter.line_segment(
+                [pos2(c.x - r * 0.68, c.y - r * 0.68), pos2(c.x + r * 0.68, c.y + r * 0.68)],
+                st,
+            );
+            painter.line_segment(
+                [pos2(c.x + r * 0.68, c.y - r * 0.68), pos2(c.x - r * 0.68, c.y + r * 0.68)],
+                st,
+            );
+        }
     }
 }
 
@@ -1045,13 +1093,20 @@ pub fn tactile_button_3d(
         .painter()
         .layout_no_wrap(text.clone(), font_id.clone(), Color32::WHITE);
 
-    let icon_space = if icon.is_some() { 20.0 } else { 0.0 };
+    let has_text = !text.is_empty();
+    let icon_space = match (icon.is_some(), has_text) {
+        (true, true) => 20.0,
+        (true, false) => 15.0,
+        (false, _) => 0.0,
+    };
     let pad = match style {
         ButtonStyle3d::HeroLaunch | ButtonStyle3d::HeroStop => vec2(22.0, 12.0),
+        _ if !has_text => vec2(9.0, 7.5),
         _ => vec2(14.0, 7.5),
     };
+    let text_w = if has_text { galley.size().x } else { 0.0 };
     let desired = vec2(
-        (galley.size().x + icon_space + pad.x * 2.0).max(min_size.x),
+        (text_w + icon_space + pad.x * 2.0).max(min_size.x),
         (galley.size().y + pad.y * 2.0).max(min_size.y),
     );
 
@@ -1188,11 +1243,16 @@ pub fn tactile_button_3d(
         );
     }
 
-    let content_w = galley.size().x + icon_space;
+    let content_w = text_w + icon_space;
     let start_x = draw_rect.center().x - content_w * 0.5;
     let text_x = if let Some(ic) = icon {
+        let ic_center_x = if has_text {
+            start_x + 7.5
+        } else {
+            draw_rect.center().x
+        };
         let ic_rect = Rect::from_center_size(
-            pos2(start_x + 7.5, draw_rect.center().y),
+            pos2(ic_center_x, draw_rect.center().y),
             Vec2::splat(15.0),
         );
         paint_vector_icon(painter, ic_rect, ic, text_col);
@@ -1201,13 +1261,15 @@ pub fn tactile_button_3d(
         start_x
     };
 
-    painter.text(
-        pos2(text_x, draw_rect.center().y),
-        Align2::LEFT_CENTER,
-        text,
-        font_id,
-        text_col,
-    );
+    if has_text {
+        painter.text(
+            pos2(text_x, draw_rect.center().y),
+            Align2::LEFT_CENTER,
+            text,
+            font_id,
+            text_col,
+        );
+    }
 
     resp
 }

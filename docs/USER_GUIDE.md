@@ -56,11 +56,19 @@ Mỗi Profile cung cấp 8 thẻ quản trị chuyên biệt:
 
 ---
 
-## 4. Kho Modpack Trực Tuyến 4 Nền Tảng (`📦 Kho Modpack`)
-- Chuyển đổi tức thì giữa **Modrinth**, **CurseForge**, **FTB Modpacks** và **Technic**.
-- Lọc theo từ khóa, phiên bản Minecraft và tiêu chí sắp xếp (*Lượt tải cao nhất, Độ liên quan, Mới cập nhật, Mới phát hành*).
-- Nhấn **Xem & Cài đặt ➡** để đọc mô tả chi tiết định dạng Markdown, chọn phiên bản mong muốn và nhấn **⬇ Cài đặt & Tạo Profile mới**.
-- *(Lưu ý với CurseForge)*: Một số gói trên CurseForge yêu cầu khóa API cá nhân — bạn có thể điền khóa `$2a$10$...` tại **⚙ Cài đặt → Khoá API CurseForge**.
+## 4. Kho Modpack & Nội Dung 3D Đa Nền Tảng (`Kho Modpack`)
+- **Chuyển đổi tức thì 4 nền tảng**: **Modrinth**, **CurseForge**, **FTB Modpacks** và **Technic** bằng thanh tab trượt 3D mượt mà; hỗ trợ nút **Nhập .mrpack / .zip** trực tiếp ngay trên thanh công cụ đầu trang.
+- **4 phân mục nội dung trên Modrinth & CurseForge**: Chuyển nhanh giữa **Modpack trọn gói**, **Kho Mod lẻ**, **Gói Shader** và **Gói Tài nguyên (Resource Packs)** ngay trong cùng một giao diện.
+- **Cột bộ lọc thông minh bên trái**:
+  - Sắp xếp theo *Lượt tải cao nhất, Độ liên quan, Mới cập nhật, Mới phát hành*.
+  - Lọc theo trình nạp Mod (`Fabric`, `Forge`, `NeoForge`, `Quilt`) và lọc phiên bản Minecraft theo nhánh chính (`1.21.x`, `1.20.x`, `1.19.x`, `1.18.x`, `1.16.x`, `1.12.x`, `1.7.x`) kèm ô tìm kiếm nhanh.
+- **Hai chế độ hiển thị & Phân trang**: Chuyển đổi linh hoạt giữa **Lưới thẻ 3D (2–3 cột)** có tải ảnh biểu tượng trực tuyến bất đồng bộ và **Danh sách chi tiết**, hỗ trợ chuyển trang (`Trang trước / Trang sau`) hoặc **Tải thêm vào danh sách**.
+- **Trang Chi tiết 3 thẻ & Trình xem ảnh Lightbox**:
+  - **Mô tả chi tiết**: Kết xuất đầy đủ tài liệu Markdown và hình ảnh minh họa của dự án.
+  - **Phiên bản**: Lọc danh sách bản phát hành theo kênh (`Release / Beta / Alpha`), Loader, phiên bản Minecraft và cài đặt 1 chạm đúng bản mong muốn.
+  - **Thư viện ảnh**: Lưới ảnh chụp màn hình tỉ lệ `16:9` kèm hộp thoại phóng to toàn khung (**Lightbox**) hỗ trợ chuyển ảnh trước/sau và nhấn `Esc` để đóng.
+- **Trạm Cài Đặt Modpack 3D**: Tùy chỉnh **Tên Profile mới**, thanh trượt **Bộ nhớ RAM (`4G / 6G / 8G / 12G`)**, chọn **Thư mục Instance riêng** (với Modpack) hoặc chọn **Profile đích** tự động tải kèm phụ thuộc bắt buộc (với Mod / Shader / Resource Pack); hỗ trợ **Thu gọn xuống thanh trạng thái dưới** hoặc **Hủy cài đặt** bất kỳ lúc nào.
+- *(Lưu ý với CurseForge)*: Một số gói trên CurseForge yêu cầu khóa API cá nhân — nhấn nút **Cấu hình CurseForge API Key** trên biểu ngữ thông báo hoặc vào **Cài đặt → Khoá API CurseForge**.
 
 ---
 

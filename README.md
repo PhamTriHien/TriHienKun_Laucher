@@ -19,9 +19,9 @@
 - **Quản Lý & Tải Tự Động Đa Phân Phối Java (`thk-java`)**:
   - Tự động phát hiện và tải Mojang JRE chính thức theo từng thế hệ Minecraft (`Java 8 / 17 / 21 / 25`, hỗ trợ từ `1.7.10` đến `1.21.x` và `26.x`).
   - Trình quản lý tải thủ công các bản JRE/JDK từ **Eclipse Temurin (Adoptium)**, **Azul Zulu** và **GraalVM Community**.
-- **Kho Nội Dung 5 Nguồn + Phân Giải Phụ Thuộc Đệ Quy (`thk-mods`)**:
-  - Tìm kiếm và cài đặt trực tiếp Modpack, Mod, Shader, ResourcePack và Plugin từ **Modrinth**, **CurseForge**, **FTB Modpacks**, **Technic Platform (+ Solder)** và **Spiget**.
-  - Nhập trực tiếp gói `.mrpack` và CurseForge `.zip` từ ổ cứng; tự động nhận diện các tệp `.jar` chép tay thông qua đối chiếu băm `SHA-1` trên Modrinth.
+- **Kho Nội Dung 5 Nguồn + Trạm Cài Đặt Modpack 3D (`thk-mods` + `views/modpacks.rs`)**:
+  - Tìm kiếm, lọc thông minh (theo Loader, nhánh phiên bản Minecraft, từ khóa, lượt tải) và cài đặt trực tiếp Modpack, Mod, Shader, ResourcePack và Plugin từ **Modrinth**, **CurseForge**, **FTB Modpacks**, **Technic Platform (+ Solder)** và **Spiget**.
+  - Hỗ trợ chế độ xem Lưới thẻ 3D / Danh sách, tải ảnh biểu tượng & thư viện ảnh chụp màn hình bất đồng bộ kèm trình phóng to **Lightbox**, lọc từng bản phát hành (`Release / Beta / Alpha`), Trạm Cài Đặt 3D tùy chỉnh tên Profile / RAM / thư mục riêng có nút **Thu gọn** & **Hủy cài đặt**, nhập trực tiếp `.mrpack` / `.zip` và nhận diện `.jar` qua mã băm `SHA-1`.
 - **Trình Quản Trị Máy Chủ Minecraft Chuyên Dụng (`thk-server`)**:
   - Cài đặt tự động **10 lõi máy chủ**: `Paper`, `Purpur`, `Folia`, `Vanilla`, `Fabric`, `Forge`, `NeoForge`, `Arclight`, `Mohist`, `SpongeVanilla`.
   - Bảng điều khiển trực tiếp hỗ trợ gợi ý lệnh bằng phím `Tab`, đo `CPU % / RAM MB / Số người chơi / Uptime` thực tế, cấu hình phần cứng & JVM sau khi tạo, trình quản lý tệp chống thoát thư mục (`SafePath`), trình sửa mã tích hợp, chỉnh sửa `server.properties`, `Whitelist` và `Banned Players`.
@@ -85,7 +85,7 @@ trihienkun-laucher/
 
 ### Kiểm thử, Phân tích Tĩnh & Đóng gói Release
 ```bash
-# Chạy trọn bộ 28 bài kiểm thử đơn vị trên toàn bộ 9 crates
+# Chạy trọn bộ 31 bài kiểm thử đơn vị trên toàn bộ 9 crates
 cargo test --workspace
 
 # Kiểm tra chất lượng mã nguồn nghiêm ngặt với Clippy (0 cảnh báo)
