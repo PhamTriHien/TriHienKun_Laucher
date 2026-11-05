@@ -4,9 +4,20 @@ pub mod modals;
 pub mod modpacks;
 pub mod servers;
 
+use crate::fx3d::{
+    gaming_card_3d, paint_gaming_3d_backdrop, paint_glowing_progress_bar, paint_icon_3d,
+    paint_vector_icon, section_enter_offset, tactile_button_3d, ButtonStyle3d, Icon3dKind,
+    VectorIcon,
+};
 use crate::state::{ActiveSection, LauncherAppState, ToastKind};
-use crate::theme::{ACCENT_AMBER, ACCENT_BLUE, ACCENT_EMERALD, ACCENT_EMERALD_DIM, ACCENT_RED};
-use egui::{Align, Align2, Color32, CornerRadius, Frame, Layout, Margin, RichText, Stroke, Vec2};
+use crate::theme::{
+    ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_EMERALD, ACCENT_ORANGE, ACCENT_RED,
+    ACCENT_VIOLET,
+};
+use egui::{
+    pos2, vec2, Align, Align2, Color32, CornerRadius, Frame, Layout, Margin, Rect, RichText,
+    Sense, Stroke, Vec2,
+};
 use thk_network::MotdSpan;
 
 pub fn render_root_ui(
@@ -18,12 +29,12 @@ pub fn render_root_ui(
     render_bottom_status_bar(app, ui);
 
     let bg_tex_id = app.custom_bg_tex.as_ref().map(|(_, tex)| tex.id());
+    let dark_mode = app.settings.theme == thk_core::models::ThemeMode::Dark;
     let central_frame = if bg_tex_id.is_some() {
-        let scrim = match app.settings.theme {
-            thk_core::models::ThemeMode::Dark => Color32::from_rgba_unmultiplied(11, 15, 23, 212),
-            thk_core::models::ThemeMode::Light => {
-                Color32::from_rgba_unmultiplied(245, 247, 250, 218)
-            }
+        let scrim = if dark_mode {
+            Color32::from_rgba_unmultiplied(9, 11, 20, 208)
+        } else {
+            Color32::from_rgba_unmultiplied(241, 245, 251, 214)
         };
         Frame::central_panel(ui.style())
             .fill(scrim)
@@ -32,19 +43,36 @@ pub fn render_root_ui(
         Frame::central_panel(ui.style()).inner_margin(Margin::symmetric(18, 14))
     };
 
+    let avail = ui.available_rect_before_wrap();
     if let Some(tex_id) = bg_tex_id {
-        let avail = ui.available_rect_before_wrap();
-        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         ui.painter().image(tex_id, avail, uv, Color32::WHITE);
     }
 
+    let sec_key = match app.section {
+        ActiveSection::Home => 1,
+        ActiveSection::Modpacks => 2,
+        ActiveSection::Servers => 3,
+        ActiveSection::Accounts => 4,
+    };
+
     egui::CentralPanel::default()
         .frame(central_frame)
-        .show(ui, |ui| match app.section {
-            ActiveSection::Home => home::render_home_view(app, ui),
-            ActiveSection::Modpacks => modpacks::render_modpacks_view(app, ui),
-            ActiveSection::Servers => servers::render_servers_view(app, ui),
-            ActiveSection::Accounts => accounts::render_accounts_view(app, ui, render_state),
+        .show(ui, |ui| {
+            let panel_rect = ui.max_rect();
+            paint_gaming_3d_backdrop(ui, panel_rect, dark_mode, bg_tex_id.is_some());
+
+            let (_, y_offset) = section_enter_offset(ui.ctx(), sec_key);
+            if y_offset > 0.2 {
+                ui.add_space(y_offset);
+            }
+
+            match app.section {
+                ActiveSection::Home => home::render_home_view(app, ui, render_state),
+                ActiveSection::Modpacks => modpacks::render_modpacks_view(app, ui),
+                ActiveSection::Servers => servers::render_servers_view(app, ui),
+                ActiveSection::Accounts => accounts::render_accounts_view(app, ui, render_state),
+            }
         });
 
     modals::render_all_modals(app, ui.ctx());
@@ -54,157 +82,204 @@ pub fn render_root_ui(
 fn render_left_nav_rail(app: &mut LauncherAppState, ui: &mut egui::Ui) {
     egui::Panel::left("thk_left_nav_rail")
         .resizable(false)
-        .exact_size(216.0)
+        .exact_size(236.0)
         .frame(
             Frame::side_top_panel(ui.style())
                 .inner_margin(Margin::symmetric(12, 14)),
         )
         .show(ui, |ui| {
             ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    let (rect, _) =
-                        ui.allocate_exact_size(Vec2::splat(32.0), egui::Sense::hover());
-                    ui.painter()
-                        .rect_filled(rect, CornerRadius::same(8), ACCENT_EMERALD_DIM);
-                    ui.painter().text(
-                        rect.center(),
-                        Align2::CENTER_CENTER,
-                        "T",
-                        egui::FontId::proportional(19.0),
-                        Color32::WHITE,
-                    );
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
-                        ui.label(
-                            RichText::new("TriHienKun")
-                                .strong()
-                                .size(15.5)
-                                .color(ACCENT_EMERALD),
-                        );
-                        ui.label(RichText::new("Laucher Pure Rust").size(11.0).weak());
-                    });
-                });
+                gaming_card_3d(
+                    ui,
+                    "nav_brand_showcase",
+                    false,
+                    ACCENT_EMERALD,
+                    Margin::symmetric(10, 8),
+                    |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            paint_icon_3d(ui, 40.0, Icon3dKind::BrandVoxelCore, true);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.label(
+                                    RichText::new("TriHienKun")
+                                        .strong()
+                                        .size(16.0)
+                                        .color(ACCENT_EMERALD),
+                                );
+                                ui.label(
+                                    RichText::new("Laucher • 3D wgpu")
+                                        .size(11.2)
+                                        .color(ACCENT_CYAN),
+                                );
+                            });
+                        });
+                    },
+                );
 
-                ui.add_space(14.0);
-                ui.separator();
-                ui.add_space(8.0);
+                ui.add_space(10.0);
 
                 let nav_items = [
-                    (ActiveSection::Home, "🏠", app.i18n.t("nav.home").to_string()),
+                    (
+                        ActiveSection::Home,
+                        Icon3dKind::HomePortal,
+                        ACCENT_EMERALD,
+                        app.i18n.t("nav.home").to_string(),
+                    ),
                     (
                         ActiveSection::Modpacks,
-                        "📦",
+                        Icon3dKind::ModpackCrate,
+                        ACCENT_AMBER,
                         app.i18n.t("nav.modpacks").to_string(),
                     ),
                     (
                         ActiveSection::Servers,
-                        "🖥",
+                        Icon3dKind::ServerBladeTower,
+                        ACCENT_CYAN,
                         app.i18n.t("nav.servers").to_string(),
                     ),
                     (
                         ActiveSection::Accounts,
-                        "👤",
+                        Icon3dKind::AccountCharacter,
+                        ACCENT_VIOLET,
                         app.i18n.t("nav.accounts").to_string(),
                     ),
                 ];
 
-                for (sec, icon, label) in nav_items {
+                for (sec, icon_kind, accent, label) in nav_items {
                     let is_active = app.section == sec;
-                    let fill = if is_active {
-                        Color32::from_rgba_unmultiplied(34, 197, 94, 42)
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-                    let stroke = if is_active {
-                        Stroke::new(1.2, ACCENT_EMERALD)
-                    } else {
-                        Stroke::NONE
-                    };
-                    let btn = egui::Button::new(
-                        RichText::new(format!("{icon}  {label}"))
-                            .size(13.5)
-                            .strong(),
-                    )
-                    .fill(fill)
-                    .stroke(stroke)
-                    .min_size(Vec2::new(ui.available_width(), 36.0));
-
-                    if ui.add(btn).clicked() {
+                    let (_, card_resp) = gaming_card_3d(
+                        ui,
+                        ("nav_sec_card", sec as u8),
+                        is_active,
+                        accent,
+                        Margin::symmetric(10, 6),
+                        |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                paint_icon_3d(ui, 28.0, icon_kind, is_active);
+                                ui.add_space(4.0);
+                                let text_col = if is_active {
+                                    Color32::WHITE
+                                } else {
+                                    ui.visuals().text_color()
+                                };
+                                ui.label(
+                                    RichText::new(label)
+                                        .size(13.6)
+                                        .strong()
+                                        .color(text_col),
+                                );
+                            });
+                        },
+                    );
+                    if card_resp.interact(Sense::click()).clicked() {
                         app.set_section(sec);
                     }
+                    ui.add_space(2.0);
                 }
 
-                ui.add_space(16.0);
+                ui.add_space(10.0);
                 ui.separator();
-                ui.add_space(8.0);
+                ui.add_space(6.0);
                 ui.label(
-                    RichText::new(app.i18n.tr("CÔNG CỤ HỆ THỐNG", "SYSTEM TOOLS"))
-                        .size(10.5)
+                    RichText::new(app.i18n.tr("Công cụ hệ thống", "System tools"))
+                        .size(11.5)
                         .weak()
                         .strong(),
                 );
                 ui.add_space(4.0);
 
-                let java_label = format!("☕  {}", app.i18n.t("nav.java"));
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 33.0],
-                        egui::Button::new(RichText::new(java_label).size(13.0)),
-                    )
-                    .clicked()
-                {
-                    app.click_sfx();
-                    app.open_java_manager();
-                }
+                let tools: [(u8, Icon3dKind, Color32, String); 3] = [
+                    (
+                        1,
+                        Icon3dKind::JavaReactor,
+                        ACCENT_ORANGE,
+                        app.i18n.t("nav.java").to_string(),
+                    ),
+                    (
+                        2,
+                        Icon3dKind::LanRadar,
+                        ACCENT_CYAN,
+                        app.i18n.t("nav.lan").to_string(),
+                    ),
+                    (
+                        3,
+                        Icon3dKind::SettingsGyro,
+                        ACCENT_VIOLET,
+                        app.i18n.t("nav.settings").to_string(),
+                    ),
+                ];
 
-                let lan_label = format!("🌐  {}", app.i18n.t("nav.lan"));
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 33.0],
-                        egui::Button::new(RichText::new(lan_label).size(13.0)),
-                    )
-                    .clicked()
-                {
-                    app.click_sfx();
-                    app.show_lan_modal = true;
-                }
-
-                let settings_label = format!("⚙  {}", app.i18n.t("nav.settings"));
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 33.0],
-                        egui::Button::new(RichText::new(settings_label).size(13.0)),
-                    )
-                    .clicked()
-                {
-                    app.click_sfx();
-                    app.show_settings_modal = true;
+                for (tool_id, icon_kind, accent, label) in tools {
+                    let is_open = match tool_id {
+                        1 => app.show_java_modal,
+                        2 => app.show_lan_modal,
+                        _ => app.show_settings_modal,
+                    };
+                    let (_, resp) = gaming_card_3d(
+                        ui,
+                        ("nav_tool_card", tool_id),
+                        is_open,
+                        accent,
+                        Margin::symmetric(10, 5),
+                        |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                paint_icon_3d(ui, 25.0, icon_kind, is_open);
+                                ui.add_space(4.0);
+                                ui.label(RichText::new(label).size(12.8).strong());
+                            });
+                        },
+                    );
+                    if resp.interact(Sense::click()).clicked() {
+                        app.click_sfx();
+                        match tool_id {
+                            1 => app.open_java_manager(),
+                            2 => app.show_lan_modal = true,
+                            _ => app.show_settings_modal = true,
+                        }
+                    }
+                    ui.add_space(2.0);
                 }
 
                 ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
                     ui.label(
-                        RichText::new(format!("v{} • wgpu 30", env!("CARGO_PKG_VERSION")))
-                            .size(11.0)
+                        RichText::new(format!("v{} • Pure Rust + wgpu 30", env!("CARGO_PKG_VERSION")))
+                            .size(10.8)
                             .weak(),
                     );
-                    if let Some(acct) = app.selected_account() {
-                        let prefix = app.i18n.tr("Đang chọn", "Active");
-                        ui.label(
-                            RichText::new(format!(
-                                "{prefix}: {} ({})",
-                                acct.username,
-                                acct.account_type.as_str()
-                            ))
-                            .size(11.5)
-                            .color(ACCENT_EMERALD),
-                        );
-                    } else {
-                        ui.label(
-                            RichText::new(app.i18n.tr("Chưa chọn tài khoản", "No account selected"))
-                                .size(11.5)
-                                .weak(),
-                        );
-                    }
+                    ui.add_space(4.0);
+                    let sel_acct = app.selected_account().cloned();
+                    gaming_card_3d(
+                        ui,
+                        "nav_active_player_hud",
+                        sel_acct.is_some(),
+                        ACCENT_EMERALD,
+                        Margin::symmetric(10, 7),
+                        |ui| {
+                            ui.set_width(ui.available_width());
+                            if let Some(acct) = sel_acct {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(&acct.username)
+                                            .size(13.0)
+                                            .strong()
+                                            .color(ACCENT_EMERALD),
+                                    );
+                                    badge(ui, acct.account_type.as_str(), ACCENT_BLUE);
+                                });
+                            } else {
+                                ui.label(
+                                    RichText::new(
+                                        app.i18n.tr("Chưa chọn tài khoản", "No account selected"),
+                                    )
+                                    .size(11.8)
+                                    .weak(),
+                                );
+                            }
+                        },
+                    );
                 });
             });
         });
@@ -217,7 +292,7 @@ fn render_bottom_status_bar(app: &mut LauncherAppState, ui: &mut egui::Ui) {
 
     egui::Panel::bottom("thk_bottom_progress_bar")
         .resizable(false)
-        .exact_size(46.0)
+        .exact_size(48.0)
         .frame(
             Frame::side_top_panel(ui.style())
                 .inner_margin(Margin::symmetric(16, 8)),
@@ -227,20 +302,21 @@ fn render_bottom_status_bar(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                 if let Some(ref prog) = app.active_progress {
                     let frac = (prog.percent / 100.0).clamp(0.0, 1.0);
                     let speed = format!("{}/s", format_bytes(prog.bytes_per_sec));
-                    let summary = format!(
-                        "[{}] {} ({}/{}) • {}",
-                        prog.phase, prog.message, prog.completed_files, prog.total_files, speed
-                    );
-                    ui.add(
-                        egui::ProgressBar::new(frac)
-                            .desired_width(280.0)
-                            .show_percentage(),
-                    );
+                    paint_glowing_progress_bar(ui, frac, 260.0, 18.0);
                     ui.add_space(8.0);
-                    ui.label(RichText::new(summary).size(12.0));
+                    badge(ui, &prog.phase, ACCENT_CYAN);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} ({}/{})",
+                            prog.message, prog.completed_files, prog.total_files
+                        ))
+                        .size(12.2)
+                        .strong(),
+                    );
+                    badge(ui, &speed, ACCENT_EMERALD);
                 } else if let Some(ref msg) = app.busy_message {
                     ui.spinner();
-                    ui.label(RichText::new(msg).size(12.5));
+                    ui.label(RichText::new(msg).size(12.5).strong());
                 }
             });
         });
@@ -252,26 +328,28 @@ fn render_toast_overlay(app: &LauncherAppState, ctx: &egui::Context) {
     }
 
     egui::Area::new(egui::Id::unique("thk_toasts_overlay"))
-        .anchor(Align2::RIGHT_BOTTOM, Vec2::new(-18.0, -56.0))
+        .anchor(Align2::RIGHT_BOTTOM, Vec2::new(-18.0, -58.0))
         .order(egui::Order::Foreground)
         .interactable(false)
         .show(ctx, |ui| {
             ui.vertical(|ui| {
                 for toast in &app.toasts {
-                    let (border_col, prefix) = match toast.kind {
-                        ToastKind::Success => (ACCENT_EMERALD, "✔"),
-                        ToastKind::Error => (ACCENT_RED, "✖"),
-                        ToastKind::Info => (ACCENT_BLUE, "ℹ"),
+                    let (border_col, v_icon) = match toast.kind {
+                        ToastKind::Success => (ACCENT_EMERALD, VectorIcon::Sparkles),
+                        ToastKind::Error => (ACCENT_RED, VectorIcon::Shield),
+                        ToastKind::Info => (ACCENT_CYAN, VectorIcon::Globe),
                     };
                     Frame::popup(ui.style())
                         .stroke(Stroke::new(1.5, border_col))
-                        .inner_margin(Margin::symmetric(12, 8))
+                        .corner_radius(CornerRadius::same(10))
+                        .inner_margin(Margin::symmetric(12, 9))
                         .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(format!("{prefix}  {}", toast.text))
-                                    .size(12.5)
-                                    .strong(),
-                            );
+                            ui.horizontal(|ui| {
+                                let (ic_rect, _) =
+                                    ui.allocate_exact_size(vec2(15.0, 15.0), Sense::hover());
+                                paint_vector_icon(ui.painter(), ic_rect, v_icon, border_col);
+                                ui.label(RichText::new(&toast.text).size(12.5).strong());
+                            });
                         });
                 }
             });
@@ -279,22 +357,82 @@ fn render_toast_overlay(app: &LauncherAppState, ctx: &egui::Context) {
 }
 
 pub fn primary_button(ui: &mut egui::Ui, label: impl Into<String>) -> egui::Response {
-    ui.add(
-        egui::Button::new(
-            RichText::new(label.into())
-                .color(Color32::WHITE)
-                .strong(),
-        )
-        .fill(ACCENT_EMERALD_DIM)
-        .stroke(Stroke::new(1.0, ACCENT_EMERALD)),
+    tactile_button_3d(
+        ui,
+        None,
+        label,
+        ButtonStyle3d::PrimaryEmerald,
+        Vec2::ZERO,
+    )
+}
+
+pub fn primary_icon_button(
+    ui: &mut egui::Ui,
+    icon: VectorIcon,
+    label: impl Into<String>,
+) -> egui::Response {
+    tactile_button_3d(
+        ui,
+        Some(icon),
+        label,
+        ButtonStyle3d::PrimaryEmerald,
+        Vec2::ZERO,
+    )
+}
+
+pub fn accent_icon_button(
+    ui: &mut egui::Ui,
+    icon: VectorIcon,
+    label: impl Into<String>,
+) -> egui::Response {
+    tactile_button_3d(
+        ui,
+        Some(icon),
+        label,
+        ButtonStyle3d::AccentViolet,
+        Vec2::ZERO,
+    )
+}
+
+pub fn secondary_button(ui: &mut egui::Ui, label: impl Into<String>) -> egui::Response {
+    tactile_button_3d(
+        ui,
+        None,
+        label,
+        ButtonStyle3d::SecondaryGlass,
+        Vec2::ZERO,
+    )
+}
+
+pub fn secondary_icon_button(
+    ui: &mut egui::Ui,
+    icon: VectorIcon,
+    label: impl Into<String>,
+) -> egui::Response {
+    tactile_button_3d(
+        ui,
+        Some(icon),
+        label,
+        ButtonStyle3d::SecondaryGlass,
+        Vec2::ZERO,
     )
 }
 
 pub fn danger_button(ui: &mut egui::Ui, label: impl Into<String>) -> egui::Response {
-    ui.add(
-        egui::Button::new(RichText::new(label.into()).color(Color32::WHITE).strong())
-            .fill(Color32::from_rgb(153, 27, 27))
-            .stroke(Stroke::new(1.0, ACCENT_RED)),
+    tactile_button_3d(ui, None, label, ButtonStyle3d::DangerRose, Vec2::ZERO)
+}
+
+pub fn danger_icon_button(
+    ui: &mut egui::Ui,
+    icon: VectorIcon,
+    label: impl Into<String>,
+) -> egui::Response {
+    tactile_button_3d(
+        ui,
+        Some(icon),
+        label,
+        ButtonStyle3d::DangerRose,
+        Vec2::ZERO,
     )
 }
 
@@ -304,11 +442,14 @@ pub fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
             color.r(),
             color.g(),
             color.b(),
-            36,
+            34,
         ))
-        .stroke(Stroke::new(1.0, color))
-        .corner_radius(CornerRadius::same(5))
-        .inner_margin(Margin::symmetric(6, 2))
+        .stroke(Stroke::new(
+            1.0,
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 190),
+        ))
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(Margin::symmetric(7, 2))
         .show(ui, |ui| {
             ui.label(RichText::new(text).size(11.0).color(color).strong());
         });

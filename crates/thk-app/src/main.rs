@@ -2,6 +2,7 @@
 #![deny(unsafe_code)]
 
 mod audio;
+mod fx3d;
 mod state;
 mod theme;
 mod tray;
@@ -149,6 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use crate::audio::{synthesize_sfx_samples, SoundEffect};
+    use crate::fx3d::{build_icon_3d_scene, Icon3dKind, Poly3dBuffer};
     use crate::theme::{build_window_icon_data, generate_brand_icon_image};
     use crate::updater::{extract_sha256_for_asset, is_newer_semver};
 
@@ -191,5 +193,32 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 *trihienkun-lau
         assert_eq!(icon_data.width, 64);
         assert_eq!(icon_data.height, 64);
         assert_eq!(icon_data.rgba.len(), 64 * 64 * 4);
+    }
+
+    #[test]
+    fn fx3d_procedural_icons_and_projection_are_valid() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(48.0, 48.0));
+        let probe = Poly3dBuffer::new(rect, 4.4, 2.55);
+        let (pt, depth) = probe.project(glam::Vec3::new(0.25, -0.5, 0.4));
+        assert!(pt.x.is_finite() && pt.y.is_finite());
+        assert!(depth > 0.4);
+
+        let kinds = [
+            Icon3dKind::BrandVoxelCore,
+            Icon3dKind::HomePortal,
+            Icon3dKind::ModpackCrate,
+            Icon3dKind::ServerBladeTower,
+            Icon3dKind::AccountCharacter,
+            Icon3dKind::JavaReactor,
+            Icon3dKind::LanRadar,
+            Icon3dKind::SettingsGyro,
+            Icon3dKind::LaunchPrism,
+        ];
+        for kind in kinds {
+            for sample_t in [0.0_f32, 0.65, 1.85, std::f32::consts::PI] {
+                let buf = build_icon_3d_scene(rect, kind, sample_t);
+                assert!(buf.face_count() >= 3);
+            }
+        }
     }
 }

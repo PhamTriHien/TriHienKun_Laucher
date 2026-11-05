@@ -11,6 +11,20 @@ pub struct SkinVertex {
     pub uv: [f32; 2],
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct StageVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub color: [f32; 4],
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StageMeshBatch {
+    pub vertices: Vec<StageVertex>,
+    pub indices: Vec<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackEquipmentMode {
     None,
@@ -455,4 +469,238 @@ fn push_quad(
 
     // Two triangles (CCW front-facing AND double-sided rendered for overlay hats/capes)
     indices.extend_from_slice(&[base, base + 3, base + 2, base, base + 2, base + 1]);
+}
+
+pub fn build_stage_pedestal_meshes(anim_time: f32) -> StageMeshBatch {
+    let mut batch = StageMeshBatch::default();
+    let pulse = (anim_time * 2.4).sin() * 0.5 + 0.5;
+
+    // 1. Lower octagonal obsidian base
+    append_regular_prism(
+        &mut batch,
+        8,
+        12.4,
+        -2.5,
+        -1.05,
+        0.0,
+        [0.08, 0.11, 0.19, 1.0],
+        [0.05, 0.07, 0.13, 1.0],
+    );
+
+    // 2. Upper arena dais
+    append_regular_prism(
+        &mut batch,
+        8,
+        9.6,
+        -1.05,
+        -0.06,
+        std::f32::consts::FRAC_PI_8,
+        [0.12, 0.17, 0.28, 1.0],
+        [0.08, 0.12, 0.21, 1.0],
+    );
+
+    // 3. Glowing emerald energy pad right beneath character boots
+    let pad_g = 0.72 + pulse * 0.24;
+    append_regular_prism(
+        &mut batch,
+        8,
+        6.1,
+        -0.06,
+        0.0,
+        0.0,
+        [0.10, pad_g, 0.46, 1.0],
+        [0.06, 0.48, 0.31, 1.0],
+    );
+
+    // 4. Inner rotating emerald holographic segments
+    let seg_count = 8usize;
+    for i in 0..seg_count {
+        let angle =
+            (i as f32 / seg_count as f32) * std::f32::consts::TAU + anim_time * 0.85;
+        let bob = (anim_time * 2.0 + i as f32 * 0.8).sin() * 0.18;
+        let xf = Mat4::from_rotation_y(angle)
+            * Mat4::from_translation(Vec3::new(0.0, -0.18 + bob, 11.4));
+        let col = if i % 2 == 0 {
+            [0.16, 0.88, 0.56, 1.0]
+        } else {
+            [0.14, 0.72, 0.92, 1.0]
+        };
+        append_stage_cuboid(&mut batch, xf, Vec3::new(2.3, 0.28, 0.48), col);
+    }
+
+    // 5. Outer tilted amethyst/cyan orbital segments
+    let orbit_tilt = Mat4::from_translation(Vec3::new(0.0, 2.2, 0.0))
+        * Mat4::from_rotation_z(0.14)
+        * Mat4::from_rotation_x(0.11);
+    for i in 0..seg_count {
+        let angle =
+            (i as f32 / seg_count as f32) * std::f32::consts::TAU - anim_time * 0.52;
+        let xf = orbit_tilt
+            * Mat4::from_rotation_y(angle)
+            * Mat4::from_translation(Vec3::new(0.0, 0.0, 14.3));
+        let col = if i % 2 == 0 {
+            [0.58, 0.38, 0.98, 1.0]
+        } else {
+            [0.22, 0.76, 0.96, 1.0]
+        };
+        append_stage_cuboid(&mut batch, xf, Vec3::new(2.0, 0.20, 0.34), col);
+    }
+
+    // 6. Floating 3D voxel crystal motes rising gently around the character
+    for i in 0..6usize {
+        let seed = i as f32 * std::f32::consts::FRAC_PI_3;
+        let orbit_a = seed + anim_time * (0.38 + (i % 3) as f32 * 0.11);
+        let radius = 11.2 + (i % 2) as f32 * 2.6;
+        let base_y = 5.5 + i as f32 * 3.6 + (anim_time * 1.6 + seed).sin() * 1.35;
+        let pos = Vec3::new(orbit_a.cos() * radius, base_y, orbit_a.sin() * radius);
+        let spin_xf = Mat4::from_translation(pos)
+            * Mat4::from_rotation_y(anim_time * 1.7 + seed)
+            * Mat4::from_rotation_x(anim_time * 1.2 + seed * 0.5);
+        let col = match i % 3 {
+            0 => [0.20, 0.92, 0.60, 1.0],
+            1 => [0.65, 0.46, 0.99, 1.0],
+            _ => [0.22, 0.80, 0.98, 1.0],
+        };
+        let s = 0.72 + (i % 2) as f32 * 0.22;
+        append_stage_cuboid(&mut batch, spin_xf, Vec3::splat(s), col);
+    }
+
+    batch
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_regular_prism(
+    batch: &mut StageMeshBatch,
+    sides: usize,
+    radius: f32,
+    y_bottom: f32,
+    y_top: f32,
+    yaw_offset: f32,
+    top_color: [f32; 4],
+    side_color: [f32; 4],
+) {
+    let n = sides.max(3);
+    let top_center_idx = batch.vertices.len() as u32;
+    batch.vertices.push(StageVertex {
+        position: [0.0, y_top, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        color: top_color,
+    });
+
+    let ring_start = batch.vertices.len() as u32;
+    for i in 0..n {
+        let a = yaw_offset + (i as f32 / n as f32) * std::f32::consts::TAU;
+        batch.vertices.push(StageVertex {
+            position: [a.sin() * radius, y_top, a.cos() * radius],
+            normal: [0.0, 1.0, 0.0],
+            color: top_color,
+        });
+    }
+    for i in 0..n {
+        let cur = ring_start + i as u32;
+        let next = ring_start + ((i + 1) % n) as u32;
+        batch.indices.extend_from_slice(&[top_center_idx, cur, next]);
+    }
+
+    for i in 0..n {
+        let a0 = yaw_offset + (i as f32 / n as f32) * std::f32::consts::TAU;
+        let a1 = yaw_offset + ((i + 1) as f32 / n as f32) * std::f32::consts::TAU;
+        let p0_top = Vec3::new(a0.sin() * radius, y_top, a0.cos() * radius);
+        let p1_top = Vec3::new(a1.sin() * radius, y_top, a1.cos() * radius);
+        let p1_bot = Vec3::new(a1.sin() * radius, y_bottom, a1.cos() * radius);
+        let p0_bot = Vec3::new(a0.sin() * radius, y_bottom, a0.cos() * radius);
+        let mid_a = 0.5 * (a0 + a1);
+        let normal = Vec3::new(mid_a.sin(), 0.0, mid_a.cos()).normalize_or_zero();
+        push_stage_quad(
+            batch,
+            [p0_top, p1_top, p1_bot, p0_bot],
+            normal,
+            side_color,
+        );
+    }
+}
+
+fn append_stage_cuboid(batch: &mut StageMeshBatch, xf: Mat4, size: Vec3, color: [f32; 4]) {
+    let h = size * 0.5;
+    let faces: [([Vec3; 4], Vec3); 6] = [
+        (
+            [
+                Vec3::new(-h.x, h.y, h.z),
+                Vec3::new(h.x, h.y, h.z),
+                Vec3::new(h.x, -h.y, h.z),
+                Vec3::new(-h.x, -h.y, h.z),
+            ],
+            Vec3::Z,
+        ),
+        (
+            [
+                Vec3::new(h.x, h.y, -h.z),
+                Vec3::new(-h.x, h.y, -h.z),
+                Vec3::new(-h.x, -h.y, -h.z),
+                Vec3::new(h.x, -h.y, -h.z),
+            ],
+            Vec3::NEG_Z,
+        ),
+        (
+            [
+                Vec3::new(-h.x, h.y, -h.z),
+                Vec3::new(-h.x, h.y, h.z),
+                Vec3::new(-h.x, -h.y, h.z),
+                Vec3::new(-h.x, -h.y, -h.z),
+            ],
+            Vec3::NEG_X,
+        ),
+        (
+            [
+                Vec3::new(h.x, h.y, h.z),
+                Vec3::new(h.x, h.y, -h.z),
+                Vec3::new(h.x, -h.y, -h.z),
+                Vec3::new(h.x, -h.y, h.z),
+            ],
+            Vec3::X,
+        ),
+        (
+            [
+                Vec3::new(-h.x, h.y, -h.z),
+                Vec3::new(h.x, h.y, -h.z),
+                Vec3::new(h.x, h.y, h.z),
+                Vec3::new(-h.x, h.y, h.z),
+            ],
+            Vec3::Y,
+        ),
+        (
+            [
+                Vec3::new(-h.x, -h.y, h.z),
+                Vec3::new(h.x, -h.y, h.z),
+                Vec3::new(h.x, -h.y, -h.z),
+                Vec3::new(-h.x, -h.y, -h.z),
+            ],
+            Vec3::NEG_Y,
+        ),
+    ];
+
+    for (corners, local_n) in faces {
+        let world_corners = corners.map(|c| xf.transform_point3(c));
+        let world_n = xf.transform_vector3(local_n).normalize_or_zero();
+        push_stage_quad(batch, world_corners, world_n, color);
+    }
+}
+
+fn push_stage_quad(
+    batch: &mut StageMeshBatch,
+    corners: [Vec3; 4],
+    normal: Vec3,
+    color: [f32; 4],
+) {
+    let base = batch.vertices.len() as u32;
+    for p in corners {
+        batch.vertices.push(StageVertex {
+            position: p.to_array(),
+            normal: normal.to_array(),
+            color,
+        });
+    }
+    batch
+        .indices
+        .extend_from_slice(&[base, base + 3, base + 2, base, base + 2, base + 1]);
 }

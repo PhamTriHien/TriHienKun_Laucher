@@ -6,9 +6,10 @@
 
 ## Điểm Nổi Bật Cốt Lõi
 
-- **100% Native Rust & Đồ Họa GPU `wgpu 30.0.1`**:
+- **100% Native Rust & Giao Diện Gaming 3D Thời Gian Thực (`wgpu 30.0.1` + `fx3d`)**:
   - Khởi động tức thì, toàn bộ 9 crates tuân thủ nghiêm ngặt `#![deny(unsafe_code)]`.
-  - Tích hợp khung xem mô hình nhân vật 3D thời gian thực bằng WGSL shader: hỗ trợ khung xương `Wide (4px)` / `Slim (3px)`, lớp giáp ngoài (`Outer Overlay`), áo choàng `Cape`, cánh `Elytra`, hoạt ảnh bước đi và xoay quỹ đạo 360°.
+  - **Sân khấu Nhân vật 3D Hologram (`thk-renderer3d`)**: Kết xuất MSAA 4x bằng cặp WGSL shader (`SKIN_SHADER_WGSL` chiếu sáng viền kép Fresnel + `STAGE_SHADER_WGSL` bệ đá bát giác Obsidian-Emerald, 2 vòng năng lượng Hologram xoay ngược chiều và tinh thể Voxel lơ lửng) hiển thị trực tiếp ngay tại Banner Trang chủ và Phòng Studio Tài khoản.
+  - **Bộ máy Hoạt ảnh Giao diện 3D 60 FPS (`fx3d.rs`)**: 9 biểu tượng 3D đa bộ phận chiếu phối cảnh `glam::Mat4` thời gian thực, nền lưới chân trời 3D Parallax 3 lớp theo chuột, thẻ kính vát cạnh ánh kim 3D (`gaming_card_3d`), nút bấm cơ học 3D có đế nổi (`tactile_button_3d`), thanh chuyển tab trượt mượt (`sliding_pill_tabs`), biểu đồ cột Isometric Voxel 3D và ống dẫn gói tin Bore 3D.
 - **Đa Profile & Chạy Song Song Nhiều Phiên Bản (`InstanceSupervisor`)**:
   - Hỗ trợ trọn vẹn **5 Mod Loaders**: `Vanilla`, `Fabric` (tự động cài gói tối ưu FPS: *Sodium, Lithium, FerriteCore, EntityCulling, ModMenu*), `Quilt`, `Forge` (tích hợp `ForgeWrapper` cho `1.13+`) và `NeoForge`.
   - Cho phép chọn thư mục lưu trữ tùy chỉnh cho từng Profile, chạy đồng thời nhiều tài khoản/phiên bản, vào thẳng máy chủ qua `QuickPlay` và thống kê biểu đồ giờ chơi 14 ngày gần nhất trên **SQLite WAL**.
@@ -49,8 +50,8 @@ trihienkun-laucher/
 │   ├── thk-launcher/           # Vanilla + 5 Mod Loaders, InstanceSupervisor, CrashAnalyzer
 │   ├── thk-server/             # 10 lõi máy chủ, LocalServerSupervisor, Quản lý tệp & cấu hình
 │   ├── thk-network/            # Minecraft Ping + DNS SRV, LAN Multicast an toàn, Bore, Discord RPC
-│   ├── thk-renderer3d/         # Đường ống đồ họa WGSL wgpu 30 hiển thị nhân vật 3D + Cape/Elytra
-│   └── thk-app/                # Ứng dụng Desktop eframe/egui, âm thanh rodio, Tray & SHA-256 Updater
+│   ├── thk-renderer3d/         # Đường ống đồ họa WGSL wgpu 30 (MSAA 4x, Sân khấu 3D Hologram & Nhân vật)
+│   └── thk-app/                # Ứng dụng Desktop eframe/egui, bộ máy 3D UI fx3d, âm thanh rodio, Tray & Updater
 ├── docs/
 │   ├── ARCHITECTURE.md         # Kiến trúc chi tiết, sơ đồ phụ thuộc & luồng khởi chạy
 │   ├── DATABASE_SCHEMA.md      # Lược đồ 7 bảng SQLite WAL, AppPaths & OS Keyring
@@ -84,7 +85,7 @@ trihienkun-laucher/
 
 ### Kiểm thử, Phân tích Tĩnh & Đóng gói Release
 ```bash
-# Chạy trọn bộ 26 bài kiểm thử đơn vị trên toàn bộ 9 crates
+# Chạy trọn bộ 28 bài kiểm thử đơn vị trên toàn bộ 9 crates
 cargo test --workspace
 
 # Kiểm tra chất lượng mã nguồn nghiêm ngặt với Clippy (0 cảnh báo)

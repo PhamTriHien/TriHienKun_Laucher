@@ -16,7 +16,7 @@ Tài liệu này mô tả kiến trúc tổng thể, sơ đồ phụ thuộc gi�
 
 ---
 
-## 2. Sơ Đồ Phụ Thuộc Cargo Workspace (9 Crates — 55 Tệp `.rs`)
+## 2. Sơ Đồ Phụ Thuộc Cargo Workspace (9 Crates — 56 Tệp `.rs`)
 
 ```mermaid
 flowchart TD
@@ -66,8 +66,8 @@ flowchart TD
 | `crates/thk-launcher` | `vanilla`, `loaders`, `supervisor`, `crash` | Đánh giá quy tắc điều kiện hệ điều hành/kiến trúc Mojang, hợp nhất thư viện Maven theo khóa chống trùng lặp `(group, artifact, classifier)`, cài đặt 5 Mod Loaders (`Vanilla`, `Fabric`, `Quilt`, `Forge`, `NeoForge`), quản lý đa phiên bản game chạy song song và phân tích nhật ký sự cố `CrashAnalyzer`. |
 | `crates/thk-server` | `jars`, `manager`, `config_files` | Tải và cài đặt tự động 10 lõi máy chủ chuyên dụng, giám sát tiến trình máy chủ (`sysinfo` đo CPU/RAM thực tế, đếm người chơi trực tuyến), lọc ký tự điều khiển đầu vào Console, trình quản lý tệp an toàn và chỉnh sửa `server.properties` / `whitelist.json` / `banned-players.json`. |
 | `crates/thk-network` | `ping`, `lan_tunnel`, `discord_rpc` | Thực thi giao thức Minecraft Server List Ping (kèm phân giải bản ghi DNS `_minecraft._tcp` SRV và định dạng màu MOTD), lắng nghe gói quảng bá `Open to LAN` có xác thực IP card mạng nội bộ, nhúng trực tiếp thư viện `bore-cli` mở đường hầm TCP và đồng bộ trạng thái Discord Rich Presence. |
-| `crates/thk-renderer3d` | `geometry`, `pipeline`, `skin_image` | Xây dựng lưới đa giác 3D 2 lớp (Inner Body + Outer Overlay + Cape + Elytra nghiêng động), chuyển đổi skin `64x32` cổ điển sang `64x64`, kết xuất bằng WGSL shader (`SKIN_SHADER_WGSL`) có kiểm thử chiều sâu `Depth24Plus` ngay trong khung vẽ `egui::PaintCallback`. |
-| `crates/thk-app` | `main`, `state`, `theme`, `audio`, `tray`, `updater`, `views/*` | Điểm vào ứng dụng Desktop, điều phối trạng thái bất đồng bộ, tổng hợp âm thanh giao diện/nhạc nền `rodio`, khay hệ thống `tray-icon`, bộ cập nhật kiểm chứng `SHA-256` và toàn bộ các màn hình UI. |
+| `crates/thk-renderer3d` | `geometry`, `pipeline`, `skin_image` | Xây dựng lưới nhân vật 3D 2 lớp (Inner Body + Outer Overlay + Cape + Elytra), bệ sân khấu bát giác 3D kèm vòng năng lượng Hologram (`build_stage_pedestal_meshes`), chuyển đổi skin `64x32` sang `64x64`, kết xuất MSAA 4x bằng cặp WGSL shader (`SKIN_SHADER_WGSL` + `STAGE_SHADER_WGSL`) có chiếu sáng viền Fresnel và làm mượt camera lò xo mũ (`snap_to_preset`). |
+| `crates/thk-app` | `main`, `fx3d`, `state`, `theme`, `audio`, `tray`, `updater`, `views/*` | Điểm vào ứng dụng Desktop, bộ máy đồ họa giao diện 3D 60 FPS (`fx3d`: chiếu phối cảnh `Mat4` cho 9 biểu tượng 3D đa bộ phận, nền Parallax 3 lớp, thẻ/nút cơ học 3D, biểu đồ cột Isometric 3D), điều phối trạng thái bất đồng bộ, âm thanh `rodio`, khay hệ thống `tray-icon` và bộ cập nhật `SHA-256`. |
 
 ---
 
@@ -119,13 +119,17 @@ sequenceDiagram
 
 ---
 
-## 5. Đường Ống Kết Xuất Nhân Vật 3D (`thk-renderer3d`)
+## 5. Đường Ống Kết Xuất Nhân Vật 3D (`thk-renderer3d`) & Giao Diện Gaming 3D (`fx3d`)
 
-`SkinPreviewViewport` nhúng trực tiếp vào `egui_wgpu::RenderState` thông qua `CallbackTrait`:
+`SkinPreviewViewport` kết xuất vào đích trung gian khử răng cưa đa mẫu **MSAA 4x** (`Depth24Plus`) trên `egui_wgpu::RenderState` và hiển thị đồng bộ tại cả **Banner Arena Trang chủ** lẫn **Phòng Studio Tài khoản**:
 
 - **Chuẩn hóa Texture (`skin_image.rs`)**: Tự động chuyển đổi ảnh skin cổ điển `64x32` sang bố cục chuẩn `64x64` có lật đối xứng tay/chân trái; chuẩn hóa texture Cape/Elytra về tỉ lệ chuẩn `2:1` (tối thiểu `64x32`).
-- **Xây dựng Hình học (`geometry.rs`)**:
-  - Hỗ trợ cả hai khung xương `Wide` (tay rộng `4px`) và `Slim` (tay rộng `3px`).
-  - Kết xuất đầy đủ 6 khối cơ thể trong (`Head`, `Body`, `RightArm`, `LeftArm`, `RightLeg`, `LeftLeg`) và 6 khối lớp phủ ngoài (`Hat`, `Jacket`, `Sleeves`, `Pants` phóng đại `0.25–0.5` đơn vị).
-  - Mô phỏng chuyển động bước đi hình sin cho tứ chi, độ bay của áo choàng `Cape` và cặp cánh `Elytra` tách đôi đối xứng.
-- **Shader WGSL (`SKIN_SHADER_WGSL` trong `pipeline.rs`)**: Áp dụng ma trận chiếu phối cảnh thuận tay phải chuẩn miền sâu `[0.0, 1.0]` của `wgpu`, lọc lấy mẫu `Nearest` giữ nét điểm ảnh Pixel Art, loại bỏ pixel trong suốt (`alpha < 0.05`) và chiếu sáng khuếch tán hai nguồn kết hợp ánh sáng môi trường.
+- **Xây dựng Hình học Nhân vật & Sân khấu Hologram (`geometry.rs`)**:
+  - Hỗ trợ cả hai khung xương `Wide` (tay rộng `4px`) và `Slim` (tay rộng `3px`), 6 khối cơ thể trong và 6 khối lớp phủ ngoài (`0.25–0.5` đơn vị), áo choàng `Cape` và cánh `Elytra`.
+  - Sinh động lưới sân khấu 3D (`build_stage_pedestal_meshes`): đài bát giác 2 tầng, tâm phát sáng nhịp thở, 2 vòng năng lượng Hologram xoay ngược chiều và 6 tinh thể Voxel bay quỹ đạo 3D quanh nhân vật.
+- **Cặp Shader WGSL & Camera Lò xo (`pipeline.rs`)**:
+  - `STAGE_SHADER_WGSL` kết xuất sân khấu 3D ở lượt vẽ đầu; `SKIN_SHADER_WGSL` áp dụng ma trận chiếu phối cảnh thuận tay phải miền sâu `[0.0, 1.0]`, lấy mẫu `Nearest` giữ nét Pixel Art, kết hợp chiếu sáng khuếch tán hai nguồn và viền sáng kép **Fresnel Rim** (Emerald + Violet) phụ thuộc góc nhìn `eye_pos`.
+  - Góc xoay `yaw`, `pitch` và khoảng cách `distance` nội suy mượt theo hàm mũ (`1 - exp(-14 * dt)`), hỗ trợ chuyển nhanh giữa các góc máy định sẵn (`snap_to_preset`).
+- **Bộ máy Hoạt ảnh Giao diện 3D (`crates/thk-app/src/fx3d.rs`)**:
+  - `Poly3dBuffer`: Phép chiếu phối cảnh `glam::Mat4`, loại bỏ mặt khuất (`backface culling`), tô bóng Lambertian + Rim và sắp xếp chiều sâu Painter's Algorithm ở tốc độ 60 FPS cho 9 biểu tượng 3D đa bộ phận (`BrandVoxelCore`, `HomePortal`, `ModpackCrate`, `ServerBladeTower`, `AccountCharacter`, `JavaReactor`, `LanRadar`, `SettingsGyro`, `LaunchPrism`).
+  - Các thành phần tương tác 3D: nền lưới chân trời 3D Parallax 3 lớp (`paint_gaming_3d_backdrop`), thẻ vát cạnh phản chiếu vệt sáng theo con trỏ (`gaming_card_3d`), nút cơ học có đế nổi 3D và độ lún `0.97` khi nhấn (`tactile_button_3d`), thanh chuyển tab trượt mượt (`sliding_pill_tabs`), biểu đồ cột khối Voxel Isometric 3D (`paint_3d_isometric_bars`) và ống dẫn dòng gói tin Bore (`paint_3d_tunnel_conduit`).

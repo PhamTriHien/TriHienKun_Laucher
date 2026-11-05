@@ -1,4 +1,6 @@
-use crate::geometry::{build_character_meshes, BackEquipmentMode, SkinVertex};
+use crate::geometry::{
+    build_character_meshes, build_stage_pedestal_meshes, BackEquipmentMode, SkinVertex, StageVertex,
+};
 use crate::skin_image::{generate_default_brand_cape, generate_default_steve_skin};
 use bytemuck::{Pod, Zeroable};
 use core::num::NonZeroU64;
@@ -15,11 +17,14 @@ const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const MAX_VERTICES: usize = 2048;
 const MAX_INDICES: usize = 3072;
+const MAX_STAGE_VERTICES: usize = 2048;
+const MAX_STAGE_INDICES: usize = 3072;
 
 const SKIN_SHADER_WGSL: &str = r#"
 struct SceneUniforms {
     mvp: mat4x4<f32>,
     light_dir: vec4<f32>,
+    eye_pos: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -40,6 +45,7 @@ struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
+    @location(2) world_pos: vec3<f32>,
 };
 
 @vertex
@@ -48,18 +54,22 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.clip_pos = scene.mvp * vec4<f32>(in.position, 1.0);
     out.world_normal = in.normal;
     out.uv = in.uv;
+    out.world_pos = in.position;
     return out;
 }
 
-fn shade_sample(sample: vec4<f32>, normal_in: vec3<f32>) -> vec4<f32> {
+fn shade_sample(sample: vec4<f32>, normal_in: vec3<f32>, world_pos: vec3<f32>) -> vec4<f32> {
     let n = normalize(normal_in);
     let key_dir = normalize(scene.light_dir.xyz);
-    let fill_dir = normalize(vec3<f32>(-0.55, 0.35, -0.75));
+    let fill_dir = normalize(vec3<f32>(-0.62, 0.38, -0.68));
+    let view_dir = normalize(scene.eye_pos.xyz - world_pos);
     let key = max(dot(n, key_dir), 0.0);
     let fill = max(dot(n, fill_dir), 0.0);
-    let hemi = n.y * 0.08 + 0.54;
-    let intensity = clamp(hemi + key * 0.38 + fill * 0.14, 0.35, 1.08);
-    let rgb = clamp(sample.rgb * intensity, vec3<f32>(0.0), vec3<f32>(1.0));
+    let hemi = n.y * 0.09 + 0.52;
+    let rim = pow(clamp(1.0 - max(dot(n, view_dir), 0.0), 0.0, 1.0), 3.1);
+    let intensity = clamp(hemi + key * 0.42 + fill * 0.16, 0.36, 1.12);
+    let rim_tint = mix(vec3<f32>(0.13, 0.86, 0.56), vec3<f32>(0.56, 0.38, 0.96), clamp((world_pos.x + 8.0) / 16.0, 0.0, 1.0));
+    let rgb = clamp(sample.rgb * intensity + rim_tint * (rim * 0.22), vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4<f32>(rgb * sample.a, sample.a);
 }
 
@@ -70,7 +80,7 @@ fn fs_cutout(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locati
         discard;
     }
     let oriented_n = select(-in.world_normal, in.world_normal, is_front);
-    return shade_sample(vec4<f32>(sample.rgb, 1.0), oriented_n);
+    return shade_sample(vec4<f32>(sample.rgb, 1.0), oriented_n, in.world_pos);
 }
 
 @fragment
@@ -80,7 +90,55 @@ fn fs_translucent(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @l
         discard;
     }
     let oriented_n = select(-in.world_normal, in.world_normal, is_front);
-    return shade_sample(sample, oriented_n);
+    return shade_sample(sample, oriented_n, in.world_pos);
+}
+"#;
+
+const STAGE_SHADER_WGSL: &str = r#"
+struct SceneUniforms {
+    mvp: mat4x4<f32>,
+    light_dir: vec4<f32>,
+    eye_pos: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> scene: SceneUniforms;
+
+struct StageInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+};
+
+struct StageOutput {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) world_normal: vec3<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) world_pos: vec3<f32>,
+};
+
+@vertex
+fn vs_stage(in: StageInput) -> StageOutput {
+    var out: StageOutput;
+    out.clip_pos = scene.mvp * vec4<f32>(in.position, 1.0);
+    out.world_normal = in.normal;
+    out.color = in.color;
+    out.world_pos = in.position;
+    return out;
+}
+
+@fragment
+fn fs_stage(in: StageOutput) -> @location(0) vec4<f32> {
+    let n = normalize(in.world_normal);
+    let key_dir = normalize(scene.light_dir.xyz);
+    let view_dir = normalize(scene.eye_pos.xyz - in.world_pos);
+    let half_v = normalize(key_dir + view_dir);
+    let diff = max(dot(n, key_dir), 0.0);
+    let spec = pow(max(dot(n, half_v), 0.0), 24.0) * 0.28;
+    let peak = max(max(in.color.r, in.color.g), in.color.b);
+    let emissive = smoothstep(0.62, 0.95, peak) * 0.36;
+    let lit = clamp(in.color.rgb * (0.52 + diff * 0.52 + emissive) + vec3<f32>(spec), vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(lit * in.color.a, in.color.a);
 }
 "#;
 
@@ -89,6 +147,7 @@ fn fs_translucent(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @l
 struct SceneUniforms {
     mvp: [[f32; 4]; 4],
     light_dir: [f32; 4],
+    eye_pos: [f32; 4],
 }
 
 struct OffscreenTarget {
@@ -107,15 +166,21 @@ pub struct SkinPreviewViewport {
     pub yaw: f32,
     pub pitch: f32,
     pub distance: f32,
+    target_yaw: f32,
+    target_pitch: f32,
+    target_distance: f32,
     pub variant: SkinVariant,
     pub back_mode: BackEquipmentMode,
     pub show_outer_layer: bool,
     pub animate_walk: bool,
     pub auto_rotate: bool,
+    pub show_stage: bool,
     anim_phase: f32,
+    stage_time: f32,
 
     cutout_pipeline: wgpu::RenderPipeline,
     translucent_pipeline: wgpu::RenderPipeline,
+    stage_pipeline: wgpu::RenderPipeline,
     tex_bind_layout: wgpu::BindGroupLayout,
     nearest_sampler: wgpu::Sampler,
     uniform_buf: wgpu::Buffer,
@@ -125,6 +190,8 @@ pub struct SkinPreviewViewport {
     skin_ibuf: wgpu::Buffer,
     back_vbuf: wgpu::Buffer,
     back_ibuf: wgpu::Buffer,
+    stage_vbuf: wgpu::Buffer,
+    stage_ibuf: wgpu::Buffer,
 
     skin_bg: wgpu::BindGroup,
     cape_bg: wgpu::BindGroup,
@@ -139,6 +206,10 @@ impl SkinPreviewViewport {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("thk_skin3d_shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SKIN_SHADER_WGSL)),
+        });
+        let stage_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("thk_stage3d_shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(STAGE_SHADER_WGSL)),
         });
 
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -182,6 +253,12 @@ impl SkinPreviewViewport {
             bind_group_layouts: &[Some(&uniform_layout), Some(&tex_bind_layout)],
             immediate_size: 0,
         });
+        let stage_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("thk_stage3d_pipeline_layout"),
+                bind_group_layouts: &[Some(&uniform_layout)],
+                immediate_size: 0,
+            });
 
         let cutout_pipeline = create_skin_pipeline(
             device,
@@ -197,6 +274,7 @@ impl SkinPreviewViewport {
             "fs_translucent",
             false,
         );
+        let stage_pipeline = create_stage_pipeline(device, &stage_pipeline_layout, &stage_shader);
 
         let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("thk_skin3d_nearest_sampler"),
@@ -213,6 +291,7 @@ impl SkinPreviewViewport {
             contents: bytemuck::bytes_of(&SceneUniforms {
                 mvp: Mat4::IDENTITY.to_cols_array_2d(),
                 light_dir: [0.45, 0.72, 0.68, 0.0],
+                eye_pos: [0.0, 18.0, 48.0, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -228,6 +307,9 @@ impl SkinPreviewViewport {
 
         let vbuf_bytes = (MAX_VERTICES * core::mem::size_of::<SkinVertex>()) as u64;
         let ibuf_bytes = (MAX_INDICES * core::mem::size_of::<u32>()) as u64;
+        let stage_vbuf_bytes =
+            (MAX_STAGE_VERTICES * core::mem::size_of::<StageVertex>()) as u64;
+        let stage_ibuf_bytes = (MAX_STAGE_INDICES * core::mem::size_of::<u32>()) as u64;
 
         let skin_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("thk_skin3d_skin_vbuf"),
@@ -253,6 +335,18 @@ impl SkinPreviewViewport {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let stage_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("thk_stage3d_vbuf"),
+            size: stage_vbuf_bytes,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let stage_ibuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("thk_stage3d_ibuf"),
+            size: stage_ibuf_bytes,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let default_skin = generate_default_steve_skin();
         let default_cape = generate_default_brand_cape();
@@ -275,16 +369,22 @@ impl SkinPreviewViewport {
 
         Self {
             yaw: 0.42,
-            pitch: 0.14,
-            distance: 48.0,
+            pitch: 0.16,
+            distance: 50.0,
+            target_yaw: 0.42,
+            target_pitch: 0.16,
+            target_distance: 50.0,
             variant: SkinVariant::Wide,
             back_mode: BackEquipmentMode::Cape,
             show_outer_layer: true,
             animate_walk: true,
             auto_rotate: false,
+            show_stage: true,
             anim_phase: 0.0,
+            stage_time: 0.0,
             cutout_pipeline,
             translucent_pipeline,
+            stage_pipeline,
             tex_bind_layout,
             nearest_sampler,
             uniform_buf,
@@ -293,6 +393,8 @@ impl SkinPreviewViewport {
             skin_ibuf,
             back_vbuf,
             back_ibuf,
+            stage_vbuf,
+            stage_ibuf,
             skin_bg,
             cape_bg,
             target: None,
@@ -331,14 +433,19 @@ impl SkinPreviewViewport {
         self.set_cape_rgba(render_state, &img);
     }
 
+    pub fn snap_to_preset(&mut self, yaw: f32, pitch: f32, distance: f32) {
+        self.target_yaw = yaw;
+        self.target_pitch = pitch.clamp(-1.35, 1.35);
+        self.target_distance = distance.clamp(28.0, 84.0);
+    }
+
     pub fn reset_camera(&mut self, face_back: bool) {
-        self.yaw = if face_back {
+        let yaw = if face_back {
             std::f32::consts::PI - 0.35
         } else {
             0.42
         };
-        self.pitch = 0.14;
-        self.distance = 48.0;
+        self.snap_to_preset(yaw, 0.16, 50.0);
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, render_state: &RenderState, desired_size: egui::Vec2) {
@@ -347,10 +454,18 @@ impl SkinPreviewViewport {
             return;
         }
 
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(if response.dragged() {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::Grab
+            });
+        }
+
         if response.dragged() {
             let delta = response.drag_delta();
-            self.yaw += delta.x * 0.013;
-            self.pitch = (self.pitch + delta.y * 0.011).clamp(-1.35, 1.35);
+            self.target_yaw += delta.x * 0.014;
+            self.target_pitch = (self.target_pitch + delta.y * 0.011).clamp(-1.35, 1.35);
         }
         if response.double_clicked() {
             self.reset_camera(self.back_mode != BackEquipmentMode::None && self.yaw.cos() < 0.0);
@@ -358,20 +473,34 @@ impl SkinPreviewViewport {
         if response.hovered() {
             let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll_y.abs() > 0.01 {
-                self.distance = (self.distance - scroll_y * 0.06).clamp(26.0, 82.0);
+                self.target_distance =
+                    (self.target_distance - scroll_y * 0.065).clamp(28.0, 84.0);
             }
         }
 
-        let dt = ui.input(|i| i.unstable_dt).min(0.1);
+        let dt = ui.input(|i| i.unstable_dt).clamp(0.001, 0.1);
+        self.stage_time = (self.stage_time + dt) % (std::f32::consts::TAU * 64.0);
+
         if self.animate_walk {
-            self.anim_phase = (self.anim_phase + dt * 3.2) % (std::f32::consts::TAU * 2.0);
+            self.anim_phase = (self.anim_phase + dt * 3.1) % (std::f32::consts::TAU * 2.0);
         } else {
-            self.anim_phase = 0.0;
+            self.anim_phase = (self.stage_time * 1.3).sin() * 0.18;
         }
         if self.auto_rotate && !response.dragged() {
-            self.yaw = (self.yaw + dt * 0.75) % std::f32::consts::TAU;
+            self.target_yaw += dt * 0.68;
         }
-        if self.animate_walk || self.auto_rotate {
+
+        // Exponential spring camera smoothing
+        let alpha = (1.0 - (-14.0 * dt).exp()).clamp(0.05, 1.0);
+        self.yaw += (self.target_yaw - self.yaw) * alpha;
+        self.pitch += (self.target_pitch - self.pitch) * alpha;
+        self.distance += (self.target_distance - self.distance) * alpha;
+
+        let camera_settling = (self.target_yaw - self.yaw).abs() > 0.001
+            || (self.target_pitch - self.pitch).abs() > 0.001
+            || (self.target_distance - self.distance).abs() > 0.01;
+
+        if self.animate_walk || self.auto_rotate || self.show_stage || camera_settling {
             ui.ctx().request_repaint_after(Duration::from_millis(16));
         }
 
@@ -383,24 +512,63 @@ impl SkinPreviewViewport {
         self.render_offscreen_frame(render_state, px_w, px_h);
 
         if let Some(ref target) = self.target {
-            ui.painter().rect_filled(
-                rect,
-                egui::CornerRadius::same(12),
-                egui::Color32::from_rgb(16, 20, 28),
+            let painter = ui.painter();
+            let cr = egui::CornerRadius::same(14);
+            painter.rect_filled(rect, cr, egui::Color32::from_rgb(10, 13, 24));
+
+            // Atmospheric dual-nebula studio glow behind the 3D character
+            let center = rect.center();
+            let r_outer = rect.width().min(rect.height()) * 0.44;
+            painter.circle_filled(
+                egui::pos2(center.x - r_outer * 0.18, center.y - r_outer * 0.14),
+                r_outer,
+                egui::Color32::from_rgba_unmultiplied(124, 58, 237, 22),
             );
+            painter.circle_filled(
+                egui::pos2(center.x + r_outer * 0.14, center.y + r_outer * 0.24),
+                r_outer * 0.85,
+                egui::Color32::from_rgba_unmultiplied(16, 185, 129, 24),
+            );
+
             let mut mesh = egui::Mesh::with_texture(target.egui_tex_id);
             mesh.add_rect_with_uv(
                 rect,
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
-            ui.painter().add(egui::Shape::mesh(mesh));
-            ui.painter().rect_stroke(
+            painter.add(egui::Shape::mesh(mesh));
+
+            let border_alpha = if response.hovered() { 145 } else { 85 };
+            painter.rect_stroke(
                 rect,
-                egui::CornerRadius::same(12),
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(56, 189, 126, 70)),
+                cr,
+                egui::Stroke::new(
+                    1.2,
+                    egui::Color32::from_rgba_unmultiplied(52, 211, 153, border_alpha),
+                ),
                 egui::StrokeKind::Inside,
             );
+
+            // Tactical corner brackets
+            let bk = 11.0f32.min(rect.width() * 0.12);
+            let inset = rect.shrink(6.0);
+            let corner_col = egui::Color32::from_rgba_unmultiplied(167, 139, 250, 130);
+            let corner_stroke = egui::Stroke::new(1.5, corner_col);
+            for (corner, dx, dy) in [
+                (inset.left_top(), bk, bk),
+                (inset.right_top(), -bk, bk),
+                (inset.left_bottom(), bk, -bk),
+                (inset.right_bottom(), -bk, -bk),
+            ] {
+                painter.line_segment(
+                    [corner, egui::pos2(corner.x + dx, corner.y)],
+                    corner_stroke,
+                );
+                painter.line_segment(
+                    [corner, egui::pos2(corner.x, corner.y + dy)],
+                    corner_stroke,
+                );
+            }
         }
     }
 
@@ -489,8 +657,8 @@ impl SkinPreviewViewport {
         };
 
         let aspect = (width as f32 / height.max(1) as f32).max(0.1);
-        let proj = perspective_wgpu_rh(38.0f32.to_radians(), aspect, 2.0, 220.0);
-        let target_center = Vec3::new(0.0, 16.5, 0.0);
+        let proj = perspective_wgpu_rh(38.0f32.to_radians(), aspect, 2.0, 240.0);
+        let target_center = Vec3::new(0.0, 15.2, 0.0);
         let eye_offset = Vec3::new(
             self.distance * self.pitch.cos() * self.yaw.sin(),
             self.distance * self.pitch.sin(),
@@ -504,6 +672,7 @@ impl SkinPreviewViewport {
         let uniforms = SceneUniforms {
             mvp: mvp.to_cols_array_2d(),
             light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
+            eye_pos: [eye.x, eye.y, eye.z, self.stage_time],
         };
         render_state
             .queue
@@ -546,6 +715,27 @@ impl SkinPreviewViewport {
             );
         }
 
+        let (stage_v_cnt, stage_i_cnt) = if self.show_stage {
+            let st = build_stage_pedestal_meshes(self.stage_time);
+            let vc = st.vertices.len().min(MAX_STAGE_VERTICES);
+            let ic = st.indices.len().min(MAX_STAGE_INDICES);
+            if vc > 0 && ic > 0 {
+                render_state.queue.write_buffer(
+                    &self.stage_vbuf,
+                    0,
+                    bytemuck::cast_slice(&st.vertices[..vc]),
+                );
+                render_state.queue.write_buffer(
+                    &self.stage_ibuf,
+                    0,
+                    bytemuck::cast_slice(&st.indices[..ic]),
+                );
+            }
+            (vc, ic)
+        } else {
+            (0, 0)
+        };
+
         let mut encoder =
             render_state
                 .device
@@ -583,7 +773,16 @@ impl SkinPreviewViewport {
                 multiview_mask: None,
             });
 
-            // Pass 1: Opaque / Alpha-Cutout
+            // Pass 0: 3D Arena Pedestal & Orbiting Voxel Crystals
+            if stage_v_cnt > 0 && stage_i_cnt > 0 {
+                rpass.set_pipeline(&self.stage_pipeline);
+                rpass.set_bind_group(0, &self.uniform_bg, &[]);
+                rpass.set_vertex_buffer(0, self.stage_vbuf.slice(..));
+                rpass.set_index_buffer(self.stage_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rpass.draw_indexed(0..stage_i_cnt as u32, 0, 0..1);
+            }
+
+            // Pass 1: Opaque / Alpha-Cutout Character & Back Equipment
             rpass.set_pipeline(&self.cutout_pipeline);
             rpass.set_bind_group(0, &self.uniform_bg, &[]);
             if skin_i_cnt > 0 {
@@ -662,6 +861,64 @@ fn create_skin_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: shader,
             entry_point: Some(fs_entry),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: COLOR_FORMAT,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_stage_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("thk_stage3d_pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_stage"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: core::mem::size_of::<StageVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3,
+                    1 => Float32x3,
+                    2 => Float32x4
+                ],
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: MSAA_SAMPLES,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_stage"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: COLOR_FORMAT,
                 blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),

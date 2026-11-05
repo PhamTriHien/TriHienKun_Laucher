@@ -5906,6 +5906,7 @@ dependencies = [
  "egui-wgpu",
  "egui_commonmark",
  "egui_extras",
+ "glam",
  "image",
  "open",
  "reqwest",

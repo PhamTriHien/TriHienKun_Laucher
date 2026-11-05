@@ -4,7 +4,10 @@ pub mod geometry;
 pub mod pipeline;
 pub mod skin_image;
 
-pub use geometry::{build_character_meshes, BackEquipmentMode, CharacterMeshBatch, SkinVertex};
+pub use geometry::{
+    build_character_meshes, build_stage_pedestal_meshes, BackEquipmentMode, CharacterMeshBatch,
+    SkinVertex, StageMeshBatch, StageVertex,
+};
 pub use pipeline::SkinPreviewViewport;
 pub use skin_image::{
     convert_legacy_64x32_to_square, generate_default_brand_cape, generate_default_steve_skin,
@@ -61,5 +64,23 @@ mod tests {
 
         let target_in_view = view.transform_point3(glam::Vec3::new(0.0, 16.0, 0.0));
         assert!((target_in_view.z + 50.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn stage_pedestal_builder_produces_bounded_finite_geometry() {
+        for t in [0.0f32, 1.25, 3.7] {
+            let stage = build_stage_pedestal_meshes(t);
+            assert!(!stage.vertices.is_empty());
+            assert!(!stage.indices.is_empty());
+            assert!(stage.vertices.len() <= 2048);
+            assert!(stage.indices.len() <= 3072);
+            for v in &stage.vertices {
+                assert!(v.position.iter().all(|c| c.is_finite()));
+                assert!(v.normal.iter().all(|c| c.is_finite()));
+            }
+            for &idx in &stage.indices {
+                assert!((idx as usize) < stage.vertices.len());
+            }
+        }
     }
 }
