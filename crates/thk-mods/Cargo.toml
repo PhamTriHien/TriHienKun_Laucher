@@ -1,0 +1,28 @@
+[package]
+name = "thk-mods"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thk-core.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+md-5.workspace = true
+hex.workspace = true
+regex.workspace = true
+urlencoding.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true

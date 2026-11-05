@@ -1,0 +1,84 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/thk-core",
+    "crates/thk-auth",
+    "crates/thk-java",
+    "crates/thk-mods",
+    "crates/thk-launcher",
+    "crates/thk-network",
+    "crates/thk-server",
+    "crates/thk-renderer3d",
+    "crates/thk-app",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+authors = ["TriHienKun"]
+repository = "https://github.com/trihienkun/trihienkun-laucher"
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+
+[workspace.dependencies]
+thk-core = { path = "crates/thk-core" }
+thk-auth = { path = "crates/thk-auth" }
+thk-java = { path = "crates/thk-java" }
+thk-launcher = { path = "crates/thk-launcher" }
+thk-mods = { path = "crates/thk-mods" }
+thk-server = { path = "crates/thk-server" }
+thk-network = { path = "crates/thk-network" }
+thk-renderer3d = { path = "crates/thk-renderer3d" }
+
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "process", "sync", "time", "signal"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
+futures-util = "0.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["default-tls", "json", "stream", "gzip", "form", "query", "multipart", "http2"] }
+axum = { version = "0.8.9", features = ["json", "query", "tokio", "http1"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+keyring = { version = "3.6.3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
+zip = { version = "9.4.0", default-features = false, features = ["deflate", "bzip2", "xz", "zstd"] }
+flate2 = "1.1.10"
+tar = "0.4.46"
+sha1 = "0.11.0"
+sha2 = "0.11.1"
+md-5 = "0.11.0"
+hex = "0.4"
+base64 = "0.23.1"
+rand = "0.10.3"
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "7.0.0"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1.13.1"
+quick-xml = { version = "0.42.0", features = ["serialize"] }
+sysinfo = "0.40.1"
+bore-cli = "0.6.0"
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "system-config"] }
+discord-rich-presence = "1.1.0"
+open = "5.4.5"
+rfd = "0.17.2"
+tray-icon = "0.26.1"
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "mp3", "wav", "vorbis"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "ico"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+glam = "0.34.2"
+wgpu = "30.0.1"
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "system_fonts", "wgpu", "links", "persistence"] }
+egui = "0.37.0"
+egui-wgpu = "0.37.0"
+egui_extras = { version = "0.37.0", features = ["all_loaders", "image", "syntect"] }
+egui_commonmark = "0.26.0"
+urlencoding = "2.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

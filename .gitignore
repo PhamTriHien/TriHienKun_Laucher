@@ -1,0 +1,17 @@
+# Rust build outputs
+/target/
+**/*.rs.bk
+
+# IDE & OS metadata
+.vscode/
+.idea/
+.vs/
+.DS_Store
+Thumbs.db
+
+# Local secrets & runtime test artifacts
+*.pfx
+*.p12
+*.cer
+.env
+.env.local
