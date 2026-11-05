@@ -203,3 +203,72 @@ fn select_platform_asset(assets: &[GithubReleaseAsset]) -> Option<&GithubRelease
             })
         })
 }
+
+pub fn apply_downloaded_update(update_file: &Path) -> ThkResult<bool> {
+    if !update_file.is_file() {
+        return Err(ThkError::InvalidInput(
+            "Verified update file is missing on disk.".into(),
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        let file_name_low = update_file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let is_portable_exe = file_name_low.ends_with(".exe")
+            && !file_name_low.contains("setup")
+            && !file_name_low.contains("installer");
+
+        if is_portable_exe {
+            let current_exe = std::env::current_exe()?;
+            if current_exe != update_file {
+                let script_dir = update_file.parent().unwrap_or_else(|| Path::new("."));
+                let script_path = script_dir.join("apply_update.ps1");
+                let pid = std::process::id();
+                let src_lit = update_file.display().to_string().replace('\'', "''");
+                let dst_lit = current_exe.display().to_string().replace('\'', "''");
+                let ps_script = format!(
+                    "$ErrorActionPreference = 'SilentlyContinue'\r\n\
+                     Wait-Process -Id {pid} -Timeout 20\r\n\
+                     Start-Sleep -Milliseconds 400\r\n\
+                     $src = '{src_lit}'\r\n\
+                     $dst = '{dst_lit}'\r\n\
+                     $bak = \"$dst.bak\"\r\n\
+                     if (Test-Path -LiteralPath $dst) {{\r\n\
+                         Copy-Item -LiteralPath $dst -Destination $bak -Force\r\n\
+                     }}\r\n\
+                     Copy-Item -LiteralPath $src -Destination $dst -Force\r\n\
+                     Start-Process -FilePath $dst\r\n"
+                );
+                std::fs::write(&script_path, ps_script)?;
+
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                std::process::Command::new("powershell.exe")
+                    .args([
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-WindowStyle",
+                        "Hidden",
+                        "-File",
+                    ])
+                    .arg(&script_path)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()
+                    .map_err(|e| {
+                        ThkError::Process(format!("Failed to launch update helper: {e}"))
+                    })?;
+                return Ok(true);
+            }
+        }
+    }
+
+    open::that(update_file)
+        .map_err(|e| ThkError::Process(format!("Failed to launch update package: {e}")))?;
+    Ok(false)
+}

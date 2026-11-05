@@ -65,6 +65,12 @@ pub struct GameProfile {
     pub jvm_args: String,
     pub auto_perf_mods: bool,
     pub icon_url: Option<String>,
+    #[serde(default)]
+    pub window_width: Option<u32>,
+    #[serde(default)]
+    pub window_height: Option<u32>,
+    #[serde(default)]
+    pub fullscreen: bool,
     pub total_play_seconds: u64,
     pub session_count: u32,
     pub crash_count: u32,
@@ -128,6 +134,8 @@ pub struct Account {
     pub account_type: AccountType,
     pub skin_variant: SkinVariant,
     pub skin_url: Option<String>,
+    #[serde(default)]
+    pub cape_url: Option<String>,
     pub custom_skin_path: Option<PathBuf>,
     pub custom_cape_path: Option<PathBuf>,
     pub custom_elytra_path: Option<PathBuf>,
@@ -375,6 +383,40 @@ pub enum CloseBehavior {
     Quit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AccentPreset {
+    #[default]
+    Emerald,
+    Cyan,
+    Blue,
+    Violet,
+    Amber,
+    Crimson,
+}
+
+impl AccentPreset {
+    pub const ALL: [AccentPreset; 6] = [
+        Self::Emerald,
+        Self::Cyan,
+        Self::Blue,
+        Self::Violet,
+        Self::Amber,
+        Self::Crimson,
+    ];
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Emerald => "Emerald",
+            Self::Cyan => "Cyan",
+            Self::Blue => "Blue",
+            Self::Violet => "Violet",
+            Self::Amber => "Amber",
+            Self::Crimson => "Crimson",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub language: Language,
@@ -392,6 +434,14 @@ pub struct AppSettings {
     pub github_repo: String,
     pub discord_client_id: Option<String>,
     pub setup_completed: bool,
+    #[serde(default)]
+    pub hide_launcher_on_launch: bool,
+    #[serde(default)]
+    pub open_logs_on_launch: bool,
+    #[serde(default)]
+    pub high_process_priority: bool,
+    #[serde(default)]
+    pub accent_preset: AccentPreset,
 }
 
 impl Default for AppSettings {
@@ -412,6 +462,10 @@ impl Default for AppSettings {
             github_repo: "trihienkun/trihienkun-laucher".to_string(),
             discord_client_id: None,
             setup_completed: false,
+            hide_launcher_on_launch: false,
+            open_logs_on_launch: false,
+            high_process_priority: false,
+            accent_preset: AccentPreset::Emerald,
         }
     }
 }

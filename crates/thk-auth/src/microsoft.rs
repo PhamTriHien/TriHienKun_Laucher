@@ -463,9 +463,148 @@ pub async fn ensure_valid_minecraft_token(
     account.username = refreshed.account.username;
     account.uuid = refreshed.account.uuid;
     account.skin_url = refreshed.account.skin_url;
+    account.cape_url = refreshed.account.cape_url;
     account.skin_variant = refreshed.account.skin_variant;
     account.token_expires_at = refreshed.account.token_expires_at;
     Ok(refreshed.mc_access_token)
+}
+
+pub async fn force_refresh_account_session(
+    account: &Account,
+    custom_client_id: Option<&str>,
+) -> ThkResult<AuthenticatedMinecraftSession> {
+    if account.account_type != AccountType::Microsoft {
+        return Err(ThkError::InvalidInput(
+            "Only Microsoft accounts support session refresh.".into(),
+        ));
+    }
+    let stored = TokenStore::load_tokens(&account.id)?.ok_or_else(|| {
+        ThkError::Auth(
+            "Microsoft session not found in OS Keyring. Please sign in again.".into(),
+        )
+    })?;
+    let refresh_tok = stored.ms_refresh_token.ok_or_else(|| {
+        ThkError::Auth("No refresh_token available in OS Keyring. Please sign in again.".into())
+    })?;
+    let mut refreshed = refresh_microsoft_session(&refresh_tok, custom_client_id).await?;
+    refreshed.account.custom_skin_path = account.custom_skin_path.clone();
+    refreshed.account.custom_cape_path = account.custom_cape_path.clone();
+    refreshed.account.custom_elytra_path = account.custom_elytra_path.clone();
+    persist_tokens_in_keyring(&refreshed)?;
+    Ok(refreshed)
+}
+
+pub async fn sync_mojang_profile(
+    account: &mut Account,
+    custom_client_id: Option<&str>,
+) -> ThkResult<()> {
+    if account.account_type != AccountType::Microsoft {
+        return Ok(());
+    }
+    let mc_token = ensure_valid_minecraft_token(account, custom_client_id).await?;
+    let client = build_http_client()?;
+    let (uuid, username, skin_url, cape_url, skin_variant) =
+        fetch_minecraft_profile(&client, &mc_token).await?;
+    account.uuid = uuid;
+    account.username = username;
+    account.skin_url = skin_url;
+    account.cape_url = cape_url;
+    account.skin_variant = skin_variant;
+    Ok(())
+}
+
+pub async fn upload_mojang_skin(
+    account: &mut Account,
+    custom_client_id: Option<&str>,
+    variant: SkinVariant,
+    png_bytes: Vec<u8>,
+) -> ThkResult<()> {
+    if account.account_type != AccountType::Microsoft {
+        return Err(ThkError::InvalidInput(
+            "Mojang Skin API is only available for Microsoft accounts.".into(),
+        ));
+    }
+    let mc_token = ensure_valid_minecraft_token(account, custom_client_id).await?;
+    let client = build_http_client()?;
+    let variant_str = match variant {
+        SkinVariant::Slim => "slim",
+        SkinVariant::Wide => "classic",
+    };
+    let file_part = reqwest::multipart::Part::bytes(png_bytes)
+        .file_name("skin.png")
+        .mime_str("image/png")
+        .map_err(ThkError::from)?;
+    let form = reqwest::multipart::Form::new()
+        .text("variant", variant_str)
+        .part("file", file_part);
+
+    let resp = client
+        .post("https://api.minecraftservices.com/minecraft/profile/skins")
+        .bearer_auth(&mc_token)
+        .multipart(form)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(ThkError::Auth(format!(
+            "Mojang skin upload failed ({status}): {body}"
+        )));
+    }
+
+    if let Ok((uuid, username, skin_url, cape_url, skin_variant)) =
+        fetch_minecraft_profile(&client, &mc_token).await
+    {
+        account.uuid = uuid;
+        account.username = username;
+        account.skin_url = skin_url;
+        account.cape_url = cape_url;
+        account.skin_variant = skin_variant;
+    } else {
+        account.skin_variant = variant;
+    }
+    Ok(())
+}
+
+pub async fn reset_mojang_skin(
+    account: &mut Account,
+    custom_client_id: Option<&str>,
+) -> ThkResult<()> {
+    if account.account_type != AccountType::Microsoft {
+        return Err(ThkError::InvalidInput(
+            "Mojang Skin API is only available for Microsoft accounts.".into(),
+        ));
+    }
+    let mc_token = ensure_valid_minecraft_token(account, custom_client_id).await?;
+    let client = build_http_client()?;
+
+    let resp = client
+        .delete("https://api.minecraftservices.com/minecraft/profile/skins/active")
+        .bearer_auth(&mc_token)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(ThkError::Auth(format!(
+            "Mojang skin reset failed ({status}): {body}"
+        )));
+    }
+
+    if let Ok((uuid, username, skin_url, cape_url, skin_variant)) =
+        fetch_minecraft_profile(&client, &mc_token).await
+    {
+        account.uuid = uuid;
+        account.username = username;
+        account.skin_url = skin_url;
+        account.cape_url = cape_url;
+        account.skin_variant = skin_variant;
+    } else {
+        account.skin_url = None;
+    }
+    Ok(())
 }
 
 pub async fn refresh_microsoft_session(
@@ -551,6 +690,7 @@ struct McProfileResp {
     id: Option<String>,
     name: Option<String>,
     skins: Option<Vec<McSkinItem>>,
+    capes: Option<Vec<McCapeItem>>,
     error: Option<String>,
 }
 
@@ -561,6 +701,12 @@ struct McSkinItem {
     variant: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct McCapeItem {
+    state: Option<String>,
+    url: Option<String>,
+}
+
 async fn exchange_ms_tokens_to_minecraft(
     client: &Client,
     ms_access_token: &str,
@@ -569,7 +715,7 @@ async fn exchange_ms_tokens_to_minecraft(
     let (xbl_token, uhs) = authenticate_xbox_live(client, ms_access_token).await?;
     let xsts_token = authorize_xsts(client, &xbl_token).await?;
     let (mc_token, expires_in) = login_minecraft_with_xbox(client, &uhs, &xsts_token).await?;
-    let (uuid, username, skin_url, skin_variant) =
+    let (uuid, username, skin_url, cape_url, skin_variant) =
         fetch_minecraft_profile(client, &mc_token).await?;
 
     let now = Utc::now().timestamp();
@@ -580,6 +726,7 @@ async fn exchange_ms_tokens_to_minecraft(
         account_type: AccountType::Microsoft,
         skin_variant,
         skin_url,
+        cape_url,
         custom_skin_path: None,
         custom_cape_path: None,
         custom_elytra_path: None,
@@ -706,7 +853,7 @@ async fn login_minecraft_with_xbox(
 async fn fetch_minecraft_profile(
     client: &Client,
     mc_token: &str,
-) -> ThkResult<(String, String, Option<String>, SkinVariant)> {
+) -> ThkResult<(String, String, Option<String>, Option<String>, SkinVariant)> {
     let resp = client
         .get("https://api.minecraftservices.com/minecraft/profile")
         .bearer_auth(mc_token)
@@ -759,5 +906,18 @@ async fn fetch_minecraft_profile(
         .map(SkinVariant::from_str_lossy)
         .unwrap_or(SkinVariant::Wide);
 
-    Ok((uuid, username, skin_url, skin_variant))
+    let cape_url = parsed
+        .capes
+        .as_ref()
+        .and_then(|list| {
+            list.iter().find(|c| {
+                c.state
+                    .as_deref()
+                    .unwrap_or("")
+                    .eq_ignore_ascii_case("ACTIVE")
+            })
+        })
+        .and_then(|c| c.url.clone());
+
+    Ok((uuid, username, skin_url, cape_url, skin_variant))
 }

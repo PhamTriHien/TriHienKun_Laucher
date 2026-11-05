@@ -4,15 +4,17 @@ use crate::fx3d::{
 };
 use crate::state::LauncherAppState;
 use crate::theme::{
-    ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_EMERALD, ACCENT_ORANGE, ACCENT_RED,
-    ACCENT_VIOLET,
+    accent_palette, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_EMERALD, ACCENT_ORANGE,
+    ACCENT_RED, ACCENT_VIOLET,
 };
 use crate::views::{
-    badge, danger_button, danger_icon_button, format_bytes, primary_icon_button,
-    secondary_button, secondary_icon_button,
+    badge, danger_button, danger_icon_button, format_bytes, primary_icon_button, secondary_button,
+    secondary_icon_button,
 };
 use egui::{vec2, Align2, Color32, Frame, Margin, RichText, ScrollArea};
-use thk_core::models::{CloseBehavior, Language, LoaderType, ServerEngine, ThemeMode};
+use thk_core::models::{
+    AccentPreset, CloseBehavior, Language, LoaderType, ServerEngine, ThemeMode,
+};
 use thk_java::JavaDistroKind;
 use thk_launcher::CrashFixAction;
 use thk_network::TunnelStatus;
@@ -49,20 +51,24 @@ pub fn render_all_modals(app: &mut LauncherAppState, ctx: &egui::Context) {
 
 fn render_initial_setup_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
     egui::Modal::new(egui::Id::unique("thk_initial_setup_modal")).show(ctx, |ui| {
-        ui.set_width(490.0);
+        ui.set_width(500.0);
         ui.vertical_centered(|ui| {
             paint_icon_3d(ui, 68.0, Icon3dKind::BrandVoxelCore, true);
             ui.add_space(4.0);
             ui.heading(
-                RichText::new("Chào mừng đến với TriHienKun Laucher!")
-                    .size(20.5)
-                    .strong()
-                    .color(ACCENT_EMERALD),
+                RichText::new(app.i18n.tr(
+                    "Chào mừng đến với TriHienKun Laucher!",
+                    "Welcome to TriHienKun Laucher!",
+                ))
+                .size(20.5)
+                .strong()
+                .color(ACCENT_EMERALD),
             );
             ui.label(
-                RichText::new(
+                RichText::new(app.i18n.tr(
                     "Trình khởi chạy Minecraft thế hệ mới viết thuần 100% bằng Rust + wgpu — nhanh, nhẹ và độc lập.",
-                )
+                    "Next-gen Minecraft Launcher written 100% in Pure Rust + wgpu — fast, lightweight, and standalone.",
+                ))
                 .size(12.5)
                 .weak(),
             );
@@ -96,12 +102,14 @@ fn render_initial_setup_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                 });
 
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Giao diện màu:").strong());
+                    ui.label(
+                        RichText::new(app.i18n.tr("Giao diện màu:", "Color Theme:")).strong(),
+                    );
                     if ui
                         .selectable_value(
                             &mut app.settings.theme,
                             ThemeMode::Dark,
-                            "Tối (Gaming 3D Dark)",
+                            app.i18n.tr("Tối (Gaming 3D Dark)", "Dark (Gaming 3D)"),
                         )
                         .changed()
                     {
@@ -111,7 +119,7 @@ fn render_initial_setup_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                         .selectable_value(
                             &mut app.settings.theme,
                             ThemeMode::Light,
-                            "Sáng (Light)",
+                            app.i18n.tr("Sáng (Light)", "Light"),
                         )
                         .changed()
                     {
@@ -120,7 +128,13 @@ fn render_initial_setup_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                 });
 
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("RAM mặc định cho Game:").strong());
+                    ui.label(
+                        RichText::new(
+                            app.i18n
+                                .tr("RAM mặc định cho Game:", "Default Game RAM:"),
+                        )
+                        .strong(),
+                    );
                     if ui
                         .add(
                             egui::Slider::new(&mut app.settings.default_ram_mb, 1024..=16384)
@@ -144,7 +158,10 @@ fn render_initial_setup_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
             if tactile_button_3d(
                 ui,
                 Some(VectorIcon::Play),
-                "Bắt đầu sử dụng TriHienKun Laucher",
+                app.i18n.tr(
+                    "Bắt đầu sử dụng TriHienKun Laucher",
+                    "Get Started with TriHienKun Laucher",
+                ),
                 ButtonStyle3d::HeroLaunch,
                 vec2(320.0, 44.0),
             )
@@ -161,39 +178,62 @@ fn render_initial_setup_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
 
 fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
     let mut open = app.show_new_profile_modal;
-    egui::Window::new("Tạo Profile Minecraft Mới")
+    let title = app
+        .i18n
+        .tr("Tạo Profile Minecraft Mới", "Create New Minecraft Profile")
+        .to_string();
+    egui::Window::new(title)
         .id(egui::Id::unique("thk_modal_new_profile"))
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.set_width(470.0);
+            ui.set_width(475.0);
 
             ui.horizontal(|ui| {
                 paint_icon_3d(ui, 34.0, Icon3dKind::HomePortal, true);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("Khởi tạo Instance Độc lập").size(15.0).strong());
                     ui.label(
-                        RichText::new("Hỗ trợ Vanilla, Fabric, Quilt, Forge & NeoForge")
-                            .size(11.5)
-                            .weak(),
+                        RichText::new(app.i18n.tr(
+                            "Khởi tạo Instance Độc lập",
+                            "Create Isolated Game Instance",
+                        ))
+                        .size(15.0)
+                        .strong(),
+                    );
+                    ui.label(
+                        RichText::new(app.i18n.tr(
+                            "Hỗ trợ Vanilla, Fabric, Quilt, Forge & NeoForge",
+                            "Supports Vanilla, Fabric, Quilt, Forge & NeoForge",
+                        ))
+                        .size(11.5)
+                        .weak(),
                     );
                 });
             });
             ui.add_space(6.0);
 
-            ui.label(RichText::new("Tên Profile:").strong());
+            ui.label(
+                RichText::new(app.i18n.tr("Tên Profile:", "Profile Name:")).strong(),
+            );
             ui.add(
                 egui::TextEdit::singleline(&mut app.home.new_draft.name)
-                    .hint_text("Ví dụ: Survival 1.21.4")
+                    .hint_text("Survival 1.21.4")
                     .desired_width(f32::INFINITY),
             );
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Phiên bản Minecraft:").strong());
-                ui.checkbox(&mut app.home.include_snapshots, "Hiện bản Snapshot");
+                ui.label(
+                    RichText::new(app.i18n.tr("Phiên bản Minecraft:", "Minecraft Version:"))
+                        .strong(),
+                );
+                let snap_label = app
+                    .i18n
+                    .tr("Hiện bản Snapshot", "Include Snapshots")
+                    .to_string();
+                ui.checkbox(&mut app.home.include_snapshots, snap_label);
             });
 
             let include_snaps = app.home.include_snapshots;
@@ -222,7 +262,9 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
             }
 
             ui.add_space(6.0);
-            ui.label(RichText::new("Trình nạp Mod (Mod Loader):").strong());
+            ui.label(
+                RichText::new(app.i18n.tr("Trình nạp Mod (Mod Loader):", "Mod Loader:")).strong(),
+            );
             ui.horizontal_wrapped(|ui| {
                 for ldr in LoaderType::ALL {
                     if ui
@@ -256,10 +298,15 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                     }
                 }
 
+                let auto_lbl = app
+                    .i18n
+                    .tr("Tự động chọn mới nhất", "Auto-select latest")
+                    .to_string();
+                let stable_word = app.i18n.tr("Ổn định", "Stable").to_string();
                 ui.horizontal(|ui| {
-                    ui.label("Phiên bản Loader:");
+                    ui.label(app.i18n.tr("Phiên bản Loader:", "Loader Version:"));
                     let sel_txt = if app.home.new_draft.loader_version.is_empty() {
-                        "Tự động chọn mới nhất"
+                        auto_lbl.as_str()
                     } else {
                         app.home.new_draft.loader_version.as_str()
                     };
@@ -269,7 +316,7 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                         .show_ui(ui, |ui| {
                             for entry in ldr_entries {
                                 let tag = if entry.stable {
-                                    format!("{} (Ổn định)", entry.version)
+                                    format!("{} ({stable_word})", entry.version)
                                 } else {
                                     entry.version.clone()
                                 };
@@ -284,10 +331,14 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
             }
 
             if app.home.new_draft.loader == LoaderType::Fabric {
-                ui.checkbox(
-                    &mut app.home.new_draft.auto_perf_mods,
-                    "Tự động cài bộ Mod tối ưu FPS (Sodium, Lithium, FerriteCore, EntityCulling, ModMenu)",
-                );
+                let perf_lbl = app
+                    .i18n
+                    .tr(
+                        "Tự động cài bộ Mod tối ưu FPS (Sodium, Lithium, FerriteCore, EntityCulling, ModMenu)",
+                        "Auto-install FPS Optimizer Suite (Sodium, Lithium, FerriteCore, EntityCulling, ModMenu)",
+                    )
+                    .to_string();
+                ui.checkbox(&mut app.home.new_draft.auto_perf_mods, perf_lbl);
             }
 
             ui.add_space(6.0);
@@ -357,29 +408,46 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
 
 fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
     let mut open = app.show_new_server_modal;
-    egui::Window::new("Tạo Máy Chủ Minecraft Cục Bộ")
+    let title = app
+        .i18n
+        .tr(
+            "Tạo Máy Chủ Minecraft Cục Bộ",
+            "Create Local Minecraft Server",
+        )
+        .to_string();
+    egui::Window::new(title)
         .id(egui::Id::unique("thk_modal_new_server"))
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.set_width(490.0);
+            ui.set_width(495.0);
 
             ui.horizontal(|ui| {
                 paint_icon_3d(ui, 34.0, Icon3dKind::ServerBladeTower, true);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("Triển khai Dedicated Server").size(15.0).strong());
                     ui.label(
-                        RichText::new("Tự động tải JAR, cấu hình EULA và quản lý tiến trình")
-                            .size(11.5)
-                            .weak(),
+                        RichText::new(app.i18n.tr(
+                            "Triển khai Dedicated Server",
+                            "Deploy Local Dedicated Server",
+                        ))
+                        .size(15.0)
+                        .strong(),
+                    );
+                    ui.label(
+                        RichText::new(app.i18n.tr(
+                            "Tự động tải JAR, cấu hình EULA và quản lý tiến trình",
+                            "Automated JAR provisioning, EULA setup, and process supervision",
+                        ))
+                        .size(11.5)
+                        .weak(),
                     );
                 });
             });
             ui.add_space(6.0);
 
-            ui.label(RichText::new("Tên Máy chủ:").strong());
+            ui.label(RichText::new(app.i18n.tr("Tên Máy chủ:", "Server Name:")).strong());
             ui.add(
                 egui::TextEdit::singleline(&mut app.servers.new_draft.name)
                     .hint_text("TriHienKun SMP")
@@ -387,7 +455,10 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
             );
 
             ui.add_space(6.0);
-            ui.label(RichText::new("Lõi Máy chủ (Server Engine):").strong());
+            ui.label(
+                RichText::new(app.i18n.tr("Lõi Máy chủ (Server Engine):", "Server Engine:"))
+                    .strong(),
+            );
             ui.horizontal_wrapped(|ui| {
                 for eng in ServerEngine::ALL {
                     if ui
@@ -419,7 +490,10 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                 .unwrap_or_default();
 
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Phiên bản Minecraft:").strong());
+                ui.label(
+                    RichText::new(app.i18n.tr("Phiên bản Minecraft:", "Minecraft Version:"))
+                        .strong(),
+                );
                 if eng_vers.is_empty() {
                     ui.add(
                         egui::TextEdit::singleline(&mut app.servers.new_draft.game_version)
@@ -440,13 +514,13 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                         });
                 }
 
-                ui.label("Cổng (Port):");
+                ui.label(app.i18n.tr("Cổng (Port):", "Port:"));
                 ui.add(egui::DragValue::new(&mut app.servers.new_draft.port).range(1024..=65535));
             });
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.label("RAM tối thiểu:");
+                ui.label(app.i18n.tr("RAM tối thiểu:", "Min RAM:"));
                 ui.add(
                     egui::Slider::new(&mut app.servers.new_draft.ram_min_mb, 512..=8192)
                         .step_by(256.0)
@@ -454,7 +528,7 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                 );
             });
             ui.horizontal(|ui| {
-                ui.label("RAM tối đa:");
+                ui.label(app.i18n.tr("RAM tối đa:", "Max RAM:"));
                 ui.add(
                     egui::Slider::new(&mut app.servers.new_draft.ram_max_mb, 1024..=16384)
                         .step_by(512.0)
@@ -462,17 +536,20 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                 );
             });
 
-            ui.checkbox(
-                &mut app.servers.new_draft.install_immediately,
-                app.i18n.tr(
+            let auto_jar_lbl = app
+                .i18n
+                .tr(
                     "Tự động tải lõi JAR và chuẩn bị môi trường ngay sau khi tạo",
                     "Automatically download server JAR and initialize directory on creation",
-                ),
-            );
+                )
+                .to_string();
+            ui.checkbox(&mut app.servers.new_draft.install_immediately, auto_jar_lbl);
 
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(app.i18n.tr("Thư mục máy chủ:", "Server Folder:")).strong());
+                ui.label(
+                    RichText::new(app.i18n.tr("Thư mục máy chủ:", "Server Folder:")).strong(),
+                );
                 let dir_label = app
                     .servers
                     .new_draft
@@ -524,7 +601,14 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
 
 fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
     let mut open = app.show_java_modal;
-    egui::Window::new("Quản lý & Tải Tự Động Java Runtime (JRE/JDK)")
+    let title = app
+        .i18n
+        .tr(
+            "Quản lý & Tải Tự Động Java Runtime (JRE/JDK)",
+            "Java Runtime Manager (JRE/JDK)",
+        )
+        .to_string();
+    egui::Window::new(title)
         .id(egui::Id::unique("thk_modal_java_manager"))
         .collapsible(false)
         .resizable(true)
@@ -535,11 +619,20 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 paint_icon_3d(ui, 36.0, Icon3dKind::JavaReactor, true);
                 ui.heading(
-                    RichText::new("Các bản Java hiện có trên hệ thống")
-                        .size(16.0)
-                        .strong(),
+                    RichText::new(app.i18n.tr(
+                        "Các bản Java hiện có trên hệ thống",
+                        "Detected Java Installations",
+                    ))
+                    .size(16.0)
+                    .strong(),
                 );
-                if secondary_icon_button(ui, VectorIcon::Refresh, "Quét lại").clicked() {
+                if secondary_icon_button(
+                    ui,
+                    VectorIcon::Refresh,
+                    app.i18n.tr("Quét lại", "Rescan"),
+                )
+                .clicked()
+                {
                     app.rescan_java_runtimes();
                 }
             });
@@ -552,9 +645,10 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                 .show(ui, |ui| {
                     if installed.is_empty() {
                         ui.label(
-                            RichText::new(
+                            RichText::new(app.i18n.tr(
                                 "Chưa phát hiện Java cài sẵn. Launcher vẫn sẽ tự động tải Mojang JRE khi vào game hoặc bạn có thể cài thủ công bên dưới.",
-                            )
+                                "No system Java detected yet. The launcher will automatically provision Mojang JRE on game launch, or you can install a distribution below.",
+                            ))
                             .weak(),
                         );
                     }
@@ -572,7 +666,11 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                     ui.label(RichText::new(&j.vendor).strong());
                                     ui.label(RichText::new(&j.full_version).size(12.0).weak());
                                     if j.is_managed {
-                                        badge(ui, "Launcher quản lý", ACCENT_BLUE);
+                                        badge(
+                                            ui,
+                                            app.i18n.tr("Launcher quản lý", "Managed"),
+                                            ACCENT_BLUE,
+                                        );
                                     }
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
@@ -581,7 +679,7 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                             if secondary_icon_button(
                                                 ui,
                                                 VectorIcon::Copy,
-                                                "Chép đường dẫn",
+                                                app.i18n.tr("Chép đường dẫn", "Copy Path"),
                                             )
                                             .clicked()
                                             {
@@ -602,7 +700,11 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
 
             ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    RichText::new("Tải về bản phân phối Java (8 / 11 / 17 / 21 / 25):").strong(),
+                    RichText::new(app.i18n.tr(
+                        "Tải về bản phân phối Java (8 / 11 / 17 / 21 / 25):",
+                        "Download Official Java Distributions (8 / 11 / 17 / 21 / 25):",
+                    ))
+                    .strong(),
                 );
                 for d in JavaDistroKind::ALL {
                     if ui
@@ -622,9 +724,10 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                 .show(ui, |ui| {
                     if pkgs.is_empty() {
                         ui.label(
-                            RichText::new(
+                            RichText::new(app.i18n.tr(
                                 "Đang tải hoặc chưa có gói phù hợp cho kiến trúc CPU này.",
-                            )
+                                "Loading packages or none available for this CPU architecture.",
+                            ))
                             .weak(),
                         );
                     }
@@ -645,10 +748,13 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                     );
                                     ui.vertical(|ui| {
                                         ui.label(RichText::new(&pkg.release_name).strong());
-                                        let sz_txt = pkg
-                                            .size_bytes
-                                            .map(format_bytes)
-                                            .unwrap_or_else(|| "Gói chính thức".into());
+                                        let sz_txt = pkg.size_bytes.map(format_bytes).unwrap_or_else(
+                                            || {
+                                                app.i18n
+                                                    .tr("Gói chính thức", "Official Archive")
+                                                    .to_string()
+                                            },
+                                        );
                                         ui.label(
                                             RichText::new(format!("{} • {sz_txt}", pkg.file_name))
                                                 .size(11.5)
@@ -661,7 +767,7 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                             if primary_icon_button(
                                                 ui,
                                                 VectorIcon::Download,
-                                                "Cài đặt",
+                                                app.i18n.tr("Cài đặt", "Install"),
                                             )
                                             .clicked()
                                             {
@@ -681,14 +787,21 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
 
 fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
     let mut open = app.show_lan_modal;
-    egui::Window::new("Chia sẻ Thế giới LAN & Đường hầm Bore")
+    let title = app
+        .i18n
+        .tr(
+            "Chia sẻ Thế giới LAN & Đường hầm Bore",
+            "LAN World Radar & Public Bore Tunnel",
+        )
+        .to_string();
+    egui::Window::new(title)
         .id(egui::Id::unique("thk_modal_lan_share"))
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.set_width(520.0);
+            ui.set_width(525.0);
 
             ui.horizontal(|ui| {
                 paint_icon_3d(ui, 38.0, Icon3dKind::LanRadar, true);
@@ -696,7 +809,11 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                     ui.label(RichText::new("Radar LAN & Bore TCP Tunnel").size(15.5).strong());
                     if let Some(ref ip) = app.lan_modal.primary_lan_ip {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("IPv4 nội bộ:").size(12.0).weak());
+                            ui.label(
+                                RichText::new(app.i18n.tr("IPv4 nội bộ:", "Local IPv4:"))
+                                    .size(12.0)
+                                    .weak(),
+                            );
                             badge(ui, ip, ACCENT_BLUE);
                         });
                     }
@@ -713,33 +830,52 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                 |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(
-                        RichText::new(
+                        RichText::new(app.i18n.tr(
                             "1. Tự động phát hiện 'Open to LAN' an toàn (UDP 224.0.2.60:4445)",
-                        )
+                            "1. Secure Local 'Open to LAN' Detector (UDP 224.0.2.60:4445)",
+                        ))
                         .strong(),
                     );
                     ui.label(
-                        RichText::new(
+                        RichText::new(app.i18n.tr(
                             "Chỉ chấp nhận gói phát sóng xuất phát từ chính card mạng của máy bạn (chống giả mạo gói tin từ máy khác trong LAN).",
-                        )
+                            "Only accepts multicast packets originating from this machine's NICs (blocks foreign LAN spoofing).",
+                        ))
                         .size(11.5)
                         .weak(),
                     );
                     ui.add_space(6.0);
-                    ui.checkbox(
-                        &mut app.lan_modal.auto_open_tunnel,
-                        "Tự động mở cổng công khai bore.pub ngay khi phát hiện thế giới LAN",
-                    );
+                    let auto_tun_lbl = app
+                        .i18n
+                        .tr(
+                            "Tự động mở cổng công khai bore.pub ngay khi phát hiện thế giới LAN",
+                            "Automatically open public bore.pub tunnel upon detecting a local LAN world",
+                        )
+                        .to_string();
+                    ui.checkbox(&mut app.lan_modal.auto_open_tunnel, auto_tun_lbl);
 
                     ui.horizontal(|ui| {
                         if app.lan_modal.scanner_active {
-                            if danger_icon_button(ui, VectorIcon::Stop, "Dừng quét LAN").clicked() {
+                            if danger_icon_button(
+                                ui,
+                                VectorIcon::Stop,
+                                app.i18n.tr("Dừng quét LAN", "Stop LAN Radar"),
+                            )
+                            .clicked()
+                            {
                                 app.toggle_lan_scanner();
                             }
                             ui.spinner();
-                            ui.label("Đang lắng nghe 'Open to LAN' trong Minecraft...");
-                        } else if primary_icon_button(ui, VectorIcon::Globe, "Bắt đầu quét LAN")
-                            .clicked()
+                            ui.label(app.i18n.tr(
+                                "Đang lắng nghe 'Open to LAN' trong Minecraft...",
+                                "Listening for 'Open to LAN' in Minecraft...",
+                            ));
+                        } else if primary_icon_button(
+                            ui,
+                            VectorIcon::Globe,
+                            app.i18n.tr("Bắt đầu quét LAN", "Start LAN Radar"),
+                        )
+                        .clicked()
                         {
                             app.toggle_lan_scanner();
                         }
@@ -747,24 +883,32 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
 
                     if let Some(ref world) = app.lan_modal.detected_world {
                         ui.add_space(4.0);
-                        badge(
-                            ui,
-                            &format!(
+                        let det_lbl = if app.settings.language == Language::Vi {
+                            format!(
                                 "Đã phát hiện: {} ({}:{})",
                                 world.motd, world.sender_ip, world.port
-                            ),
-                            ACCENT_EMERALD,
-                        );
+                            )
+                        } else {
+                            format!(
+                                "Detected: {} ({}:{})",
+                                world.motd, world.sender_ip, world.port
+                            )
+                        };
+                        badge(ui, &det_lbl, ACCENT_EMERALD);
                     }
                     if app.lan_modal.ignored_foreign_packets > 0 {
-                        ui.label(
-                            RichText::new(format!(
+                        let blk_lbl = if app.settings.language == Language::Vi {
+                            format!(
                                 "Đã chặn {} gói quảng bá LAN ngoại lai không thuộc máy này.",
                                 app.lan_modal.ignored_foreign_packets
-                            ))
-                            .size(11.0)
-                            .color(ACCENT_AMBER),
-                        );
+                            )
+                        } else {
+                            format!(
+                                "Blocked {} foreign LAN announcement packet(s).",
+                                app.lan_modal.ignored_foreign_packets
+                            )
+                        };
+                        ui.label(RichText::new(blk_lbl).size(11.0).color(ACCENT_AMBER));
                     }
                 },
             );
@@ -793,7 +937,13 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                 Margin::same(12),
                 |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new("2. Mở Đường hầm Bore Công khai Thủ công").strong());
+                    ui.label(
+                        RichText::new(app.i18n.tr(
+                            "2. Mở Đường hầm Bore Công khai Thủ công",
+                            "2. Manual Public Bore TCP Tunnel",
+                        ))
+                        .strong(),
+                    );
                     ui.add_space(4.0);
                     paint_3d_tunnel_conduit(
                         ui,
@@ -805,16 +955,27 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                     ui.add_space(6.0);
 
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("Cổng nội bộ (Local Port):");
+                        ui.label(app.i18n.tr("Cổng nội bộ:", "Local Port:"));
                         ui.add(
                             egui::TextEdit::singleline(&mut app.lan_modal.manual_port_input)
                                 .desired_width(90.0),
                         );
-                        if primary_icon_button(ui, VectorIcon::Globe, "Mở bore.pub").clicked() {
+                        if primary_icon_button(
+                            ui,
+                            VectorIcon::Globe,
+                            app.i18n.tr("Mở bore.pub", "Open bore.pub"),
+                        )
+                        .clicked()
+                        {
                             app.start_manual_bore_tunnel();
                         }
                         if (tun_running || tun_connecting)
-                            && danger_icon_button(ui, VectorIcon::Stop, "Đóng cổng").clicked()
+                            && danger_icon_button(
+                                ui,
+                                VectorIcon::Stop,
+                                app.i18n.tr("Đóng cổng", "Close Tunnel"),
+                            )
+                            .clicked()
                         {
                             app.lan_coordinator.stop_tunnel();
                             app.lan_modal.tunnel_status = TunnelStatus::Stopped;
@@ -824,14 +985,23 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                     ui.add_space(6.0);
                     match &app.lan_modal.tunnel_status {
                         TunnelStatus::Idle | TunnelStatus::Stopped => {
-                            ui.label(RichText::new("Trạng thái: Chưa mở đường hầm.").weak());
+                            ui.label(
+                                RichText::new(app.i18n.tr(
+                                    "Trạng thái: Chưa mở đường hầm.",
+                                    "Status: Tunnel idle.",
+                                ))
+                                .weak(),
+                            );
                         }
                         TunnelStatus::Connecting { local_port } => {
                             ui.horizontal(|ui| {
                                 ui.spinner();
-                                ui.label(format!(
-                                    "Đang kết nối cổng {local_port} tới bore.pub..."
-                                ));
+                                let txt = if app.settings.language == Language::Vi {
+                                    format!("Đang kết nối cổng {local_port} tới bore.pub...")
+                                } else {
+                                    format!("Connecting local port {local_port} to bore.pub...")
+                                };
+                                ui.label(txt);
                             });
                         }
                         TunnelStatus::Running {
@@ -841,20 +1011,29 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                         } => {
                             let endpoint = format!("{remote_addr}:{remote_port}");
                             ui.horizontal_wrapped(|ui| {
-                                ui.label("Gửi địa chỉ này cho bạn bè:");
+                                ui.label(app.i18n.tr(
+                                    "Gửi địa chỉ này cho bạn bè:",
+                                    "Share this address with friends:",
+                                ));
                                 badge(ui, &endpoint, ACCENT_EMERALD);
-                                if primary_icon_button(ui, VectorIcon::Copy, "Sao chép").clicked() {
+                                if primary_icon_button(
+                                    ui,
+                                    VectorIcon::Copy,
+                                    app.i18n.tr("Sao chép", "Copy"),
+                                )
+                                .clicked()
+                                {
                                     ui.ctx().copy_text(endpoint);
                                 }
                             });
                             ui.label(
-                                RichText::new(format!("Đích nội bộ: 127.0.0.1:{local_port}"))
+                                RichText::new(format!("127.0.0.1:{local_port}"))
                                     .size(11.0)
                                     .weak(),
                             );
                         }
                         TunnelStatus::Error(err) => {
-                            ui.label(RichText::new(format!("Lỗi: {err}")).color(ACCENT_RED));
+                            ui.label(RichText::new(err).color(ACCENT_RED));
                         }
                     }
                 },
@@ -870,7 +1049,14 @@ fn render_crash_analyzer_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
 
     let mut keep_open = true;
     let mut close_clicked = false;
-    egui::Window::new("Phân Tích Sự Cố & Tự Động Khắc Phục Crash")
+    let title = app
+        .i18n
+        .tr(
+            "Phân Tích Sự Cố & Tự Động Khắc Phục Crash",
+            "Crash Diagnostics & 1-Click Auto-Fix",
+        )
+        .to_string();
+    egui::Window::new(title)
         .id(egui::Id::unique("thk_modal_crash_analyzer"))
         .collapsible(false)
         .resizable(true)
@@ -904,7 +1090,13 @@ fn render_crash_analyzer_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
 
             if !report.solutions.is_empty() {
                 ui.add_space(8.0);
-                ui.label(RichText::new("Hướng xử lý đề xuất:").strong());
+                ui.label(
+                    RichText::new(
+                        app.i18n
+                            .tr("Hướng xử lý đề xuất:", "Recommended Solutions:"),
+                    )
+                    .strong(),
+                );
                 for sol in &report.solutions {
                     ui.label(format!("• {sol}"));
                 }
@@ -913,9 +1105,12 @@ fn render_crash_analyzer_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
             if !report.missing_mods.is_empty() {
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("Khắc phục tự động 1 chạm từ Modrinth:")
-                        .strong()
-                        .color(ACCENT_EMERALD),
+                    RichText::new(app.i18n.tr(
+                        "Khắc phục tự động 1 chạm từ Modrinth:",
+                        "1-Click Automated Fix via Modrinth:",
+                    ))
+                    .strong()
+                    .color(ACCENT_EMERALD),
                 );
                 for advice in &report.missing_mods {
                     gaming_card_3d(
@@ -928,21 +1123,21 @@ fn render_crash_analyzer_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
                             ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
-                                    let req_ver = advice
-                                        .required_version
-                                        .as_deref()
-                                        .unwrap_or("bất kỳ");
+                                    let any_lbl = app.i18n.tr("bất kỳ", "any");
+                                    let req_ver =
+                                        advice.required_version.as_deref().unwrap_or(any_lbl);
                                     ui.label(
                                         RichText::new(format!(
-                                            "{} ({}) — Yêu cầu bản: {req_ver}",
+                                            "{} ({}) — {req_ver}",
                                             advice.display_name, advice.mod_id
                                         ))
                                         .strong(),
                                     );
                                     if !advice.required_by.is_empty() {
+                                        let req_by = app.i18n.tr("Cần bởi", "Required by");
                                         ui.label(
                                             RichText::new(format!(
-                                                "Cần bởi: {}",
+                                                "{req_by}: {}",
                                                 advice.required_by.join(", ")
                                             ))
                                             .size(11.5)
@@ -958,7 +1153,8 @@ fn render_crash_analyzer_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
                                             if primary_icon_button(
                                                 ui,
                                                 VectorIcon::Wrench,
-                                                "Tự động tải & sửa",
+                                                app.i18n
+                                                    .tr("Tự động tải & sửa", "Auto-Install Fix"),
                                             )
                                             .clicked()
                                             {
@@ -969,7 +1165,7 @@ fn render_crash_analyzer_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
                                             if primary_icon_button(
                                                 ui,
                                                 VectorIcon::Sliders,
-                                                "Mở Quản lý Java",
+                                                app.i18n.tr("Mở Quản lý Java", "Open Java Manager"),
                                             )
                                             .clicked()
                                             {
@@ -987,20 +1183,32 @@ fn render_crash_analyzer_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
 
             if !report.relevant_lines.is_empty() {
                 ui.add_space(6.0);
-                ui.collapsing("Xem chi tiết đoạn nhật ký lỗi (Stacktrace)", |ui| {
-                    ScrollArea::vertical()
-                        .id_salt("crash_relevant_lines_scroll")
-                        .max_height(180.0)
-                        .show(ui, |ui| {
-                            for line in &report.relevant_lines {
-                                ui.label(RichText::new(line).monospace().size(11.5));
-                            }
-                        });
-                });
+                ui.collapsing(
+                    app.i18n.tr(
+                        "Xem chi tiết đoạn nhật ký lỗi (Stacktrace)",
+                        "Inspect Relevant Stacktrace Lines",
+                    ),
+                    |ui| {
+                        ScrollArea::vertical()
+                            .id_salt("crash_relevant_lines_scroll")
+                            .max_height(180.0)
+                            .show(ui, |ui| {
+                                for line in &report.relevant_lines {
+                                    ui.label(RichText::new(line).monospace().size(11.5));
+                                }
+                            });
+                    },
+                );
             }
 
             ui.add_space(10.0);
-            if danger_button(ui, "Đóng cửa sổ chẩn đoán").clicked() {
+            if danger_button(
+                ui,
+                app.i18n
+                    .tr("Đóng cửa sổ chẩn đoán", "Close Crash Diagnostics"),
+            )
+            .clicked()
+            {
                 close_clicked = true;
             }
         });
@@ -1012,11 +1220,15 @@ fn render_crash_analyzer_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
 
 fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
     let mut open = app.show_settings_modal;
-    egui::Window::new("Cài đặt Hệ thống & Cập nhật")
+    let title = app
+        .i18n
+        .tr("Cài đặt Hệ thống & Cập nhật", "System Settings & Updates")
+        .to_string();
+    egui::Window::new(title)
         .id(egui::Id::unique("thk_modal_settings"))
         .collapsible(false)
         .resizable(true)
-        .default_width(595.0)
+        .default_width(620.0)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
@@ -1025,11 +1237,21 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 paint_icon_3d(ui, 36.0, Icon3dKind::SettingsGyro, true);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("Trung tâm Tuỳ chỉnh Hệ thống").size(15.5).strong());
                     ui.label(
-                        RichText::new("Giao diện 3D, Âm thanh, Hiệu năng tải & Cập nhật SHA-256")
-                            .size(11.5)
-                            .weak(),
+                        RichText::new(app.i18n.tr(
+                            "Trung tâm Tuỳ chỉnh Hệ thống",
+                            "System Control Center",
+                        ))
+                        .size(15.5)
+                        .strong(),
+                    );
+                    ui.label(
+                        RichText::new(app.i18n.tr(
+                            "Giao diện 3D, Màu nhấn, Khởi chạy, Bộ nhớ đệm & Cập nhật SHA-256",
+                            "3D Theme, Accent Palette, Launch Behavior, Cache & SHA-256 Updates",
+                        ))
+                        .size(11.5)
+                        .weak(),
                     );
                 });
             });
@@ -1037,7 +1259,7 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
 
             ScrollArea::vertical()
                 .id_salt("settings_modal_scroll")
-                .max_height(500.0)
+                .max_height(520.0)
                 .show(ui, |ui| {
                     gaming_card_3d(
                         ui,
@@ -1048,12 +1270,15 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                         |ui| {
                             ui.set_width(ui.available_width());
                             ui.label(
-                                RichText::new("Giao diện & Hành vi cửa sổ")
-                                    .size(14.5)
-                                    .strong(),
+                                RichText::new(app.i18n.tr(
+                                    "Giao diện, Màu nhấn & Cửa sổ",
+                                    "Appearance, Accent & Window",
+                                ))
+                                .size(14.5)
+                                .strong(),
                             );
                             ui.horizontal(|ui| {
-                                ui.label("Ngôn ngữ:");
+                                ui.label(app.i18n.tr("Ngôn ngữ:", "Language:"));
                                 changed |= ui
                                     .selectable_value(
                                         &mut app.settings.language,
@@ -1071,37 +1296,53 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                             });
 
                             ui.horizontal(|ui| {
-                                ui.label("Chủ đề màu:");
+                                ui.label(app.i18n.tr("Chủ đề màu:", "Theme:"));
                                 changed |= ui
                                     .selectable_value(
                                         &mut app.settings.theme,
                                         ThemeMode::Dark,
-                                        "Tối (Gaming 3D Dark)",
+                                        app.i18n.tr("Tối (Gaming 3D Dark)", "Dark (Gaming 3D)"),
                                     )
                                     .changed();
                                 changed |= ui
                                     .selectable_value(
                                         &mut app.settings.theme,
                                         ThemeMode::Light,
-                                        "Sáng (Light)",
+                                        app.i18n.tr("Sáng (Light)", "Light"),
                                     )
                                     .changed();
                             });
 
                             ui.horizontal_wrapped(|ui| {
-                                ui.label("Khi đóng cửa sổ:");
+                                ui.label(app.i18n.tr("Tông màu chủ đạo:", "Accent Color:"));
+                                for preset in AccentPreset::ALL {
+                                    let (swatch_col, _) = accent_palette(preset);
+                                    let selected = app.settings.accent_preset == preset;
+                                    let label =
+                                        RichText::new(format!("● {}", preset.display_name()))
+                                            .color(if selected { Color32::WHITE } else { swatch_col })
+                                            .strong();
+                                    if ui.selectable_label(selected, label).clicked() {
+                                        app.settings.accent_preset = preset;
+                                        changed = true;
+                                    }
+                                }
+                            });
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(app.i18n.tr("Khi đóng cửa sổ:", "On Close:"));
                                 changed |= ui
                                     .selectable_value(
                                         &mut app.settings.close_behavior,
                                         CloseBehavior::Ask,
-                                        "Luôn hỏi",
+                                        app.i18n.tr("Luôn hỏi", "Always Ask"),
                                     )
                                     .changed();
                                 changed |= ui
                                     .selectable_value(
                                         &mut app.settings.close_behavior,
                                         CloseBehavior::MinimizeToTray,
-                                        "Thu xuống khay",
+                                        app.i18n.tr("Thu xuống khay", "Minimize to Tray"),
                                     )
                                     .changed();
                                 changed |= ui
@@ -1122,7 +1363,9 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                     .and_then(|p| p.file_name())
                                     .map(|f| f.to_string_lossy().to_string())
                                     .unwrap_or_else(|| {
-                                        app.i18n.tr("Mặc định 3D Grid", "Default 3D Grid").to_string()
+                                        app.i18n
+                                            .tr("Mặc định 3D Grid", "Default 3D Grid")
+                                            .to_string()
                                     });
                                 badge(ui, &bg_status, ACCENT_BLUE);
                                 if secondary_icon_button(
@@ -1158,12 +1401,15 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                         |ui| {
                             ui.set_width(ui.available_width());
                             ui.label(
-                                RichText::new("Hiệu năng, Âm thanh & Discord RPC")
-                                    .size(14.5)
-                                    .strong(),
+                                RichText::new(app.i18n.tr(
+                                    "Khởi chạy Game, Hiệu năng & Âm thanh",
+                                    "Launch Behavior, Performance & Audio",
+                                ))
+                                .size(14.5)
+                                .strong(),
                             );
                             ui.horizontal(|ui| {
-                                ui.label("RAM mặc định:");
+                                ui.label(app.i18n.tr("RAM mặc định:", "Default RAM:"));
                                 changed |= ui
                                     .add(
                                         egui::Slider::new(
@@ -1176,7 +1422,10 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                     .changed();
                             });
                             ui.horizontal(|ui| {
-                                ui.label("Số luồng tải song song:");
+                                ui.label(app.i18n.tr(
+                                    "Số luồng tải song song:",
+                                    "Max Concurrent Downloads:",
+                                ));
                                 changed |= ui
                                     .add(egui::Slider::new(
                                         &mut app.settings.max_concurrent_downloads,
@@ -1185,15 +1434,53 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                     .changed();
                             });
 
+                            let hide_lbl = app
+                                .i18n
+                                .tr(
+                                    "Ẩn Launcher khi vào game và tự hiện lại khi thoát game",
+                                    "Hide launcher while playing and restore on game exit",
+                                )
+                                .to_string();
+                            changed |= ui
+                                .checkbox(&mut app.settings.hide_launcher_on_launch, hide_lbl)
+                                .changed();
+
+                            let logs_lbl = app
+                                .i18n
+                                .tr(
+                                    "Tự động chuyển sang tab Nhật ký (Logs) khi bấm Vào Game",
+                                    "Automatically switch to Logs tab when launching",
+                                )
+                                .to_string();
+                            changed |= ui
+                                .checkbox(&mut app.settings.open_logs_on_launch, logs_lbl)
+                                .changed();
+
+                            let prio_lbl = app
+                                .i18n
+                                .tr(
+                                    "Ưu tiên CPU cao cho tiến trình JVM Minecraft (Above Normal Priority)",
+                                    "Boost Minecraft JVM CPU priority (Above Normal Priority)",
+                                )
+                                .to_string();
+                            changed |= ui
+                                .checkbox(&mut app.settings.high_process_priority, prio_lbl)
+                                .changed();
+
                             ui.horizontal(|ui| {
+                                let sfx_lbl = app
+                                    .i18n
+                                    .tr("Hiệu ứng âm thanh UI (SFX)", "UI Sound Effects (SFX)")
+                                    .to_string();
+                                let bgm_lbl = app
+                                    .i18n
+                                    .tr("Nhạc nền Ambient", "Ambient Music")
+                                    .to_string();
                                 changed |= ui
-                                    .checkbox(
-                                        &mut app.settings.sfx_enabled,
-                                        "Hiệu ứng âm thanh UI (SFX)",
-                                    )
+                                    .checkbox(&mut app.settings.sfx_enabled, sfx_lbl)
                                     .changed();
                                 changed |= ui
-                                    .checkbox(&mut app.settings.music_enabled, "Nhạc nền Ambient")
+                                    .checkbox(&mut app.settings.music_enabled, bgm_lbl)
                                     .changed();
                             });
                             if app.settings.music_enabled {
@@ -1229,22 +1516,32 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                 });
                             }
 
-                            changed |= ui
-                                .checkbox(
-                                    &mut app.settings.discord_rpc_enabled,
+                            let rpc_lbl = app
+                                .i18n
+                                .tr(
                                     "Hiển thị trạng thái chơi trên Discord Rich Presence",
+                                    "Broadcast playing status via Discord Rich Presence",
                                 )
+                                .to_string();
+                            changed |= ui
+                                .checkbox(&mut app.settings.discord_rpc_enabled, rpc_lbl)
                                 .changed();
 
                             if app.settings.discord_rpc_enabled {
                                 let mut cid_buf =
                                     app.settings.discord_client_id.clone().unwrap_or_default();
                                 ui.horizontal(|ui| {
-                                    ui.label("Discord App ID (tuỳ chọn):");
+                                    ui.label(app.i18n.tr(
+                                        "Discord App ID (tuỳ chọn):",
+                                        "Discord App ID (optional):",
+                                    ));
                                     if ui
                                         .add(
                                             egui::TextEdit::singleline(&mut cid_buf)
-                                                .hint_text("Mặc định tích hợp sẵn")
+                                                .hint_text(app.i18n.tr(
+                                                    "Mặc định tích hợp sẵn",
+                                                    "Built-in default",
+                                                ))
                                                 .desired_width(220.0),
                                         )
                                         .changed()
@@ -1263,6 +1560,57 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                     ui.add_space(8.0);
                     gaming_card_3d(
                         ui,
+                        "settings_storage_cache_card",
+                        false,
+                        ACCENT_AMBER,
+                        Margin::same(12),
+                        |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                RichText::new(app.i18n.tr(
+                                    "Lưu trữ & Dọn dẹp Bộ nhớ đệm (Cache)",
+                                    "Storage & Cache Cleaner",
+                                ))
+                                .size(14.5)
+                                .strong(),
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(app.i18n.tr("Dung lượng cache tạm:", "Temporary Cache:"));
+                                badge(ui, &format_bytes(app.cached_dir_bytes), ACCENT_AMBER);
+                                if secondary_icon_button(
+                                    ui,
+                                    VectorIcon::Refresh,
+                                    app.i18n.tr("Tính lại", "Refresh"),
+                                )
+                                .clicked()
+                                {
+                                    app.refresh_cache_size();
+                                }
+                                if danger_icon_button(
+                                    ui,
+                                    VectorIcon::Trash,
+                                    app.i18n.tr("Dọn sạch Cache", "Clear Cache"),
+                                )
+                                .clicked()
+                                {
+                                    app.clear_app_cache();
+                                }
+                                if secondary_icon_button(
+                                    ui,
+                                    VectorIcon::Folder,
+                                    app.i18n.tr("Mở thư mục dữ liệu", "Open Data Root"),
+                                )
+                                .clicked()
+                                {
+                                    let _ = open::that(&app.paths.root);
+                                }
+                            });
+                        },
+                    );
+
+                    ui.add_space(8.0);
+                    gaming_card_3d(
+                        ui,
                         "settings_cf_api_card",
                         false,
                         ACCENT_ORANGE,
@@ -1270,9 +1618,12 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                         |ui| {
                             ui.set_width(ui.available_width());
                             ui.label(
-                                RichText::new("Khoá API CurseForge (Tuỳ chọn)")
-                                    .size(14.5)
-                                    .strong(),
+                                RichText::new(app.i18n.tr(
+                                    "Khoá API CurseForge (Tuỳ chọn)",
+                                    "CurseForge API Key (Optional)",
+                                ))
+                                .size(14.5)
+                                .strong(),
                             );
                             let mut cf_buf =
                                 app.settings.curseforge_api_key.clone().unwrap_or_default();
@@ -1280,9 +1631,10 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                 .add(
                                     egui::TextEdit::singleline(&mut cf_buf)
                                         .password(true)
-                                        .hint_text(
-                                            "$2a$10$... (Để trống nếu chỉ dùng Modrinth/FTB/Technic)",
-                                        )
+                                        .hint_text(app.i18n.tr(
+                                            "$2a$10$... (Để trống để dùng khoá tích hợp sẵn)",
+                                            "$2a$10$... (Leave blank to use built-in key)",
+                                        ))
                                         .desired_width(f32::INFINITY),
                                 )
                                 .changed()
@@ -1304,9 +1656,12 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                         |ui| {
                             ui.set_width(ui.available_width());
                             ui.label(
-                                RichText::new("Cập nhật Tự động (Xác thực Băm SHA-256)")
-                                    .size(14.5)
-                                    .strong(),
+                                RichText::new(app.i18n.tr(
+                                    "Cập nhật Tự động (Xác thực Băm SHA-256)",
+                                    "Auto-Updater (SHA-256 Verified)",
+                                ))
+                                .size(14.5)
+                                .strong(),
                             );
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("GitHub Repo:");
@@ -1316,11 +1671,12 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                             .desired_width(230.0),
                                     )
                                     .changed();
+                                let auto_upd_lbl = app
+                                    .i18n
+                                    .tr("Tự kiểm tra khi mở", "Check on startup")
+                                    .to_string();
                                 changed |= ui
-                                    .checkbox(
-                                        &mut app.settings.auto_check_updates,
-                                        "Tự kiểm tra khi mở",
-                                    )
+                                    .checkbox(&mut app.settings.auto_check_updates, auto_upd_lbl)
                                     .changed();
                             });
 
@@ -1330,7 +1686,7 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                 } else if secondary_icon_button(
                                     ui,
                                     VectorIcon::Search,
-                                    "Kiểm tra bản cập nhật mới",
+                                    app.i18n.tr("Kiểm tra bản cập nhật mới", "Check for Updates"),
                                 )
                                 .clicked()
                                 {
@@ -1353,14 +1709,21 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                     if primary_icon_button(
                                         ui,
                                         VectorIcon::Download,
-                                        "Tải & Xác thực SHA-256",
+                                        app.i18n.tr(
+                                            "Tải & Xác thực SHA-256",
+                                            "Download & Verify SHA-256",
+                                        ),
                                     )
                                     .clicked()
                                     {
                                         app.download_verified_app_update();
                                     }
-                                    if secondary_icon_button(ui, VectorIcon::Globe, "Xem Release")
-                                        .clicked()
+                                    if secondary_icon_button(
+                                        ui,
+                                        VectorIcon::Globe,
+                                        app.i18n.tr("Xem Release", "Release Notes"),
+                                    )
+                                    .clicked()
                                     {
                                         let _ = open::that(&rel.html_url);
                                     }
@@ -1370,15 +1733,41 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                 }
                             }
 
-                            if let Some(ref dl_file) = app.updater.downloaded_file {
+                            if let Some(ref dl_file) = app.updater.downloaded_file.clone() {
+                                ui.add_space(6.0);
                                 ui.label(
                                     RichText::new(format!(
-                                        "Đã tải và kiểm chứng thành công: {}",
+                                        "{}: {}",
+                                        app.i18n.tr("Sẵn sàng cài đặt", "Verified & Ready"),
                                         dl_file.display()
                                     ))
                                     .size(11.5)
                                     .color(ACCENT_EMERALD),
                                 );
+                                ui.horizontal_wrapped(|ui| {
+                                    if primary_icon_button(
+                                        ui,
+                                        VectorIcon::Sparkles,
+                                        app.i18n.tr(
+                                            "Áp dụng & Khởi động lại ngay",
+                                            "Apply & Restart Now",
+                                        ),
+                                    )
+                                    .clicked()
+                                    {
+                                        app.apply_verified_app_update();
+                                    }
+                                    if secondary_icon_button(
+                                        ui,
+                                        VectorIcon::Folder,
+                                        app.i18n
+                                            .tr("Mở thư mục bản cập nhật", "Open Update Folder"),
+                                    )
+                                    .clicked()
+                                    {
+                                        app.open_updates_folder();
+                                    }
+                                });
                             }
                         },
                     );

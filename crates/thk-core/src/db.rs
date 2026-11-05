@@ -64,6 +64,9 @@ impl Database {
                 jvm_args            TEXT NOT NULL DEFAULT '',
                 auto_perf_mods      INTEGER NOT NULL DEFAULT 0,
                 icon_url            TEXT,
+                window_width        INTEGER,
+                window_height       INTEGER,
+                fullscreen          INTEGER NOT NULL DEFAULT 0,
                 total_play_seconds  INTEGER NOT NULL DEFAULT 0,
                 session_count       INTEGER NOT NULL DEFAULT 0,
                 crash_count         INTEGER NOT NULL DEFAULT 0,
@@ -86,6 +89,7 @@ impl Database {
                 account_type        TEXT NOT NULL,
                 skin_variant        TEXT NOT NULL DEFAULT 'wide',
                 skin_url            TEXT,
+                cape_url            TEXT,
                 custom_skin_path    TEXT,
                 custom_cape_path    TEXT,
                 custom_elytra_path  TEXT,
@@ -132,6 +136,10 @@ impl Database {
                 PRIMARY KEY (profile_id, content_kind, file_name)
             );",
         )?;
+        ensure_column(&conn, "profiles", "window_width", "INTEGER")?;
+        ensure_column(&conn, "profiles", "window_height", "INTEGER")?;
+        ensure_column(&conn, "profiles", "fullscreen", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "accounts", "cape_url", "TEXT")?;
         Ok(())
     }
 
@@ -192,6 +200,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, name, game_version, loader, loader_version, instance_path,
                     is_custom_path, ram_mb, java_path, jvm_args, auto_perf_mods, icon_url,
+                    window_width, window_height, fullscreen,
                     total_play_seconds, session_count, crash_count, last_played_at, created_at
              FROM profiles
              ORDER BY COALESCE(last_played_at, 0) DESC, created_at DESC",
@@ -206,6 +215,7 @@ impl Database {
             .query_row(
                 "SELECT id, name, game_version, loader, loader_version, instance_path,
                         is_custom_path, ram_mb, java_path, jvm_args, auto_perf_mods, icon_url,
+                        window_width, window_height, fullscreen,
                         total_play_seconds, session_count, crash_count, last_played_at, created_at
                  FROM profiles WHERE id = ?1",
                 params![id],
@@ -220,8 +230,9 @@ impl Database {
             "INSERT INTO profiles (
                 id, name, game_version, loader, loader_version, instance_path,
                 is_custom_path, ram_mb, java_path, jvm_args, auto_perf_mods, icon_url,
+                window_width, window_height, fullscreen,
                 total_play_seconds, session_count, crash_count, last_played_at, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 game_version = excluded.game_version,
@@ -233,7 +244,10 @@ impl Database {
                 java_path = excluded.java_path,
                 jvm_args = excluded.jvm_args,
                 auto_perf_mods = excluded.auto_perf_mods,
-                icon_url = excluded.icon_url",
+                icon_url = excluded.icon_url,
+                window_width = excluded.window_width,
+                window_height = excluded.window_height,
+                fullscreen = excluded.fullscreen",
             params![
                 p.id,
                 p.name,
@@ -247,6 +261,9 @@ impl Database {
                 p.jvm_args,
                 p.auto_perf_mods as i32,
                 p.icon_url,
+                p.window_width,
+                p.window_height,
+                p.fullscreen as i32,
                 p.total_play_seconds as i64,
                 p.session_count,
                 p.crash_count,
@@ -313,7 +330,7 @@ impl Database {
     pub fn list_accounts(&self) -> ThkResult<Vec<Account>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT id, username, uuid, account_type, skin_variant, skin_url,
+            "SELECT id, username, uuid, account_type, skin_variant, skin_url, cape_url,
                     custom_skin_path, custom_cape_path, custom_elytra_path,
                     token_expires_at, created_at
              FROM accounts
@@ -327,7 +344,7 @@ impl Database {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Ok(conn
             .query_row(
-                "SELECT id, username, uuid, account_type, skin_variant, skin_url,
+                "SELECT id, username, uuid, account_type, skin_variant, skin_url, cape_url,
                         custom_skin_path, custom_cape_path, custom_elytra_path,
                         token_expires_at, created_at
                  FROM accounts WHERE id = ?1",
@@ -341,16 +358,17 @@ impl Database {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO accounts (
-                id, username, uuid, account_type, skin_variant, skin_url,
+                id, username, uuid, account_type, skin_variant, skin_url, cape_url,
                 custom_skin_path, custom_cape_path, custom_elytra_path,
                 token_expires_at, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 username = excluded.username,
                 uuid = excluded.uuid,
                 account_type = excluded.account_type,
                 skin_variant = excluded.skin_variant,
                 skin_url = excluded.skin_url,
+                cape_url = excluded.cape_url,
                 custom_skin_path = excluded.custom_skin_path,
                 custom_cape_path = excluded.custom_cape_path,
                 custom_elytra_path = excluded.custom_elytra_path,
@@ -362,6 +380,7 @@ impl Database {
                 a.account_type.as_str(),
                 a.skin_variant.as_str(),
                 a.skin_url,
+                a.cape_url,
                 a.custom_skin_path.as_ref().map(|p| p.to_string_lossy().to_string()),
                 a.custom_cape_path.as_ref().map(|p| p.to_string_lossy().to_string()),
                 a.custom_elytra_path.as_ref().map(|p| p.to_string_lossy().to_string()),
@@ -577,6 +596,50 @@ impl Database {
         )?;
         Ok(())
     }
+
+    pub fn clone_installed_content_for_profile(
+        &self,
+        src_profile_id: &str,
+        dst_profile_id: &str,
+    ) -> ThkResult<usize> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let rows = conn.execute(
+            "INSERT OR REPLACE INTO installed_content (
+                profile_id, content_kind, file_name, sha1, provider, project_id,
+                version_id, title, version_number, icon_url, enabled, installed_at
+             )
+             SELECT ?2, content_kind, file_name, sha1, provider, project_id,
+                    version_id, title, version_number, icon_url, enabled, installed_at
+             FROM installed_content
+             WHERE profile_id = ?1",
+            params![src_profile_id, dst_profile_id],
+        )?;
+        Ok(rows)
+    }
+}
+
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    sql_type_def: &str,
+) -> ThkResult<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut exists = false;
+    let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for col in names {
+        if col?.eq_ignore_ascii_case(column) {
+            exists = true;
+            break;
+        }
+    }
+    if !exists {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {sql_type_def}"),
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn map_profile_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GameProfile> {
@@ -585,7 +648,8 @@ fn map_profile_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GameProfile> {
     let is_custom: i32 = r.get(6)?;
     let java_s: Option<String> = r.get(8)?;
     let auto_perf: i32 = r.get(10)?;
-    let play_secs: i64 = r.get(12)?;
+    let fullscreen_i: i32 = r.get(14)?;
+    let play_secs: i64 = r.get(15)?;
     Ok(GameProfile {
         id: r.get(0)?,
         name: r.get(1)?,
@@ -599,20 +663,23 @@ fn map_profile_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GameProfile> {
         jvm_args: r.get(9)?,
         auto_perf_mods: auto_perf != 0,
         icon_url: r.get(11)?,
+        window_width: r.get(12)?,
+        window_height: r.get(13)?,
+        fullscreen: fullscreen_i != 0,
         total_play_seconds: play_secs.max(0) as u64,
-        session_count: r.get(13)?,
-        crash_count: r.get(14)?,
-        last_played_at: r.get(15)?,
-        created_at: r.get(16)?,
+        session_count: r.get(16)?,
+        crash_count: r.get(17)?,
+        last_played_at: r.get(18)?,
+        created_at: r.get(19)?,
     })
 }
 
 fn map_account_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
     let acc_type: String = r.get(3)?;
     let variant: String = r.get(4)?;
-    let skin_p: Option<String> = r.get(6)?;
-    let cape_p: Option<String> = r.get(7)?;
-    let elytra_p: Option<String> = r.get(8)?;
+    let skin_p: Option<String> = r.get(7)?;
+    let cape_p: Option<String> = r.get(8)?;
+    let elytra_p: Option<String> = r.get(9)?;
     Ok(Account {
         id: r.get(0)?,
         username: r.get(1)?,
@@ -620,11 +687,12 @@ fn map_account_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
         account_type: AccountType::from_str_lossy(&acc_type),
         skin_variant: SkinVariant::from_str_lossy(&variant),
         skin_url: r.get(5)?,
+        cape_url: r.get(6)?,
         custom_skin_path: skin_p.map(PathBuf::from),
         custom_cape_path: cape_p.map(PathBuf::from),
         custom_elytra_path: elytra_p.map(PathBuf::from),
-        token_expires_at: r.get(9)?,
-        created_at: r.get(10)?,
+        token_expires_at: r.get(10)?,
+        created_at: r.get(11)?,
     })
 }
 

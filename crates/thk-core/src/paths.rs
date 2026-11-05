@@ -185,3 +185,105 @@ impl SafePath {
         Err(ThkError::InvalidInput("Too many colliding instance directories".into()))
     }
 }
+
+pub fn compute_dir_size_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            total += compute_dir_size_bytes(&entry.path());
+        } else if ft.is_file() {
+            if let Ok(meta) = entry.metadata() {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+pub fn clear_directory_contents(dir: &Path) -> ThkResult<u64> {
+    if !dir.exists() {
+        fs::create_dir_all(dir)?;
+        return Ok(0);
+    }
+    let freed = compute_dir_size_bytes(dir);
+    for entry_res in fs::read_dir(dir)? {
+        let entry = entry_res?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_dir() && !ft.is_symlink() {
+            let _ = fs::remove_dir_all(&path);
+        } else {
+            let _ = fs::remove_file(&path);
+        }
+    }
+    fs::create_dir_all(dir)?;
+    Ok(freed)
+}
+
+pub fn copy_profile_tree_selective(src_instance: &Path, dst_instance: &Path) -> ThkResult<usize> {
+    fs::create_dir_all(dst_instance)?;
+    if !src_instance.is_dir() {
+        return Ok(0);
+    }
+
+    const COPY_DIRS: &[&str] = &[
+        "mods",
+        "shaderpacks",
+        "resourcepacks",
+        "config",
+        "defaultconfigs",
+        "kubejs",
+        "scripts",
+    ];
+    const COPY_FILES: &[&str] = &["options.txt", "optionsof.txt", "servers.dat"];
+
+    let mut copied_files = 0usize;
+    for sub in COPY_DIRS {
+        let src_sub = SafePath::resolve_child(src_instance, sub)?;
+        if src_sub.is_dir() {
+            let dst_sub = SafePath::resolve_child(dst_instance, sub)?;
+            copied_files += copy_dir_recursive(&src_sub, &dst_sub)?;
+        }
+    }
+    for fname in COPY_FILES {
+        let src_file = SafePath::resolve_child(src_instance, fname)?;
+        if src_file.is_file() {
+            let dst_file = SafePath::resolve_child(dst_instance, fname)?;
+            fs::copy(&src_file, &dst_file)?;
+            copied_files += 1;
+        }
+    }
+    Ok(copied_files)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> ThkResult<usize> {
+    fs::create_dir_all(dst)?;
+    let mut count = 0usize;
+    for entry_res in fs::read_dir(src)? {
+        let entry = entry_res?;
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let clean = SafePath::validate_single_name(&name_str)?;
+        let dst_child = SafePath::resolve_child(dst, clean)?;
+        if ft.is_dir() {
+            count += copy_dir_recursive(&entry.path(), &dst_child)?;
+        } else if ft.is_file() {
+            fs::copy(entry.path(), &dst_child)?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}

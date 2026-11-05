@@ -1,36 +1,36 @@
 # TriHienKun Laucher
 
-**TriHienKun Laucher** là trình khởi chạy và quản trị hệ sinh thái Minecraft Desktop độc lập 100% viết thuần bằng **Rust** (`eframe` / `egui 0.37` + `wgpu 30` + `tokio` + `rusqlite`), biên dịch trực tiếp ra một tệp thực thi gốc duy nhất và không phụ thuộc Electron, Node.js, WebView hay máy chủ trung gian đóng kín.
+**TriHienKun Laucher** là trình khởi chạy và quản trị hệ sinh thái Minecraft Desktop độc lập 100% viết thuần bằng **Rust** (`eframe` / `egui 0.37` + `wgpu 30` + `tokio` + `rusqlite`), biên dịch trực tiếp ra một tệp thực thi gốc duy nhất nhúng sẵn biểu tượng & thông tin phiên bản PE gốc (`winresource`) và hoàn toàn không phụ thuộc Electron, Node.js, WebView hay máy chủ trung gian đóng kín.
 
 ---
 
 ## Điểm Nổi Bật Cốt Lõi
 
 - **100% Native Rust & Giao Diện Gaming 3D Thời Gian Thực (`wgpu 30.0.1` + `fx3d`)**:
-  - Khởi động tức thì, toàn bộ 9 crates tuân thủ nghiêm ngặt `#![deny(unsafe_code)]`.
-  - **Sân khấu Nhân vật 3D Hologram (`thk-renderer3d`)**: Kết xuất MSAA 4x bằng cặp WGSL shader (`SKIN_SHADER_WGSL` chiếu sáng viền kép Fresnel + `STAGE_SHADER_WGSL` bệ đá bát giác Obsidian-Emerald, 2 vòng năng lượng Hologram xoay ngược chiều và tinh thể Voxel lơ lửng) hiển thị trực tiếp ngay tại Banner Trang chủ và Phòng Studio Tài khoản.
-  - **Bộ máy Hoạt ảnh Giao diện 3D 60 FPS (`fx3d.rs`)**: 9 biểu tượng 3D đa bộ phận chiếu phối cảnh `glam::Mat4` thời gian thực, nền lưới chân trời 3D Parallax 3 lớp theo chuột, thẻ kính vát cạnh ánh kim 3D (`gaming_card_3d`), nút bấm cơ học 3D có đế nổi (`tactile_button_3d`), thanh chuyển tab trượt mượt (`sliding_pill_tabs`), biểu đồ cột Isometric Voxel 3D và ống dẫn gói tin Bore 3D.
-- **Đa Profile & Chạy Song Song Nhiều Phiên Bản (`InstanceSupervisor`)**:
+  - Khởi động tức thì, toàn bộ 9 crates tuân thủ nghiêm ngặt `#![deny(unsafe_code)]`, hỗ trợ song ngữ **Tiếng Việt / Tiếng Anh 100%** trên toàn bộ màn hình, hộp thoại và khay hệ thống (`System Tray`).
+  - **Sân khấu Nhân vật 3D Hologram (`thk-renderer3d`)**: Kết xuất MSAA 4x bằng cặp WGSL shader (`SKIN_SHADER_WGSL` chiếu sáng viền kép Fresnel + `STAGE_SHADER_WGSL` bệ đá bát giác Obsidian-Emerald, 2 vòng năng lượng Hologram xoay ngược chiều và tinh thể Voxel lơ lửng) hiển thị trực tiếp ngay tại Banner Trang chủ và Phòng Studio Tài khoản, hỗ trợ **kéo-thả trực tiếp tệp `.png`** vào khung 3D.
+  - **Bộ máy Hoạt ảnh Giao diện 3D 60 FPS (`fx3d.rs`) & 6 Tông Màu Chủ Đạo (`AccentPreset`)**: 9 biểu tượng 3D đa bộ phận chiếu phối cảnh `glam::Mat4` thời gian thực, nền lưới chân trời 3D Parallax 3 lớp theo chuột, thẻ kính vát cạnh ánh kim 3D (`gaming_card_3d`), nút bấm cơ học 3D có đế nổi (`tactile_button_3d`), thanh chuyển tab trượt mượt (`sliding_pill_tabs`), biểu đồ cột Isometric Voxel 3D, ống dẫn gói tin Bore 3D và 6 bảng màu chủ đạo (`Emerald`, `Cyan`, `Blue`, `Violet`, `Amber`, `Crimson`).
+- **Đa Profile, Nhân Bản, Độ Phân Giải Tùy Chỉnh & Trình Quản Lý Tệp Tích Hợp (`InstanceSupervisor`)**:
   - Hỗ trợ trọn vẹn **5 Mod Loaders**: `Vanilla`, `Fabric` (tự động cài gói tối ưu FPS: *Sodium, Lithium, FerriteCore, EntityCulling, ModMenu*), `Quilt`, `Forge` (tích hợp `ForgeWrapper` cho `1.13+`) và `NeoForge`.
-  - Cho phép chọn thư mục lưu trữ tùy chỉnh cho từng Profile, chạy đồng thời nhiều tài khoản/phiên bản, vào thẳng máy chủ qua `QuickPlay` và thống kê biểu đồ giờ chơi 14 ngày gần nhất trên **SQLite WAL**.
-- **Xác Thực Tài Khoản An Toàn & Máy Chủ Skin Yggdrasil Cục Bộ**:
-  - **Microsoft OAuth2**: Hỗ trợ đăng nhập bằng Mã Thiết Bị (`microsoft.com/link`), Desktop Redirect PKCE `S256` và Loopback PKCE tùy chỉnh; lưu trữ khóa làm mới mã hóa trong **OS Keyring** (`Windows Credential Manager` / `macOS Keychain` / `Linux Secret Service`).
+  - Tùy chỉnh **độ phân giải cửa sổ riêng (`window_width × window_height`)** hoặc **Toàn màn hình (`Fullscreen`)** cho từng Profile, **Nhân bản Profile** 1 chạm, trình quản lý tệp nội bộ `SafePath` kèm trình sửa cấu hình trực tiếp và nén/giải nén `.zip`, chạy đồng thời nhiều tài khoản/phiên bản (hỗ trợ cấp quyền ưu tiên CPU cao `ABOVE_NORMAL_PRIORITY_CLASS`), vào thẳng máy chủ qua `QuickPlay` và thống kê biểu đồ giờ chơi 14 ngày gần nhất trên **SQLite WAL**.
+- **Xác Thực Tài Khoản, Đồng Bộ Mojang Cloud Skin/Cape & Máy Chủ Yggdrasil Cục Bộ**:
+  - **Microsoft OAuth2 + Mojang Cloud Sync**: Hỗ trợ đăng nhập bằng Mã Thiết Bị (`microsoft.com/link`), Desktop Redirect PKCE `S256` và Loopback PKCE tùy chỉnh; lưu trữ khóa làm mới mã hóa trong **OS Keyring**; tự động tải & đệm ảnh **Skin + Active Cape** thật từ Mojang Cloud lên mô hình 3D, đồng thời hỗ trợ **tải Skin `.png` lên Mojang API** và **khôi phục Skin mặc định** trực tiếp từ Launcher.
   - **Offline + Custom Skin / Cape / Elytra**: Tạo Offline UUID v3 chuẩn `OfflinePlayer:` và tự động khởi chạy máy chủ HTTP Yggdrasil cục bộ (`axum` trên `127.0.0.1:0` kèm `authlib-injector`) để hiển thị đầy đủ ngoại hình trong game.
 - **Quản Lý & Tải Tự Động Đa Phân Phối Java (`thk-java`)**:
   - Tự động phát hiện và tải Mojang JRE chính thức theo từng thế hệ Minecraft (`Java 8 / 17 / 21 / 25`, hỗ trợ từ `1.7.10` đến `1.21.x` và `26.x`).
   - Trình quản lý tải thủ công các bản JRE/JDK từ **Eclipse Temurin (Adoptium)**, **Azul Zulu** và **GraalVM Community**.
-- **Kho Nội Dung 5 Nguồn + Trạm Cài Đặt Modpack 3D (`thk-mods` + `views/modpacks.rs`)**:
+- **Kho Nội Dung 5 Nguồn, Trạm Cài Đặt Modpack 3D & Kiểm Tra Cập Nhật Hàng Loạt (`thk-mods`)**:
   - Tìm kiếm, lọc thông minh (theo Loader, nhánh phiên bản Minecraft, từ khóa, lượt tải) và cài đặt trực tiếp Modpack, Mod, Shader, ResourcePack và Plugin từ **Modrinth**, **CurseForge**, **FTB Modpacks**, **Technic Platform (+ Solder)** và **Spiget**.
-  - Hỗ trợ chế độ xem Lưới thẻ 3D / Danh sách, tải ảnh biểu tượng & thư viện ảnh chụp màn hình bất đồng bộ kèm trình phóng to **Lightbox**, lọc từng bản phát hành (`Release / Beta / Alpha`), Trạm Cài Đặt 3D tùy chỉnh tên Profile / RAM / thư mục riêng có nút **Thu gọn** & **Hủy cài đặt**, nhập trực tiếp `.mrpack` / `.zip` và nhận diện `.jar` qua mã băm `SHA-1`.
-- **Trình Quản Trị Máy Chủ Minecraft Chuyên Dụng (`thk-server`)**:
+  - Hỗ trợ kiểm tra cập nhật hàng loạt (`POST /v2/version_files/update` trên Modrinth & đối chiếu phiên bản CurseForge) kèm nút **Cập nhật 1 chạm / Cập nhật tất cả**, hiển thị ảnh thu nhỏ cho cả Profile, Mod cục bộ và thế giới Singleplayer (`saves/<world>/icon.png`), trình phóng to **Lightbox**, Trạm Cài Đặt 3D có nút **Thu gọn** & **Hủy cài đặt**, nhập trực tiếp `.mrpack` / `.zip` và nhận diện `.jar` qua mã băm `SHA-1`.
+- **Trình Quản Trị Máy Chủ Minecraft Chuyên Dụng Toàn Diện (`thk-server`)**:
   - Cài đặt tự động **10 lõi máy chủ**: `Paper`, `Purpur`, `Folia`, `Vanilla`, `Fabric`, `Forge`, `NeoForge`, `Arclight`, `Mohist`, `SpongeVanilla`.
-  - Bảng điều khiển trực tiếp hỗ trợ gợi ý lệnh bằng phím `Tab`, đo `CPU % / RAM MB / Số người chơi / Uptime` thực tế, cấu hình phần cứng & JVM sau khi tạo, trình quản lý tệp chống thoát thư mục (`SafePath`), trình sửa mã tích hợp, chỉnh sửa `server.properties`, `Whitelist` và `Banned Players`.
+  - Bảng điều khiển trực tiếp hỗ trợ gợi ý lệnh bằng phím `Tab` và **duyệt lịch sử lệnh bằng phím `↑ / ↓`**, đo `CPU % / RAM MB / Số người chơi / Uptime` thực tế, quản lý danh sách `.jar` đã cài trong `plugins/` & `mods/` (bật/tắt `.disabled`, xóa, nhập `.jar` ngoài, chọn phiên bản tải từ Modrinth / CurseForge / Spiget), bảng **Điều khiển Trực quan Nhanh `server.properties`** kết hợp bảng khóa-giá trị có bộ lọc, `Whitelist` và `Banned Players`.
 - **Mạng An Toàn, Ping Máy Chủ & Đường Hầm TCP Bore Nhúng (`thk-network`)**:
   - Giao thức Minecraft Server List Ping có phân giải bản ghi DNS `SRV` (`hickory-resolver`) và hiển thị màu MOTD.
   - Quét thế giới `Open to LAN` qua UDP Multicast `224.0.2.60:4445` có xác minh địa chỉ IP card mạng nội bộ (chặn gói quảng bá giả mạo từ máy khác) kết hợp thư viện `bore-cli` nhúng thuần Rust mở cổng công khai qua `bore.pub`.
-- **Cá Nhân Hóa & Tiện Ích Hệ Thống**:
+- **Cá Nhân Hóa, Quản Lý Bộ Nhớ Đệm & Tự Cập Nhật Khởi Động Lại**:
   - Chẩn đoán sự cố `CrashAnalyzer` kèm nút tự tải Mod thiếu 1 chạm từ Modrinth.
-  - Tùy chỉnh ảnh nền giao diện (`PNG / JPG / WEBP`), âm thanh giao diện tổng hợp + nhạc nền riêng (`MP3 / OGG / WAV` qua `rodio`), điều chỉnh động số luồng tải song song (`2–32` luồng), Discord Rich Presence, Khay hệ thống (`System Tray`), Đa ngôn ngữ Việt / Anh và Trình cập nhật xác thực băm `SHA-256`.
+  - Tùy chỉnh hành vi khi vào game (tự ẩn cửa sổ Launcher và hiện lại khi thoát game, tự chuyển sang tab Nhật ký), dọn bộ nhớ đệm `cache/` 1 chạm, ảnh nền giao diện (`PNG / JPG / WEBP`), âm thanh giao diện tổng hợp + nhạc nền riêng (`MP3 / OGG / WAV` qua `rodio`), Discord Rich Presence, Khay hệ thống (`System Tray`) và Trình cập nhật xác thực băm `SHA-256` hỗ trợ **Áp dụng & Khởi động lại ngay** an toàn.
 
 ---
 
@@ -44,17 +44,17 @@ trihienkun-laucher/
 │   └── locales/                # Từ điển đa ngôn ngữ đồng bộ (vi.json, en.json)
 ├── crates/
 │   ├── thk-core/               # AppPaths, SafePath, SQLite WAL, DownloadManager, Archive, I18n
-│   ├── thk-auth/               # Microsoft OAuth2 PKCE, OS Keyring, Offline UUID v3, Local Yggdrasil
+│   ├── thk-auth/               # Microsoft OAuth2 PKCE, Mojang Skin API, Keyring, Offline UUID, Yggdrasil
 │   ├── thk-java/               # Trình quét Java hệ thống, Mojang JRE, Adoptium / Zulu / GraalVM
-│   ├── thk-mods/               # Modrinth, CurseForge, FTB, Technic/Solder, Spiget & đồng bộ cục bộ
-│   ├── thk-launcher/           # Vanilla + 5 Mod Loaders, InstanceSupervisor, CrashAnalyzer
+│   ├── thk-mods/               # Modrinth, CurseForge, FTB, Technic/Solder, Spiget, Update Checker & Server Addons
+│   ├── thk-launcher/           # Vanilla + 5 Mod Loaders, InstanceSupervisor, Resolution/Priority, CrashAnalyzer
 │   ├── thk-server/             # 10 lõi máy chủ, LocalServerSupervisor, Quản lý tệp & cấu hình
 │   ├── thk-network/            # Minecraft Ping + DNS SRV, LAN Multicast an toàn, Bore, Discord RPC
 │   ├── thk-renderer3d/         # Đường ống đồ họa WGSL wgpu 30 (MSAA 4x, Sân khấu 3D Hologram & Nhân vật)
-│   └── thk-app/                # Ứng dụng Desktop eframe/egui, bộ máy 3D UI fx3d, âm thanh rodio, Tray & Updater
+│   └── thk-app/                # Ứng dụng Desktop eframe/egui, build.rs PE Icon, fx3d, rodio, Tray & Self-Updater
 ├── docs/
 │   ├── ARCHITECTURE.md         # Kiến trúc chi tiết, sơ đồ phụ thuộc & luồng khởi chạy
-│   ├── DATABASE_SCHEMA.md      # Lược đồ 7 bảng SQLite WAL, AppPaths & OS Keyring
+│   ├── DATABASE_SCHEMA.md      # Lược đồ 7 bảng SQLite WAL, di trú tự động, AppPaths & OS Keyring
 │   ├── SECURITY.md             # Mô hình bảo mật & bảng đối chiếu các lớp phòng thủ
 │   └── USER_GUIDE.md           # Hướng dẫn sử dụng từng tính năng từ cơ bản đến nâng cao
 ├── CONTRIBUTING.md             # Quy chuẩn phát triển, kiểm thử và phát hành CI/CD
@@ -85,13 +85,13 @@ trihienkun-laucher/
 
 ### Kiểm thử, Phân tích Tĩnh & Đóng gói Release
 ```bash
-# Chạy trọn bộ 31 bài kiểm thử đơn vị trên toàn bộ 9 crates
+# Chạy trọn bộ 34 bài kiểm thử đơn vị trên toàn bộ 9 crates
 cargo test --workspace
 
 # Kiểm tra chất lượng mã nguồn nghiêm ngặt với Clippy (0 cảnh báo)
 cargo clippy --workspace --all-targets -- -D warnings
 
-# Biên dịch tệp thực thi tối ưu hóa Release
+# Biên dịch tệp thực thi tối ưu hóa Release (nhúng sẵn icon.ico & siêu dữ liệu PE trên Windows)
 cargo build --release -p thk-app
 ```
 

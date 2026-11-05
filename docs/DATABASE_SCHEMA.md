@@ -1,6 +1,6 @@
 # Đặc Tả Cơ Sở Dữ Liệu, Thư Mục & Keyring — TriHienKun Laucher
 
-Tài liệu này mô tả chính xác cấu trúc thư mục dữ liệu ứng dụng (`AppPaths`), thông số vận hành và lược đồ SQL của toàn bộ 7 bảng SQLite trong `crates/thk-core/src/db.rs`, cấu trúc JSON của `AppSettings` và định dạng lưu trữ khóa xác thực trong OS Keyring (`crates/thk-auth/src/token_store.rs`).
+Tài liệu này mô tả chính xác cấu trúc thư mục dữ liệu ứng dụng (`AppPaths`), thông số vận hành, cơ chế tự động nâng cấp cột (`ensure_column`) và lược đồ SQL của toàn bộ 7 bảng SQLite trong `crates/thk-core/src/db.rs`, cấu trúc JSON của `AppSettings` và định dạng lưu trữ khóa xác thực trong OS Keyring (`crates/thk-auth/src/token_store.rs`).
 
 ---
 
@@ -23,14 +23,14 @@ Thư mục gốc được xác định bởi `AppPaths::resolve_default()` thôn
 ├── icons/                     # Biểu tượng ứng dụng sinh tự động (icon.png, icon.ico)
 ├── backgrounds/               # Ảnh nền tùy chỉnh (wallpaper.*) & nhạc nền riêng (custom_bgm.*)
 ├── cache/                     # Bộ nhớ đệm tải gói Modpack & bản cập nhật (cache/updates/)
-├── account_skins/             # Tệp PNG skin 64x64 đã chuẩn hóa theo từng tài khoản
-├── account_capes/             # Tệp PNG áo choàng Cape đã chuẩn hóa
+├── account_skins/             # Tệp PNG skin 64x64 đã chuẩn hóa (cục bộ + đệm Mojang Cloud remote_*.png)
+├── account_capes/             # Tệp PNG áo choàng Cape đã chuẩn hóa (cục bộ + đệm Mojang Cloud remote_*.png)
 ├── account_elytras/           # Tệp PNG cánh Elytra đã chuẩn hóa
 ├── runtimes/                  # Các bản Java JRE/JDK do Launcher tự động tải & quản lý
 ├── instances/                 # Thư mục mặc định chứa từng Profile Minecraft độc lập
 │   └── <slug>-<id8>/          # mods/, shaderpacks/, resourcepacks/, saves/, config/...
 ├── servers/                   # Thư mục mặc định chứa các Máy chủ Minecraft cục bộ
-│   └── <slug>-<id8>/          # server.jar, eula.txt, server.properties, plugins/, world/...
+│   └── <slug>-<id8>/          # server.jar, eula.txt, server.properties, plugins/, mods/, world/...
 └── launcher/                  # Kho tài nguyên dùng chung giữa mọi Profile (tránh tải trùng lặp)
     ├── versions/              # Manifest JSON & client.jar gốc theo phiên bản
     ├── libraries/             # Kho thư viện Maven dùng chung + thư mục natives giải nén
@@ -39,7 +39,7 @@ Thư mục gốc được xác định bởi `AppPaths::resolve_default()` thôn
 
 ---
 
-## 2. Cấu Hình Kết Nối SQLite
+## 2. Cấu Hình Kết Nối SQLite & Nâng Cấp Lược Đồ Tự Động
 
 Khi mở tệp `thk_laucher.db`, `Database::open` thiết lập ngay bộ chỉ thị PRAGMA sau:
 
@@ -49,6 +49,8 @@ PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 ```
+
+Sau khi thực thi `CREATE TABLE IF NOT EXISTS`, hàm `ensure_column` kiểm tra `PRAGMA table_info(...)` để tự động bổ sung các cột mới (`window_width`, `window_height`, `fullscreen` trên bảng `profiles` và `cape_url` trên bảng `accounts`) một cách bất biến (`idempotent`) đối với các cơ sở dữ liệu tạo từ phiên bản trước.
 
 ---
 
@@ -65,7 +67,7 @@ CREATE TABLE IF NOT EXISTS kv_state (
 ```
 
 ### 3.2. Bảng `profiles`
-Lưu trữ danh sách Profile trò chơi, cấu hình Mod Loader, bộ nhớ RAM, tham số JVM và bộ đếm thống kê tổng hợp.
+Lưu trữ danh sách Profile trò chơi, cấu hình Mod Loader, bộ nhớ RAM, tham số JVM, kích thước cửa sổ / toàn màn hình và bộ đếm thống kê tổng hợp.
 
 ```sql
 CREATE TABLE IF NOT EXISTS profiles (
@@ -81,6 +83,9 @@ CREATE TABLE IF NOT EXISTS profiles (
     jvm_args            TEXT NOT NULL DEFAULT '',
     auto_perf_mods      INTEGER NOT NULL DEFAULT 0,  -- Tự động cài gói tối ưu FPS cho Fabric
     icon_url            TEXT,
+    window_width        INTEGER,                     -- Chiều rộng cửa sổ game tùy chỉnh (px)
+    window_height       INTEGER,                     -- Chiều cao cửa sổ game tùy chỉnh (px)
+    fullscreen          INTEGER NOT NULL DEFAULT 0,  -- 1: Khởi chạy toàn màn hình (--fullscreen)
     total_play_seconds  INTEGER NOT NULL DEFAULT 0,
     session_count       INTEGER NOT NULL DEFAULT 0,
     crash_count         INTEGER NOT NULL DEFAULT 0,
@@ -89,7 +94,7 @@ CREATE TABLE IF NOT EXISTS profiles (
 );
 ```
 
-> **Cơ chế bảo toàn dữ liệu nguyên tử**: Câu lệnh `upsert_profile` chỉ cập nhật các cột cấu hình (`name`, `game_version`, `loader`, `loader_version`, `instance_path`, `is_custom_path`, `ram_mb`, `java_path`, `jvm_args`, `auto_perf_mods`, `icon_url`), trong khi `record_play_session` cộng dồn trực tiếp trên SQL (`total_play_seconds = total_play_seconds + ?2`, `session_count = session_count + 1`, `crash_count = crash_count + ?3`). Nhờ đó việc chỉnh sửa cấu hình khi game đang mở không bao giờ làm mất thời gian chơi và ngược lại.
+> **Cơ chế bảo toàn dữ liệu nguyên tử & Nhân bản Profile**: Câu lệnh `upsert_profile` chỉ cập nhật các cột cấu hình (`name`, `game_version`, `loader`, `loader_version`, `instance_path`, `is_custom_path`, `ram_mb`, `java_path`, `jvm_args`, `auto_perf_mods`, `icon_url`, `window_width`, `window_height`, `fullscreen`), trong khi `record_play_session` cộng dồn trực tiếp trên SQL (`total_play_seconds = total_play_seconds + ?2`, `session_count = session_count + 1`, `crash_count = crash_count + ?3`). Khi nhân bản Profile, `clone_installed_content_for_profile` sao chép toàn bộ bản ghi gói đã cài đặt sang `profile_id` mới.
 
 ### 3.3. Bảng `daily_play_stats`
 Lưu trữ thời lượng chơi theo từng ngày cho biểu đồ phân tích 14 ngày gần nhất; tự động xóa dây chuyền (`ON DELETE CASCADE`) khi xóa Profile.
@@ -114,7 +119,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     uuid                TEXT NOT NULL,
     account_type        TEXT NOT NULL,               -- 'offline' | 'microsoft'
     skin_variant        TEXT NOT NULL DEFAULT 'wide',-- 'wide' | 'slim'
-    skin_url            TEXT,
+    skin_url            TEXT,                        -- URL Skin từ Mojang Profile API
+    cape_url            TEXT,                        -- URL Active Cape từ Mojang Profile API
     custom_skin_path    TEXT,
     custom_cape_path    TEXT,
     custom_elytra_path  TEXT,
@@ -185,7 +191,11 @@ CREATE TABLE IF NOT EXISTS installed_content (
 | :--- | :--- | :--- | :--- |
 | `language` | `Language` | `"vi"` | Ngôn ngữ hiển thị (`"vi"` hoặc `"en"`). |
 | `theme` | `ThemeMode` | `"dark"` | Giao diện màu (`"dark"` hoặc `"light"`). |
+| `accent_preset` | `AccentPreset` | `"emerald"` | Bảng màu nhấn chủ đạo (`"emerald"`, `"cyan"`, `"blue"`, `"violet"`, `"amber"`, `"crimson"`). |
 | `close_behavior` | `CloseBehavior` | `"ask"` | Hành vi khi đóng cửa sổ (`"ask"`, `"minimize_to_tray"`, `"quit"`). |
+| `hide_launcher_on_launch` | `bool` | `false` | Tự động ẩn cửa sổ Launcher khi Minecraft khởi chạy và hiện lại khi thoát game. |
+| `open_logs_on_launch` | `bool` | `false` | Tự động chuyển sang thẻ Nhật ký trực tiếp (`Logs`) khi khởi chạy game. |
+| `high_process_priority` | `bool` | `false` | Cấp mức ưu tiên CPU cao (`ABOVE_NORMAL_PRIORITY_CLASS`) cho tiến trình JVM trên Windows. |
 | `default_ram_mb` | `u32` | `4096` | Dung lượng RAM mặc định (MB) khi tạo Profile mới. |
 | `max_concurrent_downloads` | `usize` | `12` | Số luồng tải song song tối đa (`2..=32`) áp dụng trực tiếp cho `DownloadManager`. |
 | `discord_rpc_enabled` | `bool` | `true` | Bật/tắt đồng bộ trạng thái Discord Rich Presence. |

@@ -13,7 +13,10 @@ pub use db::Database;
 pub use downloader::{DownloadManager, DownloadTask};
 pub use error::{ThkError, ThkResult};
 pub use i18n::I18n;
-pub use paths::{AppPaths, SafePath, APP_DATA_FOLDER, APP_DISPLAY_NAME, APP_ID};
+pub use paths::{
+    clear_directory_contents, compute_dir_size_bytes, copy_profile_tree_selective, AppPaths,
+    SafePath, APP_DATA_FOLDER, APP_DISPLAY_NAME, APP_ID,
+};
 
 #[cfg(test)]
 mod tests {
@@ -63,6 +66,9 @@ mod tests {
             jvm_args: "-XX:+UseG1GC".into(),
             auto_perf_mods: true,
             icon_url: None,
+            window_width: Some(1600),
+            window_height: Some(900),
+            fullscreen: false,
             total_play_seconds: 0,
             session_count: 0,
             crash_count: 0,
@@ -132,5 +138,110 @@ mod tests {
             assert_ne!(vi.t(key), key);
             assert_ne!(en.t(key), key);
         }
+    }
+
+    #[test]
+    fn sqlite_migrates_legacy_v1_schema_and_clones_content() {
+        let temp = std::env::temp_dir().join(format!("thk-mig-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let db_file = temp.join("legacy.sqlite3");
+
+        {
+            let raw = rusqlite::Connection::open(&db_file).unwrap();
+            raw.execute_batch(
+                "
+                CREATE TABLE profiles (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    game_version TEXT NOT NULL,
+                    loader TEXT NOT NULL,
+                    loader_version TEXT,
+                    instance_path TEXT NOT NULL,
+                    is_custom_path INTEGER NOT NULL DEFAULT 0,
+                    ram_mb INTEGER NOT NULL DEFAULT 4096,
+                    java_path TEXT,
+                    jvm_args TEXT NOT NULL DEFAULT '',
+                    auto_perf_mods INTEGER NOT NULL DEFAULT 1,
+                    icon_url TEXT,
+                    total_play_seconds INTEGER NOT NULL DEFAULT 0,
+                    session_count INTEGER NOT NULL DEFAULT 0,
+                    crash_count INTEGER NOT NULL DEFAULT 0,
+                    last_played_at INTEGER,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE accounts (
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    uuid TEXT NOT NULL,
+                    account_type TEXT NOT NULL,
+                    skin_variant TEXT NOT NULL DEFAULT 'wide',
+                    skin_url TEXT,
+                    custom_skin_path TEXT,
+                    custom_cape_path TEXT,
+                    custom_elytra_path TEXT,
+                    token_expires_at INTEGER,
+                    created_at INTEGER NOT NULL
+                );
+                ",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&db_file).unwrap();
+        let prof = GameProfile {
+            id: "p-legacy".into(),
+            name: "Legacy Migrated".into(),
+            game_version: "1.21.4".into(),
+            loader: LoaderType::Fabric,
+            loader_version: None,
+            instance_path: temp.join("inst"),
+            is_custom_path: false,
+            ram_mb: 4096,
+            java_path: None,
+            jvm_args: String::new(),
+            auto_perf_mods: true,
+            icon_url: None,
+            window_width: Some(1920),
+            window_height: Some(1080),
+            fullscreen: true,
+            total_play_seconds: 0,
+            session_count: 0,
+            crash_count: 0,
+            last_played_at: None,
+            created_at: 1_700_000_000,
+        };
+        db.upsert_profile(&prof).unwrap();
+        let loaded = db.get_profile("p-legacy").unwrap().unwrap();
+        assert_eq!(loaded.window_width, Some(1920));
+        assert_eq!(loaded.window_height, Some(1080));
+        assert!(loaded.fullscreen);
+
+        let rec = crate::models::InstalledContentRecord {
+            profile_id: "p-legacy".into(),
+            content_kind: crate::models::ContentKind::Mod,
+            provider: crate::models::ProviderSource::Modrinth,
+            project_id: "AANobbMI".into(),
+            version_id: "ver-1".into(),
+            title: "Sodium".into(),
+            version_number: "0.6.0".into(),
+            file_name: "sodium.jar".into(),
+            sha1: "deadbeef".into(),
+            enabled: true,
+            icon_url: Some("https://cdn.modrinth.com/icon.png".into()),
+            installed_at: 1_700_000_000,
+        };
+        db.upsert_installed_content(&rec).unwrap();
+        let cloned_count = db
+            .clone_installed_content_for_profile("p-legacy", "p-copy")
+            .unwrap();
+        assert_eq!(cloned_count, 1);
+        let cloned_items = db
+            .list_installed_content("p-copy", crate::models::ContentKind::Mod)
+            .unwrap();
+        assert_eq!(cloned_items.len(), 1);
+        assert_eq!(cloned_items[0].title, "Sodium");
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

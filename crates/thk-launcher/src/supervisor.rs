@@ -45,6 +45,7 @@ pub struct LaunchRequest {
     pub account: Account,
     pub quick_play_server: Option<String>,
     pub custom_ms_client_id: Option<String>,
+    pub high_process_priority: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -350,7 +351,13 @@ impl InstanceSupervisor {
         #[cfg(windows)]
         {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
+            const ABOVE_NORMAL_PRIORITY_CLASS: u32 = 0x0000_8000;
+            let flags = if req.high_process_priority {
+                CREATE_NO_WINDOW | ABOVE_NORMAL_PRIORITY_CLASS
+            } else {
+                CREATE_NO_WINDOW
+            };
+            cmd.creation_flags(flags);
         }
 
         let mut child = cmd
@@ -454,11 +461,11 @@ fn spawn_log_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_full_jvm_and_game_args(
+pub(crate) fn build_full_jvm_and_game_args(
     profile: &GameProfile,
     account: &Account,
     access_token: &str,
-    vanilla: & crate::vanilla::PreparedVanillaAssets,
+    vanilla: &crate::vanilla::PreparedVanillaAssets,
     main_class: &str,
     include_client_jar: bool,
     loader_jvm_args: &[String],
@@ -522,7 +529,18 @@ fn build_full_jvm_and_game_args(
     vars.insert("version_type", "TriHienKun".to_string());
     vars.insert("user_properties", "{}".to_string());
 
-    let features = HashMap::new();
+    let custom_res = profile
+        .window_width
+        .filter(|&w| w >= 320)
+        .zip(profile.window_height.filter(|&h| h >= 240));
+
+    let mut features = HashMap::new();
+    if let Some((w, h)) = custom_res {
+        vars.insert("resolution_width", w.to_string());
+        vars.insert("resolution_height", h.to_string());
+        features.insert("has_custom_resolution".to_string(), true);
+    }
+
     if let Some(ref v_args) = vanilla.version_json.arguments {
         for raw in &v_args.jvm {
             append_evaluated_arg(raw, &vars, &features, &mut args);
@@ -564,6 +582,19 @@ fn build_full_jvm_and_game_args(
 
     for l_game in loader_game_args {
         args.push(substitute_placeholders(l_game, &vars));
+    }
+
+    if let Some((w, h)) = custom_res {
+        if !args.iter().any(|a| a == "--width") {
+            args.push("--width".into());
+            args.push(w.to_string());
+            args.push("--height".into());
+            args.push(h.to_string());
+        }
+    }
+
+    if profile.fullscreen && !args.iter().any(|a| a == "--fullscreen") {
+        args.push("--fullscreen".into());
     }
 
     if let Some(addr) = quick_play_server.map(str::trim).filter(|s| !s.is_empty()) {

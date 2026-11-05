@@ -7,9 +7,10 @@ pub mod yggdrasil;
 
 pub use microsoft::{
     build_desktop_auth_challenge, complete_desktop_auth_challenge, ensure_valid_minecraft_token,
-    extract_auth_code_from_redirect_or_raw, login_with_loopback_pkce, poll_device_code_login,
-    refresh_microsoft_session, start_device_code_login, AuthenticatedMinecraftSession,
-    DesktopAuthChallenge, DeviceCodeSession,
+    extract_auth_code_from_redirect_or_raw, force_refresh_account_session, login_with_loopback_pkce,
+    poll_device_code_login, refresh_microsoft_session, reset_mojang_skin, start_device_code_login,
+    sync_mojang_profile, upload_mojang_skin, AuthenticatedMinecraftSession, DesktopAuthChallenge,
+    DeviceCodeSession,
 };
 pub use offline::{compute_offline_uuid, create_offline_account};
 pub use token_store::{StoredAuthTokens, TokenStore};

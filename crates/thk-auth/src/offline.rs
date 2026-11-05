@@ -36,6 +36,7 @@ pub fn create_offline_account(username: &str, skin_variant: SkinVariant) -> thk_
         account_type: AccountType::Offline,
         skin_variant,
         skin_url: None,
+        cape_url: None,
         custom_skin_path: None,
         custom_cape_path: None,
         custom_elytra_path: None,

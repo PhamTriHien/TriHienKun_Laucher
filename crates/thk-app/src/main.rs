@@ -39,9 +39,13 @@ impl TriHienKunApp {
             db,
             cc.wgpu_render_state.as_ref(),
         );
-        theme::apply_theme(&cc.egui_ctx, state.settings.theme);
+        theme::apply_theme(
+            &cc.egui_ctx,
+            state.settings.theme,
+            state.settings.accent_preset,
+        );
 
-        let tray = TrayController::try_new();
+        let tray = TrayController::try_new(state.settings.language);
         Self {
             state,
             tray,
@@ -68,7 +72,8 @@ impl eframe::App for TriHienKunApp {
         let ctx = ui.ctx().clone();
         self.state.drain_async_events();
 
-        if let Some(ref tray) = self.tray {
+        if let Some(ref mut tray) = self.tray {
+            tray.sync_language(self.state.settings.language);
             if let Some(action) = tray.poll_action() {
                 match action {
                     TrayAction::RestoreWindow => {

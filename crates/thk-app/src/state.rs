@@ -1,22 +1,29 @@
 use crate::audio::{AudioEngine, SoundEffect};
 use crate::theme::apply_theme;
-use crate::updater::{check_latest_release, download_verified_update, UpdateReleaseInfo};
+use crate::updater::{
+    apply_downloaded_update, check_latest_release, download_verified_update, UpdateReleaseInfo,
+};
 use chrono::Utc;
 use egui_commonmark::CommonMarkCache;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thk_auth::{
     build_desktop_auth_challenge, complete_desktop_auth_challenge, create_offline_account,
-    login_with_loopback_pkce, poll_device_code_login, refresh_microsoft_session,
-    start_device_code_login, DesktopAuthChallenge, DeviceCodeSession, TokenStore,
+    force_refresh_account_session, login_with_loopback_pkce, poll_device_code_login,
+    reset_mojang_skin, start_device_code_login, sync_mojang_profile, upload_mojang_skin,
+    DesktopAuthChallenge, DeviceCodeSession, TokenStore,
 };
+use thk_core::hash::sha1_bytes;
 use thk_core::models::{
     Account, AccountType, AppSettings, ContentKind, DailyPlayStat, DownloadProgress, GameProfile,
-    LoaderType, ManagedServer, ProviderSource, ServerBookmark, ServerEngine, SkinVariant,
+    Language, LoaderType, ManagedServer, ProviderSource, ServerBookmark, ServerEngine, SkinVariant,
 };
-use thk_core::{AppPaths, Database, DownloadManager, DownloadTask, I18n, SafePath};
+use thk_core::{
+    clear_directory_contents, compute_dir_size_bytes, copy_profile_tree_selective, AppPaths,
+    Database, DownloadManager, DownloadTask, I18n, SafePath,
+};
 use thk_java::{
     fetch_available_distro_packages, install_distro_package, scan_java_installations,
     DistroReleasePackage, JavaDistroKind, JavaInstallation,
@@ -27,21 +34,23 @@ use thk_launcher::{
     VersionSummary,
 };
 use thk_mods::{
-    delete_local_content, delete_local_world, enrich_unmatched_via_modrinth_sha1,
-    fetch_provider_project, fetch_provider_versions, import_curseforge_zip, import_mrpack_archive,
+    check_local_content_updates, delete_local_content, delete_local_world,
+    delete_server_addon_file, enrich_unmatched_via_modrinth_sha1, fetch_provider_project,
+    fetch_provider_versions, import_curseforge_zip, import_mrpack_archive, import_server_addon_jar,
     install_curseforge_content, install_curseforge_modpack_version, install_ftb_modpack_version,
     install_modrinth_content, install_modrinth_modpack_version, install_spiget_plugin,
-    install_technic_modpack_version, list_local_content, list_local_worlds, search_provider,
-    toggle_local_content, ImportedPackMetadata, LocalContentItem, LocalWorldInfo, ProjectDetail,
-    ProjectSummary, ProjectVersion, SearchQuery, SearchSort,
+    install_technic_modpack_version, list_local_content, list_local_worlds,
+    list_server_addon_files, search_provider, toggle_local_content, toggle_server_addon_file,
+    ContentUpdateCandidate, ImportedPackMetadata, LocalContentItem, LocalWorldInfo, ProjectDetail,
+    ProjectSummary, ProjectVersion, SearchQuery, SearchSort, ServerAddonFile,
 };
 use thk_network::{
     detect_primary_lan_ipv4, ping_minecraft_server, DiscordPresenceState, DiscordRpcService,
     LanShareCoordinator, LanTunnelEvent, LanWorldAnnouncement, ServerStatusPing, TunnelStatus,
 };
 use thk_renderer3d::{
-    load_and_normalize_cape_file, load_and_normalize_skin_file, BackEquipmentMode,
-    SkinPreviewViewport,
+    load_and_normalize_cape_file, load_and_normalize_cape_png, load_and_normalize_skin_file,
+    load_and_normalize_skin_png, BackEquipmentMode, SkinPreviewViewport,
 };
 use thk_server::{
     add_banned_player, compress_server_entries, delete_server_entries, extract_server_zip,
@@ -71,6 +80,7 @@ pub enum HomeTab {
     Shaders,
     ResourcePacks,
     Worlds,
+    Files,
     Bookmarks,
     Logs,
     Analytics,
@@ -129,11 +139,21 @@ pub enum AppAsyncEvent {
         items: Vec<LocalContentItem>,
     },
     InlineSearchCompleted {
+        append: bool,
         hits: Vec<ProjectSummary>,
+        total_hits: usize,
     },
     InlineProjectSelected {
         detail: ProjectDetail,
         versions: Vec<ProjectVersion>,
+    },
+    ContentUpdatesChecked {
+        profile_id: String,
+        kind: ContentKind,
+        result: Result<Vec<ContentUpdateCandidate>, String>,
+    },
+    ProfileExternalFileImported {
+        profile_id: String,
     },
     BookmarkPingResult {
         bookmark_id: String,
@@ -173,13 +193,25 @@ pub enum AppAsyncEvent {
         server_id: String,
     },
     ServerAddonSearchCompleted {
+        append: bool,
         hits: Vec<ProjectSummary>,
+        total_hits: usize,
+    },
+    ServerAddonVersionsLoaded {
+        summary: ProjectSummary,
+        versions: Vec<ProjectVersion>,
     },
     DeviceCodeReady(DeviceCodeSession),
     MicrosoftAccountLoggedIn(Account),
     AuthError(String),
     AccountTextureSaved {
         account: Account,
+    },
+    AccountProfileSynced {
+        account: Account,
+    },
+    RemoteAccountTextureCached {
+        cache_key: String,
     },
     JavaScanCompleted(Vec<JavaInstallation>),
     JavaDistroPackagesLoaded {
@@ -190,6 +222,7 @@ pub enum AppAsyncEvent {
     UpdateDownloaded(Result<PathBuf, String>),
     CustomBackgroundSaved(PathBuf),
     CustomMusicSaved,
+    CacheSizeComputed(u64),
 }
 
 pub struct NewProfileDraft {
@@ -223,6 +256,10 @@ pub struct ProfileEditDraft {
     pub java_path_str: String,
     pub jvm_args: String,
     pub auto_perf_mods: bool,
+    pub use_custom_resolution: bool,
+    pub window_width: u32,
+    pub window_height: u32,
+    pub fullscreen: bool,
 }
 
 impl Default for ProfileEditDraft {
@@ -234,6 +271,10 @@ impl Default for ProfileEditDraft {
             java_path_str: String::new(),
             jvm_args: String::new(),
             auto_perf_mods: false,
+            use_custom_resolution: false,
+            window_width: 1600,
+            window_height: 900,
+            fullscreen: false,
         }
     }
 }
@@ -249,12 +290,23 @@ pub struct HomeViewState {
     pub loader_versions: HashMap<(String, LoaderType), Vec<LoaderVersionEntry>>,
     pub local_items: Vec<LocalContentItem>,
     pub local_filter: String,
+    pub content_updates: Vec<ContentUpdateCandidate>,
+    pub checking_updates: bool,
     pub show_online_browser: bool,
     pub online_provider: ProviderSource,
     pub online_query: String,
+    pub online_page: usize,
+    pub online_total_hits: usize,
     pub online_hits: Vec<ProjectSummary>,
     pub online_selected: Option<(ProjectDetail, Vec<ProjectVersion>)>,
+    pub online_chosen_ver_idx: usize,
     pub worlds: Vec<LocalWorldInfo>,
+    pub current_rel_dir: String,
+    pub dir_entries: Vec<ServerFileEntry>,
+    pub selected_entries: HashSet<String>,
+    pub archive_name_input: String,
+    pub editing_file_rel: Option<String>,
+    pub editing_file_text: String,
     pub bookmarks: Vec<ServerBookmark>,
     pub bookmark_pings: HashMap<String, Result<ServerStatusPing, String>>,
     pub new_bm_name: String,
@@ -278,12 +330,23 @@ impl Default for HomeViewState {
             loader_versions: HashMap::new(),
             local_items: Vec::new(),
             local_filter: String::new(),
+            content_updates: Vec::new(),
+            checking_updates: false,
             show_online_browser: false,
             online_provider: ProviderSource::Modrinth,
             online_query: String::new(),
+            online_page: 0,
+            online_total_hits: 0,
             online_hits: Vec::new(),
             online_selected: None,
+            online_chosen_ver_idx: 0,
             worlds: Vec::new(),
+            current_rel_dir: String::new(),
+            dir_entries: Vec::new(),
+            selected_entries: HashSet::new(),
+            archive_name_input: "instance_backup.zip".into(),
+            editing_file_rel: None,
+            editing_file_text: String::new(),
             bookmarks: Vec::new(),
             bookmark_pings: HashMap::new(),
             new_bm_name: String::new(),
@@ -477,6 +540,7 @@ pub struct ServersViewState {
     pub editing_file_rel: Option<String>,
     pub editing_file_text: String,
     pub properties_map: BTreeMap<String, String>,
+    pub properties_filter: String,
     pub new_prop_key: String,
     pub new_prop_val: String,
     pub whitelist: Vec<WhitelistEntry>,
@@ -484,10 +548,18 @@ pub struct ServersViewState {
     pub new_wl_name: String,
     pub new_ban_name: String,
     pub new_ban_reason: String,
+    pub cmd_history: Vec<String>,
+    pub cmd_history_cursor: Option<usize>,
+    pub installed_addons: Vec<ServerAddonFile>,
+    pub addon_filter: String,
     pub addon_provider: ProviderSource,
     pub addon_kind: ContentKind,
     pub addon_query: String,
+    pub addon_page: usize,
+    pub addon_total_hits: usize,
     pub addon_hits: Vec<ProjectSummary>,
+    pub addon_selected: Option<(ProjectSummary, Vec<ProjectVersion>)>,
+    pub addon_chosen_ver_idx: usize,
 }
 
 impl Default for ServersViewState {
@@ -511,6 +583,7 @@ impl Default for ServersViewState {
             editing_file_rel: None,
             editing_file_text: String::new(),
             properties_map: BTreeMap::new(),
+            properties_filter: String::new(),
             new_prop_key: String::new(),
             new_prop_val: String::new(),
             whitelist: Vec::new(),
@@ -518,10 +591,18 @@ impl Default for ServersViewState {
             new_wl_name: String::new(),
             new_ban_name: String::new(),
             new_ban_reason: "Banned by operator".into(),
+            cmd_history: Vec::new(),
+            cmd_history_cursor: None,
+            installed_addons: Vec::new(),
+            addon_filter: String::new(),
             addon_provider: ProviderSource::Modrinth,
             addon_kind: ContentKind::Plugin,
             addon_query: String::new(),
+            addon_page: 0,
+            addon_total_hits: 0,
             addon_hits: Vec::new(),
+            addon_selected: None,
+            addon_chosen_ver_idx: 0,
         }
     }
 }
@@ -539,6 +620,8 @@ pub struct AccountsViewState {
     pub loopback_cancel: Option<CancellationToken>,
     pub skin_viewport: Option<SkinPreviewViewport>,
     pub loaded_viewport_key: String,
+    pub remote_tex_fetching: HashSet<String>,
+    pub synced_profile_ids: HashSet<String>,
 }
 
 impl Default for AccountsViewState {
@@ -556,6 +639,8 @@ impl Default for AccountsViewState {
             loopback_cancel: None,
             skin_viewport: None,
             loaded_viewport_key: String::new(),
+            remote_tex_fetching: HashSet::new(),
+            synced_profile_ids: HashSet::new(),
         }
     }
 }
@@ -639,6 +724,7 @@ pub struct LauncherAppState {
     pub busy_message: Option<String>,
     pub toasts: VecDeque<ToastMessage>,
     pub custom_bg_tex: Option<(PathBuf, egui::TextureHandle)>,
+    pub cached_dir_bytes: u64,
 
     pub home: HomeViewState,
     pub modpacks: ModpacksViewState,
@@ -761,6 +847,7 @@ impl LauncherAppState {
             busy_message: None,
             toasts: VecDeque::new(),
             custom_bg_tex: None,
+            cached_dir_bytes: 0,
             home: HomeViewState {
                 profiles,
                 selected_profile_id,
@@ -791,6 +878,7 @@ impl LauncherAppState {
         app.refresh_mojang_versions();
         app.refresh_selected_profile_tabs();
         app.refresh_selected_server_tabs();
+        app.refresh_cache_size();
         app.search_modpacks();
         if app.settings.auto_check_updates {
             app.check_app_updates(true);
@@ -845,7 +933,11 @@ impl LauncherAppState {
         self.i18n.set_language(self.settings.language);
         self.downloader
             .set_max_concurrency(self.settings.max_concurrent_downloads);
-        apply_theme(&self.egui_ctx, self.settings.theme);
+        apply_theme(
+            &self.egui_ctx,
+            self.settings.theme,
+            self.settings.accent_preset,
+        );
         self.sync_custom_background_texture();
         self.audio.sync_music(
             self.settings.music_enabled,
@@ -859,6 +951,36 @@ impl LauncherAppState {
             self.discord_rpc.set_presence(None, DiscordPresenceState::Disabled);
         }
         let _ = self.db.save_settings(&self.settings);
+    }
+
+    pub fn refresh_cache_size(&self) {
+        let cache_dir = self.paths.cache_dir.clone();
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        self.rt.spawn(async move {
+            let bytes = tokio::task::spawn_blocking(move || compute_dir_size_bytes(&cache_dir))
+                .await
+                .unwrap_or(0);
+            let _ = tx.send(AppAsyncEvent::CacheSizeComputed(bytes));
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn clear_app_cache(&mut self) {
+        match clear_directory_contents(&self.paths.cache_dir) {
+            Ok(freed_bytes) => {
+                self.cached_dir_bytes = 0;
+                self.refresh_cache_size();
+                let mb = freed_bytes as f64 / (1024.0 * 1024.0);
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã dọn bộ nhớ đệm ({mb:.1} MB)!")
+                } else {
+                    format!("Cleared launcher cache ({mb:.1} MB)!")
+                };
+                self.push_toast(ToastKind::Success, msg);
+            }
+            Err(e) => self.push_toast(ToastKind::Error, e.to_string()),
+        }
     }
 
     pub fn sync_custom_background_texture(&mut self) {
@@ -989,6 +1111,10 @@ impl LauncherAppState {
     pub fn select_profile(&mut self, profile_id: String) {
         let _ = self.db.set_kv("selected_profile_id", Some(&profile_id));
         self.home.selected_profile_id = Some(profile_id);
+        self.home.current_rel_dir.clear();
+        self.home.editing_file_rel = None;
+        self.home.selected_entries.clear();
+        self.home.content_updates.clear();
         self.sync_profile_edit_draft();
         self.refresh_selected_profile_tabs();
     }
@@ -1002,6 +1128,8 @@ impl LauncherAppState {
         self.servers.selected_server_id = Some(server_id);
         self.servers.current_rel_dir.clear();
         self.servers.editing_file_rel = None;
+        self.servers.selected_entries.clear();
+        self.servers.addon_selected = None;
         self.sync_server_edit_draft();
         self.refresh_selected_server_tabs();
     }
@@ -1083,6 +1211,10 @@ impl LauncherAppState {
                     .unwrap_or_default(),
                 jvm_args: p.jvm_args,
                 auto_perf_mods: p.auto_perf_mods,
+                use_custom_resolution: p.window_width.is_some() && p.window_height.is_some(),
+                window_width: p.window_width.unwrap_or(1600),
+                window_height: p.window_height.unwrap_or(900),
+                fullscreen: p.fullscreen,
             };
         }
     }
@@ -1092,7 +1224,11 @@ impl LauncherAppState {
             return;
         };
         if self.home.edit_draft.name.trim().is_empty() {
-            self.push_toast(ToastKind::Error, "Tên Profile không được để trống.");
+            let msg = self
+                .i18n
+                .tr("Tên Profile không được để trống.", "Profile name cannot be empty.")
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
             return;
         }
         prof.name = self.home.edit_draft.name.trim().to_string();
@@ -1105,13 +1241,92 @@ impl LauncherAppState {
         };
         prof.jvm_args = self.home.edit_draft.jvm_args.trim().to_string();
         prof.auto_perf_mods = self.home.edit_draft.auto_perf_mods;
+        if self.home.edit_draft.use_custom_resolution {
+            prof.window_width = Some(self.home.edit_draft.window_width.clamp(640, 7680));
+            prof.window_height = Some(self.home.edit_draft.window_height.clamp(480, 4320));
+        } else {
+            prof.window_width = None;
+            prof.window_height = None;
+        }
+        prof.fullscreen = self.home.edit_draft.fullscreen;
 
         match self.db.upsert_profile(&prof) {
             Ok(()) => {
                 self.home.profiles = self.db.list_profiles().unwrap_or_default();
-                self.push_toast(ToastKind::Success, "Đã lưu cấu hình Profile.");
+                let msg = self
+                    .i18n
+                    .tr("Đã lưu cấu hình Profile.", "Saved profile configuration.")
+                    .to_string();
+                self.push_toast(ToastKind::Success, msg);
             }
-            Err(e) => self.push_toast(ToastKind::Error, format!("Lỗi lưu Profile: {e}")),
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n.tr("Lỗi lưu Profile", "Failed to save profile")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
+        }
+    }
+
+    pub fn duplicate_selected_profile(&mut self) {
+        let Some(src) = self.selected_profile().cloned() else {
+            return;
+        };
+        let new_id = Uuid::new_v4().to_string();
+        let copy_suffix = self.i18n.tr("Bản sao", "Copy");
+        let new_name = format!("{} ({copy_suffix})", src.name);
+        let slug = format!(
+            "{}-{}",
+            SafePath::slugify_dir_name(&new_name),
+            &new_id[..8]
+        );
+        let Ok(dst_dir) = SafePath::resolve_child(&self.paths.instances_dir, &slug) else {
+            return;
+        };
+        if let Err(e) = copy_profile_tree_selective(&src.instance_path, &dst_dir) {
+            self.push_toast(ToastKind::Error, e.to_string());
+            return;
+        }
+
+        let cloned = GameProfile {
+            id: new_id.clone(),
+            name: new_name.clone(),
+            game_version: src.game_version,
+            loader: src.loader,
+            loader_version: src.loader_version,
+            instance_path: dst_dir,
+            is_custom_path: false,
+            ram_mb: src.ram_mb,
+            java_path: src.java_path,
+            jvm_args: src.jvm_args,
+            auto_perf_mods: src.auto_perf_mods,
+            icon_url: src.icon_url,
+            window_width: src.window_width,
+            window_height: src.window_height,
+            fullscreen: src.fullscreen,
+            total_play_seconds: 0,
+            session_count: 0,
+            crash_count: 0,
+            last_played_at: None,
+            created_at: Utc::now().timestamp(),
+        };
+
+        match self.db.upsert_profile(&cloned) {
+            Ok(()) => {
+                let _ = self
+                    .db
+                    .clone_installed_content_for_profile(&src.id, &new_id);
+                self.home.profiles = self.db.list_profiles().unwrap_or_default();
+                self.select_profile(new_id);
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã nhân bản Profile thành '{new_name}'!")
+                } else {
+                    format!("Duplicated profile as '{new_name}'!")
+                };
+                self.push_toast(ToastKind::Success, msg);
+            }
+            Err(e) => self.push_toast(ToastKind::Error, e.to_string()),
         }
     }
 
@@ -1125,21 +1340,37 @@ impl LauncherAppState {
             }
         }
         if let Err(e) = self.db.delete_profile(&prof.id) {
-            self.push_toast(ToastKind::Error, format!("Không thể xóa Profile: {e}"));
+            let msg = format!(
+                "{}: {e}",
+                self.i18n.tr("Không thể xóa Profile", "Failed to delete profile")
+            );
+            self.push_toast(ToastKind::Error, msg);
             return;
         }
         self.home.profiles = self.db.list_profiles().unwrap_or_default();
         self.home.selected_profile_id = self.home.profiles.first().map(|p| p.id.clone());
         self.sync_profile_edit_draft();
         self.refresh_selected_profile_tabs();
-        self.push_toast(ToastKind::Info, format!("Đã xóa Profile '{}'.", prof.name));
+        let msg = if self.settings.language == Language::Vi {
+            format!("Đã xóa Profile '{}'.", prof.name)
+        } else {
+            format!("Deleted profile '{}'.", prof.name)
+        };
+        self.push_toast(ToastKind::Info, msg);
     }
 
     pub fn create_profile_from_draft(&mut self) {
         let name = self.home.new_draft.name.trim().to_string();
         let game_version = self.home.new_draft.game_version.trim().to_string();
         if name.is_empty() || game_version.is_empty() {
-            self.push_toast(ToastKind::Error, "Vui lòng nhập tên Profile và phiên bản Minecraft.");
+            let msg = self
+                .i18n
+                .tr(
+                    "Vui lòng nhập tên Profile và phiên bản Minecraft.",
+                    "Please enter a profile name and Minecraft version.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
             return;
         }
         let id = Uuid::new_v4().to_string();
@@ -1148,7 +1379,14 @@ impl LauncherAppState {
             None => {
                 let slug = format!("{}-{}", SafePath::slugify_dir_name(&name), &id[..8]);
                 let Ok(default_dir) = SafePath::resolve_child(&self.paths.instances_dir, &slug) else {
-                    self.push_toast(ToastKind::Error, "Đường dẫn thư mục Profile không hợp lệ.");
+                    let msg = self
+                        .i18n
+                        .tr(
+                            "Đường dẫn thư mục Profile không hợp lệ.",
+                            "Invalid profile directory path.",
+                        )
+                        .to_string();
+                    self.push_toast(ToastKind::Error, msg);
                     return;
                 };
                 (default_dir, false)
@@ -1178,6 +1416,9 @@ impl LauncherAppState {
             jvm_args: String::new(),
             auto_perf_mods: loader == LoaderType::Fabric && self.home.new_draft.auto_perf_mods,
             icon_url: None,
+            window_width: None,
+            window_height: None,
+            fullscreen: false,
             total_play_seconds: 0,
             session_count: 0,
             crash_count: 0,
@@ -1190,9 +1431,19 @@ impl LauncherAppState {
                 self.home.profiles = self.db.list_profiles().unwrap_or_default();
                 self.show_new_profile_modal = false;
                 self.select_profile(id);
-                self.push_toast(ToastKind::Success, "Đã tạo Profile mới thành công!");
+                let msg = self
+                    .i18n
+                    .tr("Đã tạo Profile mới thành công!", "Created new profile successfully!")
+                    .to_string();
+                self.push_toast(ToastKind::Success, msg);
             }
-            Err(e) => self.push_toast(ToastKind::Error, format!("Lỗi tạo Profile: {e}")),
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n.tr("Lỗi tạo Profile", "Failed to create profile")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
         }
     }
 
@@ -1238,12 +1489,18 @@ impl LauncherAppState {
         let Some(prof) = self.selected_profile().cloned() else {
             self.home.local_items.clear();
             self.home.worlds.clear();
+            self.home.dir_entries.clear();
             self.home.daily_stats.clear();
+            self.home.content_updates.clear();
             return;
         };
 
+        let _ = std::fs::create_dir_all(&prof.instance_path);
         self.home.worlds = list_local_worlds(&prof.instance_path).unwrap_or_default();
+        self.home.dir_entries =
+            list_server_dir(&prof.instance_path, &self.home.current_rel_dir).unwrap_or_default();
         self.home.daily_stats = self.db.get_daily_play_stats(&prof.id, 14).unwrap_or_default();
+        self.home.content_updates.clear();
 
         let kind_opt = match self.home.active_tab {
             HomeTab::Mods => Some(ContentKind::Mod),
@@ -1279,6 +1536,301 @@ impl LauncherAppState {
         }
     }
 
+    pub fn open_profile_file_editor(&mut self, rel_path: &str) {
+        let Some(prof) = self.selected_profile() else {
+            return;
+        };
+        let inst_dir = prof.instance_path.clone();
+        match read_server_text_file(&inst_dir, rel_path) {
+            Ok(content) => {
+                self.home.editing_file_rel = Some(rel_path.to_string());
+                self.home.editing_file_text = content;
+            }
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n.tr("Không thể mở tệp", "Failed to open file")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
+        }
+    }
+
+    pub fn save_profile_file_editor(&mut self) {
+        let Some(prof) = self.selected_profile() else {
+            return;
+        };
+        let Some(rel) = self.home.editing_file_rel.clone() else {
+            return;
+        };
+        let inst_dir = prof.instance_path.clone();
+        let body = self.home.editing_file_text.clone();
+        match write_server_text_file(&inst_dir, &rel, &body) {
+            Ok(()) => {
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã lưu tệp '{rel}'.")
+                } else {
+                    format!("Saved file '{rel}'.")
+                };
+                self.push_toast(ToastKind::Success, msg);
+            }
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n.tr("Lỗi lưu tệp", "Failed to save file")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
+        }
+    }
+
+    pub fn import_external_file_into_profile(&mut self) {
+        let Some(prof) = self.selected_profile().cloned() else {
+            return;
+        };
+        let rel_dir = self.home.current_rel_dir.clone();
+        let lang = self.settings.language;
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+
+        self.rt.spawn(async move {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title(tr_lang(
+                    lang,
+                    "Chọn tệp tải lên thư mục Profile",
+                    "Select File to Upload into Profile",
+                ))
+                .pick_file()
+                .await;
+            let Some(file) = picked else {
+                return;
+            };
+            match import_external_file_streaming(&prof.instance_path, &rel_dir, file.path()).await {
+                Ok(_) => {
+                    let _ = tx.send(AppAsyncEvent::ProfileExternalFileImported {
+                        profile_id: prof.id,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(AppAsyncEvent::Toast {
+                        kind: ToastKind::Error,
+                        text: format!(
+                            "{}: {e}",
+                            tr_lang(lang, "Không thể chép tệp", "Failed to import file")
+                        ),
+                    });
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn delete_selected_profile_files(&mut self) {
+        let Some(prof) = self.selected_profile().cloned() else {
+            return;
+        };
+        let targets: Vec<String> = self.home.selected_entries.drain().collect();
+        if targets.is_empty() {
+            return;
+        }
+        let count = targets.len();
+        match delete_server_entries(&prof.instance_path, &targets) {
+            Ok(()) => {
+                self.home.dir_entries =
+                    list_server_dir(&prof.instance_path, &self.home.current_rel_dir)
+                        .unwrap_or_default();
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã xóa {count} mục.")
+                } else {
+                    format!("Deleted {count} items.")
+                };
+                self.push_toast(ToastKind::Info, msg);
+            }
+            Err(e) => self.push_toast(ToastKind::Error, e.to_string()),
+        }
+    }
+
+    pub fn compress_selected_profile_files(&mut self) {
+        let Some(prof) = self.selected_profile().cloned() else {
+            return;
+        };
+        let targets: Vec<String> = self.home.selected_entries.iter().cloned().collect();
+        if targets.is_empty() {
+            let msg = self
+                .i18n
+                .tr(
+                    "Hãy đánh dấu ít nhất 1 tệp/thư mục để nén.",
+                    "Select at least 1 file or folder to compress.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
+            return;
+        }
+        let zip_rel = if self.home.current_rel_dir.is_empty() {
+            self.home.archive_name_input.trim().to_string()
+        } else {
+            format!(
+                "{}/{}",
+                self.home.current_rel_dir,
+                self.home.archive_name_input.trim()
+            )
+        };
+        match compress_server_entries(&prof.instance_path, &targets, &zip_rel) {
+            Ok(_) => {
+                self.home.selected_entries.clear();
+                self.home.dir_entries =
+                    list_server_dir(&prof.instance_path, &self.home.current_rel_dir)
+                        .unwrap_or_default();
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã nén thành '{zip_rel}'.")
+                } else {
+                    format!("Compressed into '{zip_rel}'.")
+                };
+                self.push_toast(ToastKind::Success, msg);
+            }
+            Err(e) => self.push_toast(ToastKind::Error, e.to_string()),
+        }
+    }
+
+    pub fn extract_profile_archive(&mut self, rel_zip: &str) {
+        let Some(prof) = self.selected_profile().cloned() else {
+            return;
+        };
+        match extract_server_zip(&prof.instance_path, rel_zip) {
+            Ok(cnt) => {
+                self.home.dir_entries =
+                    list_server_dir(&prof.instance_path, &self.home.current_rel_dir)
+                        .unwrap_or_default();
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã giải nén {cnt} tệp.")
+                } else {
+                    format!("Extracted {cnt} files.")
+                };
+                self.push_toast(ToastKind::Success, msg);
+            }
+            Err(e) => self.push_toast(ToastKind::Error, e.to_string()),
+        }
+    }
+
+    pub fn check_profile_content_updates(&mut self, kind: ContentKind) {
+        let Some(prof) = self.selected_profile().cloned() else {
+            return;
+        };
+        if self.home.checking_updates {
+            return;
+        }
+        self.home.checking_updates = true;
+        self.home.content_updates.clear();
+
+        let dl = self.downloader.clone();
+        let db = Arc::clone(&self.db);
+        let cf_key = self.settings.curseforge_api_key.clone();
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+
+        self.rt.spawn(async move {
+            let res = check_local_content_updates(&dl, &db, &prof, kind, cf_key.as_deref())
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppAsyncEvent::ContentUpdatesChecked {
+                profile_id: prof.id,
+                kind,
+                result: res,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn apply_single_content_update(
+        &mut self,
+        cand: ContentUpdateCandidate,
+        kind: ContentKind,
+    ) {
+        self.home
+            .content_updates
+            .retain(|u| u.file_name != cand.file_name);
+        self.install_inline_version(cand.summary, cand.latest_version, kind);
+    }
+
+    pub fn apply_all_content_updates(&mut self, kind: ContentKind) {
+        let Some(prof) = self.selected_profile().cloned() else {
+            return;
+        };
+        let updates = std::mem::take(&mut self.home.content_updates);
+        if updates.is_empty() {
+            return;
+        }
+        let dl = self.downloader.clone();
+        let db = Arc::clone(&self.db);
+        let cf_key = self.settings.curseforge_api_key.clone();
+        let lang = self.settings.language;
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+
+        self.rt.spawn(async move {
+            let mut updated_count = 0usize;
+            for cand in updates {
+                let tx_p = tx.clone();
+                let ctx_p = ctx.clone();
+                let on_prog = move |p: DownloadProgress| {
+                    let _ = tx_p.send(AppAsyncEvent::TaskProgress(Some(p)));
+                    ctx_p.request_repaint();
+                };
+                let res = match cand.summary.provider {
+                    ProviderSource::CurseForge => {
+                        install_curseforge_content(
+                            &dl,
+                            &db,
+                            &prof,
+                            kind,
+                            &cand.summary,
+                            &cand.latest_version,
+                            cf_key.as_deref(),
+                            None,
+                            on_prog,
+                        )
+                        .await
+                    }
+                    _ => {
+                        install_modrinth_content(
+                            &dl,
+                            &db,
+                            &prof,
+                            kind,
+                            &cand.summary,
+                            &cand.latest_version,
+                            None,
+                            on_prog,
+                        )
+                        .await
+                    }
+                };
+                if res.is_ok() {
+                    updated_count += 1;
+                }
+            }
+
+            let _ = tx.send(AppAsyncEvent::TaskProgress(None));
+            if let Ok(items) = list_local_content(&db, &prof.id, &prof.instance_path, kind) {
+                let _ = tx.send(AppAsyncEvent::LocalContentRefreshed {
+                    profile_id: prof.id,
+                    kind,
+                    items,
+                });
+            }
+            let msg = if lang == Language::Vi {
+                format!("Đã cập nhật thành công {updated_count} gói lên phiên bản mới nhất!")
+            } else {
+                format!("Successfully updated {updated_count} packages to their latest versions!")
+            };
+            let _ = tx.send(AppAsyncEvent::Toast {
+                kind: ToastKind::Success,
+                text: msg,
+            });
+            ctx.request_repaint();
+        });
+    }
+
     pub fn toggle_local_item(&mut self, kind: ContentKind, file_name: &str, enabled: bool) {
         let Some(prof) = self.selected_profile().cloned() else {
             return;
@@ -1289,7 +1841,13 @@ impl LauncherAppState {
                     list_local_content(&self.db, &prof.id, &prof.instance_path, kind)
                         .unwrap_or_default();
             }
-            Err(e) => self.push_toast(ToastKind::Error, format!("Không thể bật/tắt tệp: {e}")),
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n.tr("Không thể bật/tắt tệp", "Failed to toggle file")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
         }
     }
 
@@ -1302,9 +1860,20 @@ impl LauncherAppState {
                 self.home.local_items =
                     list_local_content(&self.db, &prof.id, &prof.instance_path, kind)
                         .unwrap_or_default();
-                self.push_toast(ToastKind::Info, format!("Đã xóa '{file_name}'."));
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã xóa '{file_name}'.")
+                } else {
+                    format!("Deleted '{file_name}'.")
+                };
+                self.push_toast(ToastKind::Info, msg);
             }
-            Err(e) => self.push_toast(ToastKind::Error, format!("Lỗi xóa tệp: {e}")),
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n.tr("Lỗi xóa tệp", "Failed to delete file")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
         }
     }
 
@@ -1315,16 +1884,41 @@ impl LauncherAppState {
         match delete_local_world(&prof.instance_path, folder_name) {
             Ok(()) => {
                 self.home.worlds = list_local_worlds(&prof.instance_path).unwrap_or_default();
-                self.push_toast(ToastKind::Info, format!("Đã xóa thế giới '{folder_name}'."));
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã xóa thế giới '{folder_name}'.")
+                } else {
+                    format!("Deleted world '{folder_name}'.")
+                };
+                self.push_toast(ToastKind::Info, msg);
             }
-            Err(e) => self.push_toast(ToastKind::Error, format!("Không thể xóa thế giới: {e}")),
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n
+                        .tr("Không thể xóa thế giới", "Failed to delete world")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
         }
     }
 
     pub fn search_inline_profile_content(&mut self, kind: ContentKind) {
+        self.search_inline_profile_content_page(kind, 0, false);
+    }
+
+    pub fn search_inline_profile_content_page(
+        &mut self,
+        kind: ContentKind,
+        page: usize,
+        append: bool,
+    ) {
         let Some(prof) = self.selected_profile().cloned() else {
             return;
         };
+        self.home.online_page = page;
+        if !append {
+            self.home.online_hits.clear();
+        }
         let provider = self.home.online_provider;
         let query = SearchQuery {
             query: self.home.online_query.trim().to_string(),
@@ -1333,26 +1927,39 @@ impl LauncherAppState {
             loader: (kind == ContentKind::Mod && prof.loader != LoaderType::Vanilla)
                 .then_some(prof.loader),
             sort: SearchSort::Downloads,
-            offset: 0,
+            offset: page * 20,
             limit: 20,
         };
         let cf_key = self.settings.curseforge_api_key.clone();
+        let lang = self.settings.language;
         let dl = self.downloader.clone();
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
-        self.busy_message = Some(format!("Đang tìm kiếm trên {}...", provider.display_name()));
+        self.busy_message = Some(if lang == Language::Vi {
+            format!("Đang tìm kiếm trên {}...", provider.display_name())
+        } else {
+            format!("Searching on {}...", provider.display_name())
+        });
 
         self.rt.spawn(async move {
             let res = search_provider(&dl, provider, &query, cf_key.as_deref()).await;
             let _ = tx.send(AppAsyncEvent::BusyStatus(None));
             match res {
-                Ok(page) => {
-                    let _ = tx.send(AppAsyncEvent::InlineSearchCompleted { hits: page.hits });
+                Ok(res_page) => {
+                    let _ = tx.send(AppAsyncEvent::InlineSearchCompleted {
+                        append,
+                        hits: res_page.hits,
+                        total_hits: res_page.total_hits,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Error,
-                        text: format!("Lỗi tìm kiếm {}: {e}", provider.display_name()),
+                        text: format!(
+                            "{} {}: {e}",
+                            tr_lang(lang, "Lỗi tìm kiếm", "Search failed on"),
+                            provider.display_name()
+                        ),
                     });
                 }
             }
@@ -1366,11 +1973,16 @@ impl LauncherAppState {
         };
         let dl = self.downloader.clone();
         let cf_key = self.settings.curseforge_api_key.clone();
+        let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
         let loader = (kind == ContentKind::Mod && prof.loader != LoaderType::Vanilla)
             .then_some(prof.loader);
-        self.busy_message = Some(format!("Đang tải phiên bản của '{}'...", summary.title));
+        self.busy_message = Some(if lang == Language::Vi {
+            format!("Đang tải phiên bản của '{}'...", summary.title)
+        } else {
+            format!("Loading versions for '{}'...", summary.title)
+        });
 
         self.rt.spawn(async move {
             let (det_res, ver_res) = tokio::join!(
@@ -1392,7 +2004,14 @@ impl LauncherAppState {
                 (Err(e), _) | (_, Err(e)) => {
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Error,
-                        text: format!("Không thể tải thông tin gói: {e}"),
+                        text: format!(
+                            "{}: {e}",
+                            tr_lang(
+                                lang,
+                                "Không thể tải thông tin gói",
+                                "Failed to load package metadata"
+                            )
+                        ),
                     });
                 }
             }
@@ -1412,6 +2031,7 @@ impl LauncherAppState {
         let dl = self.downloader.clone();
         let db = Arc::clone(&self.db);
         let cf_key = self.settings.curseforge_api_key.clone();
+        let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
 
@@ -1454,19 +2074,33 @@ impl LauncherAppState {
                             items,
                         });
                     }
-                    let _ = tx.send(AppAsyncEvent::Toast {
-                        kind: ToastKind::Success,
-                        text: format!(
+                    let text = if lang == Language::Vi {
+                        format!(
                             "Đã cài đặt '{}' ({} tệp bao gồm thư viện phụ thuộc).",
                             summary.title,
                             files.len()
-                        ),
+                        )
+                    } else {
+                        format!(
+                            "Installed '{}' ({} files including dependencies).",
+                            summary.title,
+                            files.len()
+                        )
+                    };
+                    let _ = tx.send(AppAsyncEvent::Toast {
+                        kind: ToastKind::Success,
+                        text,
                     });
                 }
                 Err(e) => {
+                    let text = if lang == Language::Vi {
+                        format!("Cài đặt '{}' thất bại: {e}", summary.title)
+                    } else {
+                        format!("Failed to install '{}': {e}", summary.title)
+                    };
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Error,
-                        text: format!("Cài đặt '{}' thất bại: {e}", summary.title),
+                        text,
                     });
                 }
             }
@@ -1480,12 +2114,17 @@ impl LauncherAppState {
         let instances_dir = self.paths.instances_dir.clone();
         let default_ram = self.settings.default_ram_mb;
         let cf_key = self.settings.curseforge_api_key.clone();
+        let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
 
         self.rt.spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
-                .set_title("Chọn gói Modpack (.mrpack hoặc CurseForge .zip)")
+                .set_title(tr_lang(
+                    lang,
+                    "Chọn gói Modpack (.mrpack hoặc CurseForge .zip)",
+                    "Select Modpack Archive (.mrpack or CurseForge .zip)",
+                ))
                 .add_filter("Modpack Archive", &["mrpack", "zip"])
                 .pick_file()
                 .await;
@@ -1540,7 +2179,10 @@ impl LauncherAppState {
                     let _ = tokio::fs::remove_dir_all(&inst_dir).await;
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Error,
-                        text: format!("Nhập Modpack thất bại: {e}"),
+                        text: format!(
+                            "{}: {e}",
+                            tr_lang(lang, "Nhập Modpack thất bại", "Failed to import Modpack")
+                        ),
                     });
                 }
             }
@@ -1550,15 +2192,26 @@ impl LauncherAppState {
 
     pub fn launch_selected_profile(&mut self, quick_play_server: Option<String>) {
         let Some(profile) = self.selected_profile().cloned() else {
-            self.push_toast(ToastKind::Error, "Vui lòng chọn hoặc tạo một Profile trước.");
+            let msg = self
+                .i18n
+                .tr(
+                    "Vui lòng chọn hoặc tạo một Profile trước.",
+                    "Please select or create a profile first.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
             return;
         };
         let Some(account) = self.selected_account().cloned() else {
             self.section = ActiveSection::Accounts;
-            self.push_toast(
-                ToastKind::Info,
-                "Hãy thêm tài khoản Microsoft hoặc Offline trước khi vào game.",
-            );
+            let msg = self
+                .i18n
+                .tr(
+                    "Hãy thêm tài khoản Microsoft hoặc Offline trước khi vào game.",
+                    "Please add a Microsoft or Offline account before launching.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Info, msg);
             return;
         };
 
@@ -1572,10 +2225,15 @@ impl LauncherAppState {
             account,
             quick_play_server,
             custom_ms_client_id: custom_cid,
+            high_process_priority: self.settings.high_process_priority,
         }) {
             Ok(_) => {
                 self.audio
                     .play_sfx(self.settings.sfx_enabled, SoundEffect::Launch);
+                if self.settings.open_logs_on_launch {
+                    self.section = ActiveSection::Home;
+                    self.home.active_tab = HomeTab::Logs;
+                }
                 if self.settings.discord_rpc_enabled {
                     self.discord_rpc.set_presence(
                         self.settings.discord_client_id.clone(),
@@ -1593,7 +2251,14 @@ impl LauncherAppState {
         let name = self.home.new_bm_name.trim().to_string();
         let addr = self.home.new_bm_addr.trim().to_string();
         if addr.is_empty() {
-            self.push_toast(ToastKind::Error, "Vui lòng nhập địa chỉ máy chủ.");
+            let msg = self
+                .i18n
+                .tr(
+                    "Vui lòng nhập địa chỉ máy chủ.",
+                    "Please enter a server address.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
             return;
         }
         let bm = ServerBookmark {
@@ -1603,7 +2268,12 @@ impl LauncherAppState {
             created_at: Utc::now().timestamp(),
         };
         if let Err(e) = self.db.upsert_bookmark(&bm) {
-            self.push_toast(ToastKind::Error, format!("Lỗi lưu máy chủ: {e}"));
+            let msg = format!(
+                "{}: {e}",
+                self.i18n
+                    .tr("Lỗi lưu máy chủ", "Failed to save server bookmark")
+            );
+            self.push_toast(ToastKind::Error, msg);
             return;
         }
         self.home.new_bm_name.clear();
@@ -1882,9 +2552,14 @@ impl LauncherAppState {
     pub fn pick_modpack_custom_dir(&mut self) {
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
+        let lang = self.settings.language;
         self.rt.spawn(async move {
             if let Some(folder) = rfd::AsyncFileDialog::new()
-                .set_title("Chọn thư mục cài đặt Modpack riêng")
+                .set_title(tr_lang(
+                    lang,
+                    "Chọn thư mục cài đặt Modpack riêng",
+                    "Select Custom Modpack Directory",
+                ))
                 .pick_folder()
                 .await
             {
@@ -2237,6 +2912,62 @@ impl LauncherAppState {
         None
     }
 
+    pub fn request_local_image_texture(
+        &mut self,
+        path: &Path,
+        max_dim: u32,
+    ) -> Option<egui::TextureHandle> {
+        let cache_key = format!("local:{max_dim}:{}", path.display());
+        if let Some(tex) = self.modpacks.textures.get(&cache_key) {
+            return Some(tex.clone());
+        }
+        if self.modpacks.pending_textures.contains(&cache_key)
+            || self.modpacks.failed_textures.contains(&cache_key)
+        {
+            return None;
+        }
+        if !path.is_file() {
+            self.modpacks.failed_textures.insert(cache_key);
+            return None;
+        }
+
+        self.modpacks.pending_textures.insert(cache_key.clone());
+        let owned_path = path.to_path_buf();
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+
+        self.rt.spawn(async move {
+            let decoded = tokio::task::spawn_blocking(move || {
+                let dyn_img = image::open(&owned_path).ok()?;
+                let scaled = if dyn_img.width() > max_dim || dyn_img.height() > max_dim {
+                    dyn_img.thumbnail(max_dim, max_dim)
+                } else {
+                    dyn_img
+                };
+                let rgba = scaled.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                if w == 0 || h == 0 {
+                    return None;
+                }
+                Some(egui::ColorImage::from_rgba_unmultiplied(
+                    [w as usize, h as usize],
+                    rgba.as_raw(),
+                ))
+            })
+            .await
+            .ok()
+            .flatten();
+
+            let _ = tx.send(AppAsyncEvent::ModpackRemoteImageLoaded {
+                cache_key,
+                image: decoded,
+            });
+            ctx.request_repaint();
+        });
+
+        None
+    }
+
     pub fn ensure_engine_versions(&mut self, engine: ServerEngine) {
         if self.servers.engine_versions.contains_key(&engine) {
             return;
@@ -2257,7 +2988,14 @@ impl LauncherAppState {
         let name = self.servers.new_draft.name.trim().to_string();
         let mc_ver = self.servers.new_draft.game_version.trim().to_string();
         if name.is_empty() || mc_ver.is_empty() {
-            self.push_toast(ToastKind::Error, "Vui lòng nhập tên máy chủ và phiên bản Minecraft.");
+            let msg = self
+                .i18n
+                .tr(
+                    "Vui lòng nhập tên máy chủ và phiên bản Minecraft.",
+                    "Please enter a server name and Minecraft version.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
             return;
         }
 
@@ -2266,7 +3004,8 @@ impl LauncherAppState {
             Some(dir) => (dir, true),
             None => {
                 let folder = format!("{}-{}", SafePath::slugify_dir_name(&name), &id[..8]);
-                let Ok(default_dir) = SafePath::resolve_child(&self.paths.servers_dir, &folder) else {
+                let Ok(default_dir) = SafePath::resolve_child(&self.paths.servers_dir, &folder)
+                else {
                     return;
                 };
                 (default_dir, false)
@@ -2304,13 +3043,24 @@ impl LauncherAppState {
             Ok(()) => {
                 self.servers.servers = self.db.list_servers().unwrap_or_default();
                 self.show_new_server_modal = false;
-                self.select_server(id.clone());
-                self.push_toast(ToastKind::Success, "Đã tạo máy chủ cục bộ!");
+                self.select_server(id);
+                let msg = self
+                    .i18n
+                    .tr("Đã tạo máy chủ cục bộ!", "Created local server!")
+                    .to_string();
+                self.push_toast(ToastKind::Success, msg);
                 if install_now {
                     self.install_selected_server_jar();
                 }
             }
-            Err(e) => self.push_toast(ToastKind::Error, format!("Lỗi tạo máy chủ: {e}")),
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n
+                        .tr("Lỗi tạo máy chủ", "Failed to create server")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
         }
     }
 
@@ -2321,14 +3071,23 @@ impl LauncherAppState {
         let dl = self.downloader.clone();
         let sup = self.server_supervisor.clone();
         let db = Arc::clone(&self.db);
+        let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
 
-        self.busy_message = Some(format!(
-            "Đang cài đặt lõi {} ({})...",
-            srv.engine.display_name(),
-            srv.game_version
-        ));
+        self.busy_message = Some(if lang == Language::Vi {
+            format!(
+                "Đang cài đặt lõi {} ({})...",
+                srv.engine.display_name(),
+                srv.game_version
+            )
+        } else {
+            format!(
+                "Installing {} core ({})...",
+                srv.engine.display_name(),
+                srv.game_version
+            )
+        });
 
         self.rt.spawn(async move {
             let java_res = sup.resolve_java_for_server(&srv).await;
@@ -2338,7 +3097,14 @@ impl LauncherAppState {
                     let _ = tx.send(AppAsyncEvent::BusyStatus(None));
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Error,
-                        text: format!("Không thể chuẩn bị Java cho máy chủ: {e}"),
+                        text: format!(
+                            "{}: {e}",
+                            tr_lang(
+                                lang,
+                                "Không thể chuẩn bị Java cho máy chủ",
+                                "Failed to prepare Java runtime for server"
+                            )
+                        ),
                     });
                     ctx.request_repaint();
                     return;
@@ -2373,9 +3139,17 @@ impl LauncherAppState {
                     });
                 }
                 Err(e) => {
+                    let text = if lang == Language::Vi {
+                        format!("Tải lõi {} thất bại: {e}", srv.engine.display_name())
+                    } else {
+                        format!(
+                            "Failed to install {} core: {e}",
+                            srv.engine.display_name()
+                        )
+                    };
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Error,
-                        text: format!("Tải lõi {} thất bại: {e}", srv.engine.display_name()),
+                        text,
                     });
                 }
             }
@@ -2388,6 +3162,7 @@ impl LauncherAppState {
             return;
         };
         let sup = self.server_supervisor.clone();
+        let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
         if self.settings.discord_rpc_enabled {
@@ -2403,7 +3178,14 @@ impl LauncherAppState {
             if let Err(e) = sup.start_server(&srv, true).await {
                 let _ = tx.send(AppAsyncEvent::Toast {
                     kind: ToastKind::Error,
-                    text: format!("Không thể khởi động máy chủ: {e}"),
+                    text: format!(
+                        "{}: {e}",
+                        tr_lang(
+                            lang,
+                            "Không thể khởi động máy chủ",
+                            "Failed to start server"
+                        )
+                    ),
                 });
                 ctx.request_repaint();
             }
@@ -2425,13 +3207,17 @@ impl LauncherAppState {
             return;
         };
         let sup = self.server_supervisor.clone();
+        let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
         self.rt.spawn(async move {
             if let Err(e) = sup.restart_server(&srv, true).await {
                 let _ = tx.send(AppAsyncEvent::Toast {
                     kind: ToastKind::Error,
-                    text: format!("Khởi động lại thất bại: {e}"),
+                    text: format!(
+                        "{}: {e}",
+                        tr_lang(lang, "Khởi động lại thất bại", "Failed to restart server")
+                    ),
                 });
                 ctx.request_repaint();
             }
@@ -2449,6 +3235,13 @@ impl LauncherAppState {
         let srv_id = srv.id.clone();
         match self.server_supervisor.send_command(&srv_id, &cmd) {
             Ok(()) => {
+                if self.servers.cmd_history.last() != Some(&cmd) {
+                    if self.servers.cmd_history.len() >= 100 {
+                        self.servers.cmd_history.remove(0);
+                    }
+                    self.servers.cmd_history.push(cmd.clone());
+                }
+                self.servers.cmd_history_cursor = None;
                 self.servers
                     .server_logs
                     .entry(srv_id)
@@ -2460,15 +3253,48 @@ impl LauncherAppState {
         }
     }
 
+    pub fn navigate_server_cmd_history(&mut self, up: bool) {
+        let len = self.servers.cmd_history.len();
+        if len == 0 {
+            return;
+        }
+        if up {
+            let next_idx = match self.servers.cmd_history_cursor {
+                None => len - 1,
+                Some(0) => 0,
+                Some(idx) => idx.saturating_sub(1),
+            };
+            self.servers.cmd_history_cursor = Some(next_idx);
+            if let Some(entry) = self.servers.cmd_history.get(next_idx) {
+                self.servers.console_input = entry.clone();
+            }
+        } else if let Some(idx) = self.servers.cmd_history_cursor {
+            if idx + 1 < len {
+                let next_idx = idx + 1;
+                self.servers.cmd_history_cursor = Some(next_idx);
+                if let Some(entry) = self.servers.cmd_history.get(next_idx) {
+                    self.servers.console_input = entry.clone();
+                }
+            } else {
+                self.servers.cmd_history_cursor = None;
+                self.servers.console_input.clear();
+            }
+        }
+    }
+
     pub fn delete_selected_server(&mut self) {
         let Some(srv) = self.selected_server().cloned() else {
             return;
         };
         if self.server_supervisor.runtime_state(&srv.id) != ServerRuntimeState::Offline {
-            self.push_toast(
-                ToastKind::Error,
-                "Vui lòng dừng máy chủ trước khi xóa khỏi danh sách.",
-            );
+            let msg = self
+                .i18n
+                .tr(
+                    "Vui lòng dừng máy chủ trước khi xóa khỏi danh sách.",
+                    "Please stop the server before deleting it.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
             return;
         }
         self.server_supervisor.stop_server_tunnel(&srv.id);
@@ -2477,7 +3303,12 @@ impl LauncherAppState {
         self.servers.selected_server_id = self.servers.servers.first().map(|s| s.id.clone());
         self.sync_server_edit_draft();
         self.refresh_selected_server_tabs();
-        self.push_toast(ToastKind::Info, format!("Đã xóa máy chủ '{}'.", srv.name));
+        let msg = if self.settings.language == Language::Vi {
+            format!("Đã xóa máy chủ '{}'.", srv.name)
+        } else {
+            format!("Deleted server '{}'.", srv.name)
+        };
+        self.push_toast(ToastKind::Info, msg);
     }
 
     pub fn refresh_selected_server_tabs(&mut self) {
@@ -2486,6 +3317,7 @@ impl LauncherAppState {
             self.servers.properties_map.clear();
             self.servers.whitelist.clear();
             self.servers.banlist.clear();
+            self.servers.installed_addons.clear();
             return;
         };
         self.servers.dir_entries =
@@ -2493,11 +3325,113 @@ impl LauncherAppState {
         self.servers.properties_map = read_server_properties(&srv.server_dir).unwrap_or_default();
         self.servers.whitelist = read_whitelist(&srv.server_dir).unwrap_or_default();
         self.servers.banlist = read_banned_players(&srv.server_dir).unwrap_or_default();
-        if srv.engine.supports_plugins() {
+        self.servers.installed_addons = list_server_addon_files(
+            &srv.server_dir,
+            srv.engine.supports_plugins(),
+            srv.engine.supports_mods(),
+        )
+        .unwrap_or_default();
+        if srv.engine.supports_plugins() && !srv.engine.supports_mods() {
             self.servers.addon_kind = ContentKind::Plugin;
-        } else if srv.engine.supports_mods() {
+        } else if srv.engine.supports_mods() && !srv.engine.supports_plugins() {
             self.servers.addon_kind = ContentKind::Mod;
         }
+    }
+
+    pub fn toggle_server_installed_addon(
+        &mut self,
+        folder: &str,
+        file_name: &str,
+        enable: bool,
+    ) {
+        let Some(srv) = self.selected_server().cloned() else {
+            return;
+        };
+        match toggle_server_addon_file(&srv.server_dir, folder, file_name, enable) {
+            Ok(_) => self.refresh_selected_server_tabs(),
+            Err(e) => self.push_toast(ToastKind::Error, e.to_string()),
+        }
+    }
+
+    pub fn delete_server_installed_addon(&mut self, folder: &str, file_name: &str) {
+        let Some(srv) = self.selected_server().cloned() else {
+            return;
+        };
+        match delete_server_addon_file(&srv.server_dir, folder, file_name) {
+            Ok(()) => {
+                self.refresh_selected_server_tabs();
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã xóa '{file_name}' khỏi {folder}/.")
+                } else {
+                    format!("Removed '{file_name}' from {folder}/.")
+                };
+                self.push_toast(ToastKind::Info, msg);
+            }
+            Err(e) => self.push_toast(ToastKind::Error, e.to_string()),
+        }
+    }
+
+    pub fn import_jar_into_server_addons(&mut self, folder: &str) {
+        let Some(srv) = self.selected_server().cloned() else {
+            return;
+        };
+        let folder_owned = folder.to_string();
+        let lang = self.settings.language;
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+
+        self.rt.spawn(async move {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title(tr_lang(
+                    lang,
+                    "Chọn tệp .jar thêm vào máy chủ",
+                    "Select .jar file to import into server",
+                ))
+                .add_filter("Java Archive (.jar)", &["jar"])
+                .pick_files()
+                .await;
+            let Some(files) = picked else {
+                return;
+            };
+            let mut imported_count = 0usize;
+            for f in files {
+                let p = f.path().to_path_buf();
+                let sdir = srv.server_dir.clone();
+                let fld = folder_owned.clone();
+                match tokio::task::spawn_blocking(move || import_server_addon_jar(&sdir, &fld, &p))
+                    .await
+                {
+                    Ok(Ok(_)) => imported_count += 1,
+                    Ok(Err(e)) => {
+                        let _ = tx.send(AppAsyncEvent::Toast {
+                            kind: ToastKind::Error,
+                            text: e.to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppAsyncEvent::Toast {
+                            kind: ToastKind::Error,
+                            text: e.to_string(),
+                        });
+                    }
+                }
+            }
+            if imported_count > 0 {
+                let _ = tx.send(AppAsyncEvent::ServerExternalFileImported {
+                    server_id: srv.id,
+                });
+                let text = if lang == Language::Vi {
+                    format!("Đã thêm {imported_count} tệp .jar vào {folder_owned}/!")
+                } else {
+                    format!("Imported {imported_count} .jar file(s) into {folder_owned}/!")
+                };
+                let _ = tx.send(AppAsyncEvent::Toast {
+                    kind: ToastKind::Success,
+                    text,
+                });
+            }
+            ctx.request_repaint();
+        });
     }
 
     pub fn open_server_file_editor(&mut self, rel_path: &str) {
@@ -2510,7 +3444,13 @@ impl LauncherAppState {
                 self.servers.editing_file_rel = Some(rel_path.to_string());
                 self.servers.editing_file_text = content;
             }
-            Err(e) => self.push_toast(ToastKind::Error, format!("Không thể mở tệp: {e}")),
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n.tr("Không thể mở tệp", "Failed to open file")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
         }
     }
 
@@ -2524,8 +3464,21 @@ impl LauncherAppState {
         let srv_dir = srv.server_dir.clone();
         let body = self.servers.editing_file_text.clone();
         match write_server_text_file(&srv_dir, &rel, &body) {
-            Ok(()) => self.push_toast(ToastKind::Success, format!("Đã lưu tệp '{rel}'.")),
-            Err(e) => self.push_toast(ToastKind::Error, format!("Lỗi lưu tệp: {e}")),
+            Ok(()) => {
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã lưu tệp '{rel}'.")
+                } else {
+                    format!("Saved file '{rel}'.")
+                };
+                self.push_toast(ToastKind::Success, msg);
+            }
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n.tr("Lỗi lưu tệp", "Failed to save file")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
         }
     }
 
@@ -2534,12 +3487,17 @@ impl LauncherAppState {
             return;
         };
         let rel_dir = self.servers.current_rel_dir.clone();
+        let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
 
         self.rt.spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
-                .set_title("Chọn tệp tải lên thư mục Máy chủ")
+                .set_title(tr_lang(
+                    lang,
+                    "Chọn tệp tải lên thư mục Máy chủ",
+                    "Select File to Upload to Server Directory",
+                ))
                 .pick_file()
                 .await;
             let Some(file) = picked else {
@@ -2554,7 +3512,14 @@ impl LauncherAppState {
                 Err(e) => {
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Error,
-                        text: format!("Không thể chép tệp vào máy chủ: {e}"),
+                        text: format!(
+                            "{}: {e}",
+                            tr_lang(
+                                lang,
+                                "Không thể chép tệp vào máy chủ",
+                                "Failed to copy file into server"
+                            )
+                        ),
                     });
                 }
             }
@@ -2576,9 +3541,20 @@ impl LauncherAppState {
                 self.servers.dir_entries =
                     list_server_dir(&srv.server_dir, &self.servers.current_rel_dir)
                         .unwrap_or_default();
-                self.push_toast(ToastKind::Info, format!("Đã xóa {count} mục."));
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã xóa {count} mục.")
+                } else {
+                    format!("Deleted {count} item(s).")
+                };
+                self.push_toast(ToastKind::Info, msg);
             }
-            Err(e) => self.push_toast(ToastKind::Error, format!("Lỗi xóa tệp: {e}")),
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n.tr("Lỗi xóa tệp", "Failed to delete files")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
         }
     }
 
@@ -2588,7 +3564,14 @@ impl LauncherAppState {
         };
         let targets: Vec<String> = self.servers.selected_entries.iter().cloned().collect();
         if targets.is_empty() {
-            self.push_toast(ToastKind::Error, "Hãy đánh dấu ít nhất 1 tệp/thư mục để nén.");
+            let msg = self
+                .i18n
+                .tr(
+                    "Hãy đánh dấu ít nhất 1 tệp/thư mục để nén.",
+                    "Select at least 1 file or folder to compress.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
             return;
         }
         let zip_rel = if self.servers.current_rel_dir.is_empty() {
@@ -2606,9 +3589,20 @@ impl LauncherAppState {
                 self.servers.dir_entries =
                     list_server_dir(&srv.server_dir, &self.servers.current_rel_dir)
                         .unwrap_or_default();
-                self.push_toast(ToastKind::Success, format!("Đã nén thành '{zip_rel}'."));
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã nén thành '{zip_rel}'.")
+                } else {
+                    format!("Compressed into '{zip_rel}'.")
+                };
+                self.push_toast(ToastKind::Success, msg);
             }
-            Err(e) => self.push_toast(ToastKind::Error, format!("Lỗi nén ZIP: {e}")),
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n.tr("Lỗi nén ZIP", "ZIP compression failed")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
         }
     }
 
@@ -2621,9 +3615,20 @@ impl LauncherAppState {
                 self.servers.dir_entries =
                     list_server_dir(&srv.server_dir, &self.servers.current_rel_dir)
                         .unwrap_or_default();
-                self.push_toast(ToastKind::Success, format!("Đã giải nén {cnt} tệp."));
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã giải nén {cnt} tệp.")
+                } else {
+                    format!("Extracted {cnt} file(s).")
+                };
+                self.push_toast(ToastKind::Success, msg);
             }
-            Err(e) => self.push_toast(ToastKind::Error, format!("Giải nén thất bại: {e}")),
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n.tr("Giải nén thất bại", "Archive extraction failed")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
         }
     }
 
@@ -2640,8 +3645,21 @@ impl LauncherAppState {
             self.servers.new_prop_val.clear();
         }
         match write_server_properties_patch(&srv.server_dir, &self.servers.properties_map) {
-            Ok(()) => self.push_toast(ToastKind::Success, "Đã lưu server.properties!"),
-            Err(e) => self.push_toast(ToastKind::Error, format!("Lỗi lưu server.properties: {e}")),
+            Ok(()) => {
+                let msg = self
+                    .i18n
+                    .tr("Đã lưu server.properties!", "Saved server.properties!")
+                    .to_string();
+                self.push_toast(ToastKind::Success, msg);
+            }
+            Err(e) => {
+                let msg = format!(
+                    "{}: {e}",
+                    self.i18n
+                        .tr("Lỗi lưu server.properties", "Failed to save server.properties")
+                );
+                self.push_toast(ToastKind::Error, msg);
+            }
         }
     }
 
@@ -2713,48 +3731,80 @@ impl LauncherAppState {
     }
 
     pub fn search_server_addons(&mut self) {
+        self.search_server_addons_page(0, false);
+    }
+
+    pub fn search_server_addons_page(&mut self, page: usize, append: bool) {
         let Some(srv) = self.selected_server().cloned() else {
             return;
         };
+        self.servers.addon_page = page;
+        if !append {
+            self.servers.addon_selected = None;
+        }
         let provider = self.servers.addon_provider;
         let kind = if provider == ProviderSource::Spiget {
             ContentKind::Plugin
+        } else if provider == ProviderSource::CurseForge && self.servers.addon_kind == ContentKind::Plugin {
+            ContentKind::Mod
         } else {
             self.servers.addon_kind
         };
         let loader = match (kind, srv.engine) {
             (ContentKind::Mod, ServerEngine::Fabric) => Some(LoaderType::Fabric),
-            (ContentKind::Mod, ServerEngine::Forge | ServerEngine::Mohist | ServerEngine::Arclight) => {
-                Some(LoaderType::Forge)
-            }
+            (
+                ContentKind::Mod,
+                ServerEngine::Forge | ServerEngine::Mohist | ServerEngine::Arclight,
+            ) => Some(LoaderType::Forge),
             (ContentKind::Mod, ServerEngine::NeoForge) => Some(LoaderType::NeoForge),
             _ => None,
         };
+        let limit = 20usize;
         let query = SearchQuery {
             query: self.servers.addon_query.trim().to_string(),
             content_kind: kind,
             game_version: Some(srv.game_version),
             loader,
             sort: SearchSort::Downloads,
-            offset: 0,
-            limit: 20,
+            offset: page * limit,
+            limit,
         };
+        let cf_key = self.settings.curseforge_api_key.clone();
+        let lang = self.settings.language;
         let dl = self.downloader.clone();
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
-        self.busy_message = Some("Đang tìm kiếm Plugin / Mod cho máy chủ...".into());
+        self.busy_message = Some(
+            self.i18n
+                .tr(
+                    "Đang tìm kiếm Plugin / Mod cho máy chủ...",
+                    "Searching server plugins & mods...",
+                )
+                .to_string(),
+        );
 
         self.rt.spawn(async move {
-            let res = search_provider(&dl, provider, &query, None).await;
+            let res = search_provider(&dl, provider, &query, cf_key.as_deref()).await;
             let _ = tx.send(AppAsyncEvent::BusyStatus(None));
             match res {
-                Ok(page) => {
-                    let _ = tx.send(AppAsyncEvent::ServerAddonSearchCompleted { hits: page.hits });
+                Ok(res_page) => {
+                    let _ = tx.send(AppAsyncEvent::ServerAddonSearchCompleted {
+                        append,
+                        hits: res_page.hits,
+                        total_hits: res_page.total_hits,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Error,
-                        text: format!("Lỗi tìm kiếm Plugin/Mod: {e}"),
+                        text: format!(
+                            "{}: {e}",
+                            tr_lang(
+                                lang,
+                                "Lỗi tìm kiếm Plugin/Mod",
+                                "Server addon search failed"
+                            )
+                        ),
                     });
                 }
             }
@@ -2762,7 +3812,7 @@ impl LauncherAppState {
         });
     }
 
-    pub fn install_server_addon_item(&mut self, summary: ProjectSummary) {
+    pub fn load_server_addon_versions(&mut self, summary: ProjectSummary) {
         let Some(srv) = self.selected_server().cloned() else {
             return;
         };
@@ -2773,12 +3823,80 @@ impl LauncherAppState {
         };
         let loader = match (kind, srv.engine) {
             (ContentKind::Mod, ServerEngine::Fabric) => Some(LoaderType::Fabric),
-            (ContentKind::Mod, ServerEngine::Forge | ServerEngine::Mohist | ServerEngine::Arclight) => {
-                Some(LoaderType::Forge)
-            }
+            (
+                ContentKind::Mod,
+                ServerEngine::Forge | ServerEngine::Mohist | ServerEngine::Arclight,
+            ) => Some(LoaderType::Forge),
             (ContentKind::Mod, ServerEngine::NeoForge) => Some(LoaderType::NeoForge),
             _ => None,
         };
+        let cf_key = self.settings.curseforge_api_key.clone();
+        let lang = self.settings.language;
+        let dl = self.downloader.clone();
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        self.busy_message = Some(if lang == Language::Vi {
+            format!("Đang tải phiên bản của '{}'...", summary.title)
+        } else {
+            format!("Loading versions for '{}'...", summary.title)
+        });
+
+        self.rt.spawn(async move {
+            let ver_res = fetch_provider_versions(
+                &dl,
+                summary.provider,
+                &summary.project_id,
+                Some(&srv.game_version),
+                loader,
+                cf_key.as_deref(),
+            )
+            .await;
+            let _ = tx.send(AppAsyncEvent::BusyStatus(None));
+            match ver_res {
+                Ok(versions) => {
+                    let _ = tx.send(AppAsyncEvent::ServerAddonVersionsLoaded { summary, versions });
+                }
+                Err(e) => {
+                    let _ = tx.send(AppAsyncEvent::Toast {
+                        kind: ToastKind::Error,
+                        text: e.to_string(),
+                    });
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn install_server_addon_item(&mut self, summary: ProjectSummary) {
+        self.install_server_addon_version(summary, None);
+    }
+
+    pub fn install_server_addon_version(
+        &mut self,
+        summary: ProjectSummary,
+        chosen_version: Option<ProjectVersion>,
+    ) {
+        let Some(srv) = self.selected_server().cloned() else {
+            return;
+        };
+        let kind = if summary.provider == ProviderSource::Spiget {
+            ContentKind::Plugin
+        } else if !srv.engine.supports_plugins() && srv.engine.supports_mods() {
+            ContentKind::Mod
+        } else {
+            self.servers.addon_kind
+        };
+        let loader = match (kind, srv.engine) {
+            (ContentKind::Mod, ServerEngine::Fabric) => Some(LoaderType::Fabric),
+            (
+                ContentKind::Mod,
+                ServerEngine::Forge | ServerEngine::Mohist | ServerEngine::Arclight,
+            ) => Some(LoaderType::Forge),
+            (ContentKind::Mod, ServerEngine::NeoForge) => Some(LoaderType::NeoForge),
+            _ => None,
+        };
+        let cf_key = self.settings.curseforge_api_key.clone();
+        let lang = self.settings.language;
         let dl = self.downloader.clone();
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
@@ -2801,33 +3919,47 @@ impl LauncherAppState {
                     on_prog,
                 )
                 .await
-                .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                .map(|p| {
+                    p.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                })
             } else {
                 async {
-                    let vers = fetch_provider_versions(
-                        &dl,
-                        ProviderSource::Modrinth,
-                        &summary.project_id,
-                        Some(&srv.game_version),
-                        loader,
-                        None,
-                    )
-                    .await?;
-                    let v = vers.first().or_else(|| vers.last()).ok_or_else(|| {
-                        thk_core::ThkError::Provider(format!(
-                            "'{}' chưa có bản cho MC {}",
-                            summary.title, srv.game_version
-                        ))
-                    })?;
-                    let f = v
+                    let target_ver = match chosen_version {
+                        Some(v) => v,
+                        None => {
+                            let vers = fetch_provider_versions(
+                                &dl,
+                                summary.provider,
+                                &summary.project_id,
+                                Some(&srv.game_version),
+                                loader,
+                                cf_key.as_deref(),
+                            )
+                            .await?;
+                            vers.into_iter().next().ok_or_else(|| {
+                                thk_core::ThkError::Provider(format!(
+                                    "'{}' has no compatible build for MC {}",
+                                    summary.title, srv.game_version
+                                ))
+                            })?
+                        }
+                    };
+                    let f = target_ver
                         .files
                         .iter()
                         .find(|f| f.primary)
-                        .or_else(|| v.files.first())
+                        .or_else(|| target_ver.files.first())
                         .ok_or_else(|| {
-                            thk_core::ThkError::Provider("Không có tệp tải về".into())
+                            thk_core::ThkError::Provider("No downloadable file found".into())
                         })?;
-                    let subdir = SafePath::resolve_child(&srv.server_dir, kind.instance_subdir())?;
+                    let folder = match kind {
+                        ContentKind::Plugin => "plugins",
+                        _ => "mods",
+                    };
+                    let subdir = SafePath::resolve_child(&srv.server_dir, folder)?;
                     tokio::fs::create_dir_all(&subdir).await?;
                     let clean = SafePath::validate_single_name(&f.filename)?;
                     let dest = SafePath::resolve_child(&subdir, clean)?;
@@ -2847,9 +3979,14 @@ impl LauncherAppState {
                     let _ = tx.send(AppAsyncEvent::ServerExternalFileImported {
                         server_id: srv.id,
                     });
+                    let text = if lang == Language::Vi {
+                        format!("Đã cài đặt '{fname}' vào máy chủ!")
+                    } else {
+                        format!("Installed '{fname}' into server!")
+                    };
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Success,
-                        text: format!("Đã cài đặt '{fname}' vào máy chủ!"),
+                        text,
                     });
                 }
                 Err(e) => {
@@ -2868,7 +4005,10 @@ impl LauncherAppState {
             return;
         };
         let status = self.server_supervisor.server_tunnel_status(&srv.id);
-        if matches!(status, TunnelStatus::Running { .. } | TunnelStatus::Connecting { .. }) {
+        if matches!(
+            status,
+            TunnelStatus::Running { .. } | TunnelStatus::Connecting { .. }
+        ) {
             self.server_supervisor.stop_server_tunnel(&srv.id);
             self.servers
                 .server_tunnels
@@ -2877,13 +4017,21 @@ impl LauncherAppState {
         }
 
         let sup = self.server_supervisor.clone();
+        let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
         self.rt.spawn(async move {
             if let Err(e) = sup.start_server_tunnel(&srv.id, srv.port).await {
                 let _ = tx.send(AppAsyncEvent::Toast {
                     kind: ToastKind::Error,
-                    text: format!("Không thể mở Bore Tunnel: {e}"),
+                    text: format!(
+                        "{}: {e}",
+                        tr_lang(
+                            lang,
+                            "Không thể mở Bore Tunnel",
+                            "Failed to open Bore Tunnel"
+                        )
+                    ),
                 });
                 ctx.request_repaint();
             }
@@ -2897,7 +4045,12 @@ impl LauncherAppState {
         ) {
             Ok(acct) => {
                 if let Err(e) = self.db.upsert_account(&acct) {
-                    self.push_toast(ToastKind::Error, format!("Lỗi lưu tài khoản: {e}"));
+                    let msg = format!(
+                        "{}: {e}",
+                        self.i18n
+                            .tr("Lỗi lưu tài khoản", "Failed to save account")
+                    );
+                    self.push_toast(ToastKind::Error, msg);
                     return;
                 }
                 let id = acct.id.clone();
@@ -2905,7 +4058,12 @@ impl LauncherAppState {
                 self.accounts.offline_username.clear();
                 self.accounts.accounts = self.db.list_accounts().unwrap_or_default();
                 self.select_account(id);
-                self.push_toast(ToastKind::Success, format!("Đã thêm tài khoản Offline '{uname}'."));
+                let msg = if self.settings.language == Language::Vi {
+                    format!("Đã thêm tài khoản Offline '{uname}'.")
+                } else {
+                    format!("Added Offline account '{uname}'.")
+                };
+                self.push_toast(ToastKind::Success, msg);
             }
             Err(e) => self.push_toast(ToastKind::Error, e.to_string()),
         }
@@ -2919,7 +4077,14 @@ impl LauncherAppState {
         self.accounts.device_cancel = Some(cancel.clone());
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
-        self.busy_message = Some("Đang khởi tạo mã đăng nhập Microsoft...".into());
+        self.busy_message = Some(
+            self.i18n
+                .tr(
+                    "Đang khởi tạo mã đăng nhập Microsoft...",
+                    "Initializing Microsoft Device Code flow...",
+                )
+                .to_string(),
+        );
 
         self.rt.spawn(async move {
             match start_device_code_login(true).await {
@@ -2930,7 +4095,8 @@ impl LauncherAppState {
 
                     match poll_device_code_login(&sess, cancel).await {
                         Ok(authed) => {
-                            let _ = tx.send(AppAsyncEvent::MicrosoftAccountLoggedIn(authed.account));
+                            let _ =
+                                tx.send(AppAsyncEvent::MicrosoftAccountLoggedIn(authed.account));
                         }
                         Err(thk_core::ThkError::Cancelled) => {}
                         Err(e) => {
@@ -2959,7 +4125,14 @@ impl LauncherAppState {
         let pasted = self.accounts.desktop_redirect_input.clone();
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
-        self.busy_message = Some("Đang xác thực tài khoản Microsoft & Xbox Live...".into());
+        self.busy_message = Some(
+            self.i18n
+                .tr(
+                    "Đang xác thực tài khoản Microsoft & Xbox Live...",
+                    "Authenticating Microsoft & Xbox Live session...",
+                )
+                .to_string(),
+        );
 
         self.rt.spawn(async move {
             let res = complete_desktop_auth_challenge(&challenge, &pasted).await;
@@ -2979,10 +4152,14 @@ impl LauncherAppState {
     pub fn start_ms_loopback_pkce_flow(&mut self) {
         let cid = self.accounts.custom_client_id.trim().to_string();
         if cid.is_empty() {
-            self.push_toast(
-                ToastKind::Error,
-                "Vui lòng nhập Azure App Client ID trước khi dùng Loopback PKCE.",
-            );
+            let msg = self
+                .i18n
+                .tr(
+                    "Vui lòng nhập Azure App Client ID trước khi dùng Loopback PKCE.",
+                    "Please enter an Azure App Client ID before using Loopback PKCE.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
             return;
         }
         if let Some(prev) = self.accounts.loopback_cancel.take() {
@@ -2992,7 +4169,14 @@ impl LauncherAppState {
         self.accounts.loopback_cancel = Some(cancel.clone());
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
-        self.busy_message = Some("Đang chờ phản hồi OAuth2 trên trình duyệt...".into());
+        self.busy_message = Some(
+            self.i18n
+                .tr(
+                    "Đang chờ phản hồi OAuth2 trên trình duyệt...",
+                    "Waiting for browser OAuth2 callback...",
+                )
+                .to_string(),
+        );
 
         self.rt.spawn(async move {
             let res = login_with_loopback_pkce(&cid, cancel).await;
@@ -3023,10 +4207,17 @@ impl LauncherAppState {
         };
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
-        self.busy_message = Some("Đang làm mới phiên đăng nhập Microsoft...".into());
+        self.busy_message = Some(
+            self.i18n
+                .tr(
+                    "Đang làm mới phiên đăng nhập & đồng bộ Skin/Cape Mojang...",
+                    "Refreshing Microsoft session & syncing Mojang Skin/Cape...",
+                )
+                .to_string(),
+        );
 
         self.rt.spawn(async move {
-            let res = refresh_microsoft_session(&acct.id, cid.as_deref()).await;
+            let res = force_refresh_account_session(&acct, cid.as_deref()).await;
             let _ = tx.send(AppAsyncEvent::BusyStatus(None));
             match res {
                 Ok(authed) => {
@@ -3049,7 +4240,12 @@ impl LauncherAppState {
         self.accounts.accounts = self.db.list_accounts().unwrap_or_default();
         self.accounts.selected_account_id = self.accounts.accounts.first().map(|a| a.id.clone());
         self.accounts.loaded_viewport_key.clear();
-        self.push_toast(ToastKind::Info, format!("Đã xóa tài khoản '{}'.", acct.username));
+        let msg = if self.settings.language == Language::Vi {
+            format!("Đã xóa tài khoản '{}'.", acct.username)
+        } else {
+            format!("Removed account '{}'.", acct.username)
+        };
+        self.push_toast(ToastKind::Info, msg);
     }
 
     pub fn update_selected_account_variant(&mut self, variant: SkinVariant) {
@@ -3063,68 +4259,163 @@ impl LauncherAppState {
                 vp.variant = variant;
             }
         }
+        if acct.account_type == AccountType::Microsoft {
+            let skin_file = acct
+                .custom_skin_path
+                .clone()
+                .filter(|p| p.is_file())
+                .or_else(|| {
+                    acct.skin_url.as_ref().map(|url| {
+                        let hash = sha1_bytes(url.as_bytes());
+                        self.paths.skins_dir.join(format!("remote_{}.png", &hash[..16]))
+                    })
+                })
+                .filter(|p| p.is_file());
+            if let Some(png_path) = skin_file {
+                let cid = {
+                    let t = self.accounts.custom_client_id.trim();
+                    (!t.is_empty()).then(|| t.to_string())
+                };
+                let db = Arc::clone(&self.db);
+                let tx = self.ui_tx.clone();
+                let ctx = self.egui_ctx.clone();
+                self.rt.spawn(async move {
+                    if let Ok(bytes) = tokio::fs::read(&png_path).await {
+                        if upload_mojang_skin(&mut acct, cid.as_deref(), variant, bytes)
+                            .await
+                            .is_ok()
+                        {
+                            let _ = db.upsert_account(&acct);
+                            let _ = tx.send(AppAsyncEvent::AccountProfileSynced { account: acct });
+                            ctx.request_repaint();
+                        }
+                    }
+                });
+            }
+        }
     }
 
     pub fn pick_account_texture(&mut self, slot: TextureSlot) {
-        let Some(mut acct) = self.selected_account().cloned() else {
+        let Some(acct) = self.selected_account().cloned() else {
             return;
         };
-        let target_dir = match slot {
-            TextureSlot::Skin => self.paths.skins_dir.clone(),
-            TextureSlot::Cape => self.paths.capes_dir.clone(),
-            TextureSlot::Elytra => self.paths.elytras_dir.clone(),
+        let env = TextureUploadEnv {
+            paths: self.paths.clone(),
+            cid: {
+                let t = self.accounts.custom_client_id.trim();
+                (!t.is_empty()).then(|| t.to_string())
+            },
+            lang: self.settings.language,
+            db: Arc::clone(&self.db),
+            tx: self.ui_tx.clone(),
+            ctx: self.egui_ctx.clone(),
         };
-        let db = Arc::clone(&self.db);
-        let tx = self.ui_tx.clone();
-        let ctx = self.egui_ctx.clone();
 
         self.rt.spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
-                .set_title("Chọn ảnh PNG (64x64 hoặc 64x32)")
+                .set_title(tr_lang(
+                    env.lang,
+                    "Chọn ảnh PNG (64x64 hoặc 64x32)",
+                    "Select PNG Texture (64x64 or 64x32)",
+                ))
                 .add_filter("PNG Texture", &["png"])
                 .pick_file()
                 .await;
             let Some(file) = picked else {
                 return;
             };
-            let src_path = file.path().to_path_buf();
+            process_and_save_account_texture(acct, slot, file.path().to_path_buf(), env).await;
+        });
+    }
 
-            let normalized_res = match slot {
-                TextureSlot::Skin => load_and_normalize_skin_file(&src_path),
-                TextureSlot::Cape | TextureSlot::Elytra => load_and_normalize_cape_file(&src_path),
+    pub fn apply_account_texture_from_path(&mut self, slot: TextureSlot, src_path: PathBuf) {
+        let Some(acct) = self.selected_account().cloned() else {
+            return;
+        };
+        let env = TextureUploadEnv {
+            paths: self.paths.clone(),
+            cid: {
+                let t = self.accounts.custom_client_id.trim();
+                (!t.is_empty()).then(|| t.to_string())
+            },
+            lang: self.settings.language,
+            db: Arc::clone(&self.db),
+            tx: self.ui_tx.clone(),
+            ctx: self.egui_ctx.clone(),
+        };
+
+        self.rt.spawn(async move {
+            process_and_save_account_texture(acct, slot, src_path, env).await;
+        });
+    }
+
+    pub fn reset_selected_account_textures(&mut self) {
+        let Some(mut acct) = self.selected_account().cloned() else {
+            return;
+        };
+        if let Some(p) = acct.custom_skin_path.take() {
+            let _ = std::fs::remove_file(p);
+        }
+        if let Some(p) = acct.custom_cape_path.take() {
+            let _ = std::fs::remove_file(p);
+        }
+        if let Some(p) = acct.custom_elytra_path.take() {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = self.db.upsert_account(&acct);
+        self.accounts.accounts = self.db.list_accounts().unwrap_or_default();
+        self.accounts.loaded_viewport_key.clear();
+
+        if acct.account_type == AccountType::Microsoft {
+            let cid = {
+                let t = self.accounts.custom_client_id.trim();
+                (!t.is_empty()).then(|| t.to_string())
             };
-
-            match normalized_res {
-                Ok(rgba) => {
-                    let fname = format!("{}.png", SafePath::slugify_dir_name(&acct.id));
-                    if let Ok(dest) = SafePath::resolve_child(&target_dir, &fname) {
-                        if let Err(e) = rgba.save(&dest) {
-                            let _ = tx.send(AppAsyncEvent::Toast {
-                                kind: ToastKind::Error,
-                                text: format!("Không thể lưu ảnh PNG: {e}"),
-                            });
-                            ctx.request_repaint();
-                            return;
-                        }
-                        match slot {
-                            TextureSlot::Skin => acct.custom_skin_path = Some(dest),
-                            TextureSlot::Cape => acct.custom_cape_path = Some(dest),
-                            TextureSlot::Elytra => acct.custom_elytra_path = Some(dest),
-                        }
-                        if db.upsert_account(&acct).is_ok() {
-                            let _ = tx.send(AppAsyncEvent::AccountTextureSaved { account: acct });
-                        }
+            let lang = self.settings.language;
+            let db = Arc::clone(&self.db);
+            let tx = self.ui_tx.clone();
+            let ctx = self.egui_ctx.clone();
+            self.rt.spawn(async move {
+                match reset_mojang_skin(&mut acct, cid.as_deref()).await {
+                    Ok(()) => {
+                        let _ = db.upsert_account(&acct);
+                        let _ = tx.send(AppAsyncEvent::AccountProfileSynced { account: acct });
+                        let _ = tx.send(AppAsyncEvent::Toast {
+                            kind: ToastKind::Success,
+                            text: tr_lang(
+                                lang,
+                                "Đã khôi phục Skin/Cape mặc định trên Mojang Cloud!",
+                                "Reset Skin/Cape to default on Mojang Cloud!",
+                            )
+                            .to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppAsyncEvent::Toast {
+                            kind: ToastKind::Info,
+                            text: format!(
+                                "{}: {e}",
+                                tr_lang(
+                                    lang,
+                                    "Đã xóa Skin cục bộ (chưa đồng bộ Mojang)",
+                                    "Cleared local skin (Mojang sync skipped)"
+                                )
+                            ),
+                        });
                     }
                 }
-                Err(e) => {
-                    let _ = tx.send(AppAsyncEvent::Toast {
-                        kind: ToastKind::Error,
-                        text: format!("Ảnh không hợp lệ: {e}"),
-                    });
-                }
-            }
-            ctx.request_repaint();
-        });
+                ctx.request_repaint();
+            });
+        } else {
+            let msg = self
+                .i18n
+                .tr(
+                    "Đã khôi phục Skin & Cape mặc định.",
+                    "Reset Skin & Cape to default.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Info, msg);
+        }
     }
 
     pub fn sync_3d_viewport_textures(&mut self, render_state: Option<&egui_wgpu::RenderState>) {
@@ -3137,13 +4428,144 @@ impl LauncherAppState {
         let Some(acct) = self.selected_account().cloned() else {
             return;
         };
+
+        if acct.account_type == AccountType::Microsoft
+            && acct.skin_url.is_none()
+            && !self.accounts.synced_profile_ids.contains(&acct.id)
+        {
+            self.accounts.synced_profile_ids.insert(acct.id.clone());
+            let mut acct_sync = acct.clone();
+            let cid = {
+                let t = self.accounts.custom_client_id.trim();
+                (!t.is_empty()).then(|| t.to_string())
+            };
+            let db = Arc::clone(&self.db);
+            let tx = self.ui_tx.clone();
+            let ctx = self.egui_ctx.clone();
+            self.rt.spawn(async move {
+                if sync_mojang_profile(&mut acct_sync, cid.as_deref())
+                    .await
+                    .is_ok()
+                {
+                    let _ = db.upsert_account(&acct_sync);
+                    let _ = tx.send(AppAsyncEvent::AccountProfileSynced { account: acct_sync });
+                    ctx.request_repaint();
+                }
+            });
+        }
+
+        let remote_skin_cache = acct.skin_url.as_ref().map(|url| {
+            let hash = sha1_bytes(url.as_bytes());
+            (
+                url.clone(),
+                self.paths.skins_dir.join(format!("remote_{}.png", &hash[..16])),
+            )
+        });
+        if acct.custom_skin_path.is_none() {
+            if let Some((ref url, ref cache_path)) = remote_skin_cache {
+                if !cache_path.is_file() && !self.accounts.remote_tex_fetching.contains(url) {
+                    self.accounts.remote_tex_fetching.insert(url.clone());
+                    let fetch_url = url.clone();
+                    let dest = cache_path.clone();
+                    let dl = self.downloader.clone();
+                    let tx = self.ui_tx.clone();
+                    let ctx = self.egui_ctx.clone();
+                    self.rt.spawn(async move {
+                        if let Ok(bytes) = dl.get_bytes(&fetch_url).await {
+                            let saved = tokio::task::spawn_blocking(move || {
+                                if let Ok(rgba) = load_and_normalize_skin_png(&bytes) {
+                                    if let Some(parent) = dest.parent() {
+                                        let _ = std::fs::create_dir_all(parent);
+                                    }
+                                    let _ = rgba.save(&dest);
+                                }
+                            })
+                            .await;
+                            let _ = saved;
+                        }
+                        let _ = tx.send(AppAsyncEvent::RemoteAccountTextureCached {
+                            cache_key: fetch_url,
+                        });
+                        ctx.request_repaint();
+                    });
+                }
+            }
+        }
+
+        let remote_cape_cache = acct.cape_url.as_ref().map(|url| {
+            let hash = sha1_bytes(url.as_bytes());
+            (
+                url.clone(),
+                self.paths.capes_dir.join(format!("remote_{}.png", &hash[..16])),
+            )
+        });
+        if acct.custom_cape_path.is_none() {
+            if let Some((ref url, ref cache_path)) = remote_cape_cache {
+                if !cache_path.is_file() && !self.accounts.remote_tex_fetching.contains(url) {
+                    self.accounts.remote_tex_fetching.insert(url.clone());
+                    let fetch_url = url.clone();
+                    let dest = cache_path.clone();
+                    let dl = self.downloader.clone();
+                    let tx = self.ui_tx.clone();
+                    let ctx = self.egui_ctx.clone();
+                    self.rt.spawn(async move {
+                        if let Ok(bytes) = dl.get_bytes(&fetch_url).await {
+                            let saved = tokio::task::spawn_blocking(move || {
+                                if let Ok(rgba) = load_and_normalize_cape_png(&bytes) {
+                                    if let Some(parent) = dest.parent() {
+                                        let _ = std::fs::create_dir_all(parent);
+                                    }
+                                    let _ = rgba.save(&dest);
+                                }
+                            })
+                            .await;
+                            let _ = saved;
+                        }
+                        let _ = tx.send(AppAsyncEvent::RemoteAccountTextureCached {
+                            cache_key: fetch_url,
+                        });
+                        ctx.request_repaint();
+                    });
+                }
+            }
+        }
+
+        let back_mode = self
+            .accounts
+            .skin_viewport
+            .as_ref()
+            .map(|vp| vp.back_mode)
+            .unwrap_or(BackEquipmentMode::Cape);
+        let effective_skin = acct
+            .custom_skin_path
+            .clone()
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                remote_skin_cache
+                    .as_ref()
+                    .map(|(_, p)| p.clone())
+                    .filter(|p| p.is_file())
+            });
+        let effective_cape = acct
+            .custom_cape_path
+            .clone()
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                remote_cape_cache
+                    .as_ref()
+                    .map(|(_, p)| p.clone())
+                    .filter(|p| p.is_file())
+            });
+        let effective_elytra = acct.custom_elytra_path.clone().filter(|p| p.is_file());
+
         let key = format!(
-            "{}:{}:{:?}:{:?}:{:?}",
+            "{}:{}:{:?}:{:?}:{:?}:{:?}",
             acct.id,
             acct.skin_variant.as_str(),
-            acct.custom_skin_path,
-            acct.custom_cape_path,
-            acct.custom_elytra_path
+            back_mode,
+            effective_skin,
+            effective_cape,
+            effective_elytra
         );
         if self.accounts.loaded_viewport_key == key {
             return;
@@ -3152,8 +4574,7 @@ impl LauncherAppState {
 
         if let Some(vp) = self.accounts.skin_viewport.as_mut() {
             vp.variant = acct.skin_variant;
-            match acct
-                .custom_skin_path
+            match effective_skin
                 .as_deref()
                 .and_then(|p| load_and_normalize_skin_file(p).ok())
             {
@@ -3161,14 +4582,10 @@ impl LauncherAppState {
                 None => vp.reset_default_skin(rs),
             }
             let back_path = match vp.back_mode {
-                BackEquipmentMode::Elytra => acct
-                    .custom_elytra_path
-                    .as_ref()
-                    .or(acct.custom_cape_path.as_ref()),
-                _ => acct
-                    .custom_cape_path
-                    .as_ref()
-                    .or(acct.custom_elytra_path.as_ref()),
+                BackEquipmentMode::Elytra => {
+                    effective_elytra.as_ref().or(effective_cape.as_ref())
+                }
+                _ => effective_cape.as_ref().or(effective_elytra.as_ref()),
             };
             match back_path.and_then(|bp| load_and_normalize_cape_file(bp).ok()) {
                 Some(img) => vp.set_cape_rgba(rs, &img),
@@ -3201,9 +4618,14 @@ impl LauncherAppState {
         self.java_modal.selected_distro = distro;
         self.java_modal.packages.clear();
         let dl = self.downloader.clone();
+        let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
-        self.busy_message = Some(format!("Đang tải danh sách {}...", distro.display_name()));
+        self.busy_message = Some(if lang == Language::Vi {
+            format!("Đang tải danh sách {}...", distro.display_name())
+        } else {
+            format!("Loading {} packages...", distro.display_name())
+        });
 
         self.rt.spawn(async move {
             let res = fetch_available_distro_packages(&dl, distro).await;
@@ -3213,9 +4635,14 @@ impl LauncherAppState {
                     let _ = tx.send(AppAsyncEvent::JavaDistroPackagesLoaded { distro, packages });
                 }
                 Err(e) => {
+                    let text = if lang == Language::Vi {
+                        format!("Không thể tải {}: {e}", distro.display_name())
+                    } else {
+                        format!("Failed to fetch {}: {e}", distro.display_name())
+                    };
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Error,
-                        text: format!("Không thể tải {}: {e}", distro.display_name()),
+                        text,
                     });
                 }
             }
@@ -3226,6 +4653,7 @@ impl LauncherAppState {
     pub fn install_java_package(&mut self, pkg: DistroReleasePackage) {
         let dl = self.downloader.clone();
         let runtimes = self.paths.runtimes_dir.clone();
+        let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
 
@@ -3241,19 +4669,28 @@ impl LauncherAppState {
             let _ = tx.send(AppAsyncEvent::TaskProgress(None));
             match res {
                 Ok(inst) => {
-                    let list = tokio::task::spawn_blocking(move || scan_java_installations(&runtimes))
-                        .await
-                        .unwrap_or_default();
+                    let list =
+                        tokio::task::spawn_blocking(move || scan_java_installations(&runtimes))
+                            .await
+                            .unwrap_or_default();
                     let _ = tx.send(AppAsyncEvent::JavaScanCompleted(list));
+                    let text = if lang == Language::Vi {
+                        format!("Đã cài đặt Java {} ({})!", inst.major_version, inst.vendor)
+                    } else {
+                        format!("Installed Java {} ({})!", inst.major_version, inst.vendor)
+                    };
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Success,
-                        text: format!("Đã cài đặt Java {} ({})!", inst.major_version, inst.vendor),
+                        text,
                     });
                 }
                 Err(e) => {
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Error,
-                        text: format!("Cài đặt Java thất bại: {e}"),
+                        text: format!(
+                            "{}: {e}",
+                            tr_lang(lang, "Cài đặt Java thất bại", "Java installation failed")
+                        ),
                     });
                 }
             }
@@ -3274,21 +4711,39 @@ impl LauncherAppState {
 
     pub fn start_manual_bore_tunnel(&mut self) {
         let Ok(port) = self.lan_modal.manual_port_input.trim().parse::<u16>() else {
-            self.push_toast(ToastKind::Error, "Cổng nội bộ không hợp lệ (1 - 65535).");
+            let msg = self
+                .i18n
+                .tr(
+                    "Cổng nội bộ không hợp lệ (1 - 65535).",
+                    "Invalid local port (1 - 65535).",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
             return;
         };
         if port == 0 {
-            self.push_toast(ToastKind::Error, "Cổng nội bộ phải lớn hơn 0.");
+            let msg = self
+                .i18n
+                .tr(
+                    "Cổng nội bộ phải lớn hơn 0.",
+                    "Local port must be greater than 0.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
             return;
         }
         let coord = self.lan_coordinator.clone();
+        let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
         self.rt.spawn(async move {
             if let Err(e) = coord.start_manual_tunnel(port).await {
                 let _ = tx.send(AppAsyncEvent::Toast {
                     kind: ToastKind::Error,
-                    text: format!("Mở Bore Tunnel thất bại: {e}"),
+                    text: format!(
+                        "{}: {e}",
+                        tr_lang(lang, "Mở Bore Tunnel thất bại", "Failed to open Bore Tunnel")
+                    ),
                 });
                 ctx.request_repaint();
             }
@@ -3308,6 +4763,7 @@ impl LauncherAppState {
         let dl = self.downloader.clone();
         let db = Arc::clone(&self.db);
         let mod_owned = mod_id.to_string();
+        let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
 
@@ -3332,9 +4788,14 @@ impl LauncherAppState {
                             items,
                         });
                     }
+                    let text = if lang == Language::Vi {
+                        format!("Đã tự động tải và cài đặt '{mod_owned}' từ Modrinth!")
+                    } else {
+                        format!("Automatically downloaded and installed '{mod_owned}' from Modrinth!")
+                    };
                     let _ = tx.send(AppAsyncEvent::Toast {
                         kind: ToastKind::Success,
-                        text: format!("Đã tự động tải và cài đặt '{mod_owned}' từ Modrinth!"),
+                        text,
                     });
                 }
                 Err(e) => {
@@ -3354,7 +4815,14 @@ impl LauncherAppState {
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
         self.updater.checking = true;
-        self.updater.status_line = Some("Đang kiểm tra bản phát hành mới trên GitHub...".into());
+        self.updater.status_line = Some(
+            self.i18n
+                .tr(
+                    "Đang kiểm tra bản phát hành mới trên GitHub...",
+                    "Checking GitHub Releases for updates...",
+                )
+                .to_string(),
+        );
 
         self.rt.spawn(async move {
             let res = check_latest_release(&dl, &repo, env!("CARGO_PKG_VERSION")).await;
@@ -3394,6 +4862,36 @@ impl LauncherAppState {
             let _ = tx.send(AppAsyncEvent::UpdateDownloaded(res));
             ctx.request_repaint();
         });
+    }
+
+    pub fn apply_verified_app_update(&mut self) {
+        let Some(path) = self.updater.downloaded_file.clone() else {
+            return;
+        };
+        match apply_downloaded_update(&path) {
+            Ok(true) => {
+                self.allow_immediate_quit = true;
+                self.egui_ctx
+                    .send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Ok(false) => {
+                let msg = self
+                    .i18n
+                    .tr(
+                        "Đã mở trình cài đặt bản cập nhật.",
+                        "Launched update package.",
+                    )
+                    .to_string();
+                self.push_toast(ToastKind::Info, msg);
+            }
+            Err(e) => self.push_toast(ToastKind::Error, e.to_string()),
+        }
+    }
+
+    pub fn open_updates_folder(&self) {
+        let dir = self.paths.cache_dir.join("updates");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = open::that(&dir);
     }
 
     pub fn drain_async_events(&mut self) {
@@ -3437,7 +4935,8 @@ impl LauncherAppState {
                     kind,
                     items,
                 } => {
-                    let matches_selected = self.home.selected_profile_id.as_deref() == Some(&profile_id);
+                    let matches_selected =
+                        self.home.selected_profile_id.as_deref() == Some(&profile_id);
                     let matches_tab = matches!(
                         (self.home.active_tab, kind),
                         (HomeTab::Mods, ContentKind::Mod)
@@ -3448,11 +4947,87 @@ impl LauncherAppState {
                         self.home.local_items = items;
                     }
                 }
-                AppAsyncEvent::InlineSearchCompleted { hits } => {
-                    self.home.online_hits = hits;
+                AppAsyncEvent::InlineSearchCompleted {
+                    append,
+                    hits,
+                    total_hits,
+                } => {
+                    self.home.online_total_hits = total_hits;
+                    if append {
+                        for hit in hits {
+                            if !self
+                                .home
+                                .online_hits
+                                .iter()
+                                .any(|existing| existing.project_id == hit.project_id)
+                            {
+                                self.home.online_hits.push(hit);
+                            }
+                        }
+                    } else {
+                        self.home.online_hits = hits;
+                    }
                 }
                 AppAsyncEvent::InlineProjectSelected { detail, versions } => {
+                    self.home.online_chosen_ver_idx = 0;
                     self.home.online_selected = Some((detail, versions));
+                }
+                AppAsyncEvent::ContentUpdatesChecked {
+                    profile_id,
+                    kind,
+                    result,
+                } => {
+                    self.home.checking_updates = false;
+                    let matches_selected =
+                        self.home.selected_profile_id.as_deref() == Some(&profile_id);
+                    let matches_tab = matches!(
+                        (self.home.active_tab, kind),
+                        (HomeTab::Mods, ContentKind::Mod)
+                            | (HomeTab::Shaders, ContentKind::Shader)
+                            | (HomeTab::ResourcePacks, ContentKind::ResourcePack)
+                    );
+                    match result {
+                        Ok(candidates) => {
+                            let count = candidates.len();
+                            if matches_selected && matches_tab {
+                                self.home.content_updates = candidates;
+                            }
+                            let msg = if count == 0 {
+                                self.i18n
+                                    .tr(
+                                        "Tất cả gói nội dung đều đã ở phiên bản mới nhất!",
+                                        "All installed packages are up to date!",
+                                    )
+                                    .to_string()
+                            } else if self.settings.language == Language::Vi {
+                                format!("Phát hiện {count} bản cập nhật mới!")
+                            } else {
+                                format!("Found {count} available update(s)!")
+                            };
+                            self.push_toast(
+                                if count == 0 {
+                                    ToastKind::Success
+                                } else {
+                                    ToastKind::Info
+                                },
+                                msg,
+                            );
+                        }
+                        Err(e) => self.push_toast(ToastKind::Error, e),
+                    }
+                }
+                AppAsyncEvent::ProfileExternalFileImported { profile_id } => {
+                    if self.home.selected_profile_id.as_deref() == Some(&profile_id) {
+                        self.refresh_selected_profile_tabs();
+                    }
+                    let msg = self
+                        .i18n
+                        .tr(
+                            "Đã tải tệp lên thư mục Profile!",
+                            "Uploaded file into profile directory!",
+                        )
+                        .to_string();
+                    self.push_toast(ToastKind::Success, msg);
                 }
                 AppAsyncEvent::BookmarkPingResult {
                     bookmark_id,
@@ -3467,10 +5042,12 @@ impl LauncherAppState {
                     self.modpacks.selected = None;
                     self.section = ActiveSection::Home;
                     self.select_profile(pid);
-                    self.push_toast(
-                        ToastKind::Success,
-                        format!("Đã cài đặt Modpack '{pname}' sẵn sàng chơi!"),
-                    );
+                    let msg = if self.settings.language == Language::Vi {
+                        format!("Đã cài đặt Modpack '{pname}' sẵn sàng chơi!")
+                    } else {
+                        format!("Installed Modpack '{pname}' and ready to play!")
+                    };
+                    self.push_toast(ToastKind::Success, msg);
                 }
                 AppAsyncEvent::ModpackSearchCompleted {
                     seq,
@@ -3641,7 +5218,7 @@ impl LauncherAppState {
                                     ContentKind::Modpack => "Modpack",
                                     ContentKind::Plugin => "Plugin",
                                 };
-                                let msg = if self.settings.language == thk_core::models::Language::Vi {
+                                let msg = if self.settings.language == Language::Vi {
                                     format!(
                                         "Đã cài {kind_lbl} '{title}' ({file_count} tệp) vào '{profile_name}'!"
                                     )
@@ -3684,35 +5261,73 @@ impl LauncherAppState {
                     if self.servers.selected_server_id.as_deref() == Some(&server_id) {
                         self.refresh_selected_server_tabs();
                     }
-                    self.push_toast(
-                        ToastKind::Success,
-                        format!("Đã cài đặt lõi máy chủ ({jar_file}) sẵn sàng khởi động!"),
-                    );
+                    let msg = if self.settings.language == Language::Vi {
+                        format!("Đã cài đặt lõi máy chủ ({jar_file}) sẵn sàng khởi động!")
+                    } else {
+                        format!("Installed server core ({jar_file}) and ready to start!")
+                    };
+                    self.push_toast(ToastKind::Success, msg);
                 }
                 AppAsyncEvent::ServerExternalFileImported { server_id } => {
                     if self.servers.selected_server_id.as_deref() == Some(&server_id) {
                         self.refresh_selected_server_tabs();
                     }
                 }
-                AppAsyncEvent::ServerAddonSearchCompleted { hits } => {
-                    self.servers.addon_hits = hits;
+                AppAsyncEvent::ServerAddonSearchCompleted {
+                    append,
+                    hits,
+                    total_hits,
+                } => {
+                    self.servers.addon_total_hits = total_hits;
+                    if append {
+                        for hit in hits {
+                            if !self
+                                .servers
+                                .addon_hits
+                                .iter()
+                                .any(|existing| existing.project_id == hit.project_id)
+                            {
+                                self.servers.addon_hits.push(hit);
+                            }
+                        }
+                    } else {
+                        self.servers.addon_hits = hits;
+                    }
+                }
+                AppAsyncEvent::ServerAddonVersionsLoaded { summary, versions } => {
+                    self.servers.addon_chosen_ver_idx = 0;
+                    self.servers.addon_selected = Some((summary, versions));
                 }
                 AppAsyncEvent::DeviceCodeReady(sess) => {
                     self.accounts.device_session = Some(sess);
                 }
-                AppAsyncEvent::MicrosoftAccountLoggedIn(acct) => {
+                AppAsyncEvent::MicrosoftAccountLoggedIn(mut acct) => {
+                    if let Some(prev) = self.accounts.accounts.iter().find(|a| a.id == acct.id) {
+                        if acct.custom_skin_path.is_none() {
+                            acct.custom_skin_path = prev.custom_skin_path.clone();
+                        }
+                        if acct.custom_cape_path.is_none() {
+                            acct.custom_cape_path = prev.custom_cape_path.clone();
+                        }
+                        if acct.custom_elytra_path.is_none() {
+                            acct.custom_elytra_path = prev.custom_elytra_path.clone();
+                        }
+                    }
                     let _ = self.db.upsert_account(&acct);
                     let id = acct.id.clone();
                     let uname = acct.username.clone();
                     self.accounts.device_session = None;
                     self.accounts.desktop_challenge = None;
                     self.accounts.desktop_redirect_input.clear();
+                    self.accounts.loaded_viewport_key.clear();
                     self.accounts.accounts = self.db.list_accounts().unwrap_or_default();
                     self.select_account(id);
-                    self.push_toast(
-                        ToastKind::Success,
-                        format!("Đăng nhập Microsoft thành công: {uname}!"),
-                    );
+                    let msg = if self.settings.language == Language::Vi {
+                        format!("Đăng nhập Microsoft thành công: {uname}!")
+                    } else {
+                        format!("Signed in with Microsoft: {uname}!")
+                    };
+                    self.push_toast(ToastKind::Success, msg);
                 }
                 AppAsyncEvent::AuthError(err) => {
                     self.push_toast(ToastKind::Error, err);
@@ -3720,10 +5335,21 @@ impl LauncherAppState {
                 AppAsyncEvent::AccountTextureSaved { account } => {
                     self.accounts.accounts = self.db.list_accounts().unwrap_or_default();
                     self.accounts.loaded_viewport_key.clear();
-                    self.push_toast(
-                        ToastKind::Success,
-                        format!("Đã cập nhật giao diện 3D cho '{}'!", account.username),
-                    );
+                    let msg = if self.settings.language == Language::Vi {
+                        format!("Đã cập nhật giao diện 3D cho '{}'!", account.username)
+                    } else {
+                        format!("Updated 3D Skin/Cape for '{}'!", account.username)
+                    };
+                    self.push_toast(ToastKind::Success, msg);
+                }
+                AppAsyncEvent::AccountProfileSynced { account } => {
+                    let _ = account;
+                    self.accounts.accounts = self.db.list_accounts().unwrap_or_default();
+                    self.accounts.loaded_viewport_key.clear();
+                }
+                AppAsyncEvent::RemoteAccountTextureCached { cache_key } => {
+                    self.accounts.remote_tex_fetching.remove(&cache_key);
+                    self.accounts.loaded_viewport_key.clear();
                 }
                 AppAsyncEvent::JavaScanCompleted(list) => {
                     self.java_modal.installed = list;
@@ -3737,39 +5363,67 @@ impl LauncherAppState {
                     self.updater.checking = false;
                     match res {
                         Ok(Some(info)) => {
-                            self.updater.status_line = Some(format!(
-                                "Có phiên bản mới {} ({})",
-                                info.version, info.asset_name
-                            ));
+                            self.updater.status_line = Some(if self.settings.language == Language::Vi {
+                                format!("Có phiên bản mới {} ({})", info.version, info.asset_name)
+                            } else {
+                                format!(
+                                    "New release available: {} ({})",
+                                    info.version, info.asset_name
+                                )
+                            });
                             self.updater.available = Some(info.clone());
-                            self.push_toast(
-                                ToastKind::Info,
+                            let msg = if self.settings.language == Language::Vi {
                                 format!(
                                     "Phát hiện bản cập nhật mới TriHienKun Laucher v{}!",
                                     info.version
-                                ),
-                            );
+                                )
+                            } else {
+                                format!(
+                                    "New TriHienKun Laucher update v{} available!",
+                                    info.version
+                                )
+                            };
+                            self.push_toast(ToastKind::Info, msg);
                         }
                         Ok(None) => {
-                            self.updater.status_line =
-                                Some("Bạn đang sử dụng phiên bản mới nhất.".into());
+                            self.updater.status_line = Some(
+                                self.i18n
+                                    .tr(
+                                        "Bạn đang sử dụng phiên bản mới nhất.",
+                                        "You are running the latest version.",
+                                    )
+                                    .to_string(),
+                            );
                         }
                         Err(e) => {
-                            self.updater.status_line = Some(format!("Lỗi kiểm tra cập nhật: {e}"));
+                            self.updater.status_line = Some(format!(
+                                "{}: {e}",
+                                self.i18n
+                                    .tr("Lỗi kiểm tra cập nhật", "Update check failed")
+                            ));
                         }
                     }
                 }
                 AppAsyncEvent::UpdateDownloaded(res) => match res {
                     Ok(path) => {
-                        let _ = open::that(&path);
                         self.updater.downloaded_file = Some(path.clone());
-                        self.push_toast(
-                            ToastKind::Success,
+                        self.updater.status_line = Some(if self.settings.language == Language::Vi {
+                            format!("Đã xác thực SHA-256 sẵn sàng cài đặt: {}", path.display())
+                        } else {
+                            format!("SHA-256 verified & ready to apply: {}", path.display())
+                        });
+                        let msg = if self.settings.language == Language::Vi {
                             format!(
-                                "Đã xác thực SHA-256 & mở gói cập nhật: {}",
-                                path.display()
-                            ),
-                        );
+                                "Đã tải & xác thực SHA-256 gói cập nhật: {}",
+                                path.file_name().unwrap_or_default().to_string_lossy()
+                            )
+                        } else {
+                            format!(
+                                "Downloaded & SHA-256 verified update: {}",
+                                path.file_name().unwrap_or_default().to_string_lossy()
+                            )
+                        };
+                        self.push_toast(ToastKind::Success, msg);
                     }
                     Err(e) => self.push_toast(ToastKind::Error, e),
                 },
@@ -3780,7 +5434,10 @@ impl LauncherAppState {
                     self.push_toast(
                         ToastKind::Success,
                         self.i18n
-                            .tr("Đã cập nhật ảnh nền giao diện!", "Updated custom background!"),
+                            .tr(
+                                "Đã cập nhật ảnh nền giao diện!",
+                                "Updated custom background!",
+                            ),
                     );
                 }
                 AppAsyncEvent::CustomMusicSaved => {
@@ -3788,9 +5445,14 @@ impl LauncherAppState {
                     self.persist_settings();
                     self.push_toast(
                         ToastKind::Success,
-                        self.i18n
-                            .tr("Đã áp dụng nhạc nền tuỳ chỉnh!", "Applied custom background music!"),
+                        self.i18n.tr(
+                            "Đã áp dụng nhạc nền tuỳ chỉnh!",
+                            "Applied custom background music!",
+                        ),
                     );
+                }
+                AppAsyncEvent::CacheSizeComputed(bytes) => {
+                    self.cached_dir_bytes = bytes;
                 }
             }
         }
@@ -3833,10 +5495,16 @@ impl LauncherAppState {
                             },
                         );
                     }
-                    self.push_toast(
-                        ToastKind::Success,
-                        format!("Minecraft '{}' đã khởi chạy (PID {pid})!", p.name),
-                    );
+                    let msg = if self.settings.language == Language::Vi {
+                        format!("Minecraft '{}' đã khởi chạy (PID {pid})!", p.name)
+                    } else {
+                        format!("Minecraft '{}' launched (PID {pid})!", p.name)
+                    };
+                    self.push_toast(ToastKind::Success, msg);
+                }
+                if self.settings.hide_launcher_on_launch {
+                    self.egui_ctx
+                        .send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
             }
             LauncherEvent::Exited {
@@ -3853,25 +5521,38 @@ impl LauncherAppState {
                         .get_daily_play_stats(&key.profile_id, 14)
                         .unwrap_or_default();
                 }
-                if self.settings.discord_rpc_enabled && self.instance_supervisor.running_keys().is_empty()
-                {
-                    self.discord_rpc
-                        .set_presence(self.settings.discord_client_id.clone(), DiscordPresenceState::Menu);
+                if self.instance_supervisor.running_keys().is_empty() {
+                    if self.settings.discord_rpc_enabled {
+                        self.discord_rpc.set_presence(
+                            self.settings.discord_client_id.clone(),
+                            DiscordPresenceState::Menu,
+                        );
+                    }
+                    if self.settings.hide_launcher_on_launch {
+                        crate::tray::restore_and_focus_viewport(&self.egui_ctx);
+                    }
                 }
                 if let Some(report) = crash_report {
+                    crate::tray::restore_and_focus_viewport(&self.egui_ctx);
                     self.crash_modal = Some((key.profile_id, report));
                     self.audio
                         .play_sfx(self.settings.sfx_enabled, SoundEffect::Error);
                 } else {
-                    self.push_toast(
-                        ToastKind::Info,
-                        format!("Phiên chơi đã kết thúc (mã thoát {exit_code})."),
-                    );
+                    let msg = if self.settings.language == Language::Vi {
+                        format!("Phiên chơi đã kết thúc (mã thoát {exit_code}).")
+                    } else {
+                        format!("Game session ended (exit code {exit_code}).")
+                    };
+                    self.push_toast(ToastKind::Info, msg);
                 }
             }
             LauncherEvent::LaunchFailed { error, .. } => {
                 self.active_progress = None;
-                self.push_toast(ToastKind::Error, format!("Khởi chạy thất bại: {error}"));
+                let msg = format!(
+                    "{}: {error}",
+                    self.i18n.tr("Khởi chạy thất bại", "Launch failed")
+                );
+                self.push_toast(ToastKind::Error, msg);
             }
         }
     }
@@ -3907,10 +5588,18 @@ impl LauncherAppState {
             }
             LanTunnelEvent::LocalWorldDetected(ann) => {
                 self.lan_modal.manual_port_input = ann.port.to_string();
-                self.push_toast(
-                    ToastKind::Success,
-                    format!("Phát hiện thế giới LAN '{}' trên cổng {}!", ann.motd, ann.port),
-                );
+                let msg = if self.settings.language == Language::Vi {
+                    format!(
+                        "Phát hiện thế giới LAN '{}' trên cổng {}!",
+                        ann.motd, ann.port
+                    )
+                } else {
+                    format!(
+                        "Detected local LAN world '{}' on port {}!",
+                        ann.motd, ann.port
+                    )
+                };
+                self.push_toast(ToastKind::Success, msg);
                 self.lan_modal.detected_world = Some(ann);
             }
             LanTunnelEvent::IgnoredForeignAnnouncement { .. } => {
@@ -3923,10 +5612,12 @@ impl LauncherAppState {
                     ..
                 } = st
                 {
-                    self.push_toast(
-                        ToastKind::Success,
-                        format!("Đã mở cổng công khai: {remote_addr}:{remote_port}"),
-                    );
+                    let msg = if self.settings.language == Language::Vi {
+                        format!("Đã mở cổng công khai: {remote_addr}:{remote_port}")
+                    } else {
+                        format!("Public tunnel active: {remote_addr}:{remote_port}")
+                    };
+                    self.push_toast(ToastKind::Success, msg);
                 }
                 self.lan_modal.tunnel_status = st;
             }
@@ -3945,6 +5636,108 @@ impl LauncherAppState {
             sup.shutdown_all().await;
         });
     }
+}
+
+struct TextureUploadEnv {
+    paths: AppPaths,
+    cid: Option<String>,
+    lang: Language,
+    db: Arc<Database>,
+    tx: mpsc::UnboundedSender<AppAsyncEvent>,
+    ctx: egui::Context,
+}
+
+async fn process_and_save_account_texture(
+    mut acct: Account,
+    slot: TextureSlot,
+    src_path: PathBuf,
+    env: TextureUploadEnv,
+) {
+    let target_dir = match slot {
+        TextureSlot::Skin => env.paths.skins_dir.clone(),
+        TextureSlot::Cape => env.paths.capes_dir.clone(),
+        TextureSlot::Elytra => env.paths.elytras_dir.clone(),
+    };
+    let src_for_decode = src_path.clone();
+    let normalized_res = tokio::task::spawn_blocking(move || match slot {
+        TextureSlot::Skin => load_and_normalize_skin_file(&src_for_decode),
+        TextureSlot::Cape | TextureSlot::Elytra => load_and_normalize_cape_file(&src_for_decode),
+    })
+    .await;
+
+    let rgba = match normalized_res {
+        Ok(Ok(img)) => img,
+        Ok(Err(e)) => {
+            let _ = env.tx.send(AppAsyncEvent::Toast {
+                kind: ToastKind::Error,
+                text: format!(
+                    "{}: {e}",
+                    tr_lang(env.lang, "Ảnh PNG không hợp lệ", "Invalid PNG texture")
+                ),
+            });
+            env.ctx.request_repaint();
+            return;
+        }
+        Err(e) => {
+            let _ = env.tx.send(AppAsyncEvent::Toast {
+                kind: ToastKind::Error,
+                text: e.to_string(),
+            });
+            env.ctx.request_repaint();
+            return;
+        }
+    };
+
+    let fname = format!("{}.png", SafePath::slugify_dir_name(&acct.id));
+    let Ok(dest) = SafePath::resolve_child(&target_dir, &fname) else {
+        return;
+    };
+    let dest_save = dest.clone();
+    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || rgba.save(&dest_save)).await {
+        let _ = env.tx.send(AppAsyncEvent::Toast {
+            kind: ToastKind::Error,
+            text: format!(
+                "{}: {e}",
+                tr_lang(env.lang, "Không thể lưu ảnh PNG", "Failed to save PNG")
+            ),
+        });
+        env.ctx.request_repaint();
+        return;
+    }
+
+    match slot {
+        TextureSlot::Skin => acct.custom_skin_path = Some(dest.clone()),
+        TextureSlot::Cape => acct.custom_cape_path = Some(dest.clone()),
+        TextureSlot::Elytra => acct.custom_elytra_path = Some(dest.clone()),
+    }
+
+    if acct.account_type == AccountType::Microsoft && slot == TextureSlot::Skin {
+        if let Ok(png_bytes) = tokio::fs::read(&dest).await {
+            let variant = acct.skin_variant;
+            if let Err(e) =
+                upload_mojang_skin(&mut acct, env.cid.as_deref(), variant, png_bytes).await
+            {
+                let _ = env.tx.send(AppAsyncEvent::Toast {
+                    kind: ToastKind::Info,
+                    text: format!(
+                        "{}: {e}",
+                        tr_lang(
+                            env.lang,
+                            "Đã lưu Skin cục bộ nhưng chưa tải lên Mojang Cloud",
+                            "Saved local skin (Mojang Cloud upload skipped)"
+                        )
+                    ),
+                });
+            }
+        }
+    }
+
+    if env.db.upsert_account(&acct).is_ok() {
+        let _ = env
+            .tx
+            .send(AppAsyncEvent::AccountTextureSaved { account: acct });
+    }
+    env.ctx.request_repaint();
 }
 
 fn build_profile_from_imported_pack(
@@ -3966,6 +5759,9 @@ fn build_profile_from_imported_pack(
         jvm_args: String::new(),
         auto_perf_mods: false,
         icon_url: meta.icon_url,
+        window_width: None,
+        window_height: None,
+        fullscreen: false,
         total_play_seconds: 0,
         session_count: 0,
         crash_count: 0,
@@ -3982,4 +5778,11 @@ fn resolve_custom_bgm_file(paths: &AppPaths) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn tr_lang<'a>(lang: Language, vi: &'a str, en: &'a str) -> &'a str {
+    match lang {
+        Language::Vi => vi,
+        Language::En => en,
+    }
 }

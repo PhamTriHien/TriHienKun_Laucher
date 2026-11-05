@@ -11,8 +11,8 @@ use crate::fx3d::{
 };
 use crate::state::{ActiveSection, LauncherAppState, ToastKind};
 use crate::theme::{
-    ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_EMERALD, ACCENT_ORANGE, ACCENT_RED,
-    ACCENT_VIOLET,
+    accent_palette, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_EMERALD, ACCENT_ORANGE,
+    ACCENT_RED, ACCENT_VIOLET,
 };
 use egui::{
     pos2, vec2, Align, Align2, Color32, CornerRadius, Frame, Layout, Margin, Rect, RichText,
@@ -80,6 +80,7 @@ pub fn render_root_ui(
 }
 
 fn render_left_nav_rail(app: &mut LauncherAppState, ui: &mut egui::Ui) {
+    let primary_accent = accent_palette(app.settings.accent_preset).0;
     egui::Panel::left("thk_left_nav_rail")
         .resizable(false)
         .exact_size(236.0)
@@ -93,7 +94,7 @@ fn render_left_nav_rail(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                     ui,
                     "nav_brand_showcase",
                     false,
-                    ACCENT_EMERALD,
+                    primary_accent,
                     Margin::symmetric(10, 8),
                     |ui| {
                         ui.set_width(ui.available_width());
@@ -105,7 +106,7 @@ fn render_left_nav_rail(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                                     RichText::new("TriHienKun")
                                         .strong()
                                         .size(16.0)
-                                        .color(ACCENT_EMERALD),
+                                        .color(primary_accent),
                                 );
                                 ui.label(
                                     RichText::new("Laucher • 3D wgpu")
@@ -123,7 +124,7 @@ fn render_left_nav_rail(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                     (
                         ActiveSection::Home,
                         Icon3dKind::HomePortal,
-                        ACCENT_EMERALD,
+                        primary_accent,
                         app.i18n.t("nav.home").to_string(),
                     ),
                     (
@@ -237,7 +238,10 @@ fn render_left_nav_rail(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                         match tool_id {
                             1 => app.open_java_manager(),
                             2 => app.show_lan_modal = true,
-                            _ => app.show_settings_modal = true,
+                            _ => {
+                                app.show_settings_modal = true;
+                                app.refresh_cache_size();
+                            }
                         }
                     }
                     ui.add_space(2.0);

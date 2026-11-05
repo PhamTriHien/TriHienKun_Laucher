@@ -96,4 +96,94 @@ mod tests {
         let oom_rep = analyze_crash_logs(&oom_logs, 1);
         assert_eq!(oom_rep.category, CrashCategory::OutOfMemory);
     }
+
+    #[test]
+    fn custom_resolution_and_fullscreen_arguments_wire_accurately() {
+        use crate::supervisor::build_full_jvm_and_game_args;
+        use crate::vanilla::MojangArguments;
+        use serde_json::json;
+        use std::path::PathBuf;
+        use thk_core::models::{Account, AccountType, GameProfile, LoaderType, SkinVariant};
+
+        let profile = GameProfile {
+            id: "p1".into(),
+            name: "1080p".into(),
+            game_version: "1.21.4".into(),
+            loader: LoaderType::Fabric,
+            loader_version: None,
+            instance_path: PathBuf::from("inst"),
+            is_custom_path: false,
+            ram_mb: 4096,
+            java_path: None,
+            jvm_args: String::new(),
+            auto_perf_mods: false,
+            icon_url: None,
+            window_width: Some(1920),
+            window_height: Some(1080),
+            fullscreen: true,
+            total_play_seconds: 0,
+            session_count: 0,
+            crash_count: 0,
+            last_played_at: None,
+            created_at: 0,
+        };
+        let account = Account {
+            id: "a1".into(),
+            username: "TriHienKun".into(),
+            uuid: "b50ad385-829d-3141-a216-7e7d7539ba7f".into(),
+            account_type: AccountType::Offline,
+            skin_variant: SkinVariant::Wide,
+            skin_url: None,
+            cape_url: None,
+            custom_skin_path: None,
+            custom_cape_path: None,
+            custom_elytra_path: None,
+            token_expires_at: None,
+            created_at: 0,
+        };
+        let vanilla = PreparedVanillaAssets {
+            version_json: VanillaVersionJson {
+                id: "1.21.4".into(),
+                main_class: "net.minecraft.client.main.Main".into(),
+                minecraft_arguments: None,
+                arguments: Some(MojangArguments {
+                    jvm: vec![],
+                    game: vec![json!({
+                        "rules": [{ "action": "allow", "features": { "has_custom_resolution": true } }],
+                        "value": ["--width", "${resolution_width}", "--height", "${resolution_height}"]
+                    })],
+                }),
+                libraries: vec![],
+                downloads: None,
+                asset_index: None,
+                assets: None,
+                java_version: None,
+            },
+            client_jar: PathBuf::from("client.jar"),
+            libraries: vec![],
+            natives_dir: PathBuf::from("natives"),
+            assets_dir: PathBuf::from("assets"),
+            asset_index_id: "19".into(),
+        };
+
+        let args = build_full_jvm_and_game_args(
+            &profile,
+            &account,
+            "0",
+            &vanilla,
+            "net.minecraft.client.main.Main",
+            true,
+            &[],
+            &[],
+            None,
+            None,
+            None,
+        );
+        let w_pos = args.iter().position(|a| a == "--width").unwrap();
+        assert_eq!(args[w_pos + 1], "1920");
+        let h_pos = args.iter().position(|a| a == "--height").unwrap();
+        assert_eq!(args[h_pos + 1], "1080");
+        assert!(args.iter().any(|a| a == "--fullscreen"));
+        assert_eq!(args.iter().filter(|a| *a == "--width").count(), 1);
+    }
 }

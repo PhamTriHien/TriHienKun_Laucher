@@ -6,7 +6,7 @@ use egui::{
 use image::{Rgba, RgbaImage};
 use std::path::Path;
 use std::sync::Arc;
-use thk_core::models::ThemeMode;
+use thk_core::models::{AccentPreset, ThemeMode};
 
 pub const ACCENT_EMERALD: Color32 = Color32::from_rgb(16, 219, 134);
 pub const ACCENT_EMERALD_DIM: Color32 = Color32::from_rgb(13, 128, 82);
@@ -17,6 +17,17 @@ pub const ACCENT_BLUE: Color32 = Color32::from_rgb(56, 152, 255);
 pub const ACCENT_AMBER: Color32 = Color32::from_rgb(245, 165, 36);
 pub const ACCENT_ORANGE: Color32 = Color32::from_rgb(249, 115, 22);
 pub const ACCENT_RED: Color32 = Color32::from_rgb(244, 63, 94);
+
+pub fn accent_palette(preset: AccentPreset) -> (Color32, Color32) {
+    match preset {
+        AccentPreset::Emerald => (ACCENT_EMERALD, ACCENT_EMERALD_DIM),
+        AccentPreset::Cyan => (ACCENT_CYAN, Color32::from_rgb(14, 116, 144)),
+        AccentPreset::Blue => (ACCENT_BLUE, Color32::from_rgb(29, 78, 216)),
+        AccentPreset::Violet => (ACCENT_VIOLET, ACCENT_VIOLET_DIM),
+        AccentPreset::Amber => (ACCENT_AMBER, Color32::from_rgb(180, 83, 9)),
+        AccentPreset::Crimson => (ACCENT_RED, Color32::from_rgb(159, 18, 57)),
+    }
+}
 
 pub const BG_VOID_DARK: Color32 = Color32::from_rgb(9, 11, 20);
 pub const BG_HUD_DARK: Color32 = Color32::from_rgb(14, 18, 32);
@@ -103,12 +114,13 @@ pub fn install_unicode_fonts(ctx: &egui::Context) {
     }
 }
 
-pub fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
+pub fn apply_theme(ctx: &egui::Context, mode: ThemeMode, accent: AccentPreset) {
     let egui_theme = match mode {
         ThemeMode::Dark => egui::Theme::Dark,
         ThemeMode::Light => egui::Theme::Light,
     };
     ctx.set_theme(egui_theme);
+    let (acc_bright, acc_dim) = accent_palette(accent);
 
     let mut style = (*ctx.style_of(egui_theme)).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
@@ -166,9 +178,14 @@ pub fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
             visuals.override_text_color = Some(text_main);
             visuals.hyperlink_color = ACCENT_CYAN;
 
-            visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(16, 219, 134, 64);
-            visuals.selection.stroke = Stroke::new(1.5, ACCENT_EMERALD);
-            visuals.text_cursor.stroke = Stroke::new(2.0, ACCENT_EMERALD);
+            visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(
+                acc_bright.r(),
+                acc_bright.g(),
+                acc_bright.b(),
+                64,
+            );
+            visuals.selection.stroke = Stroke::new(1.5, acc_bright);
+            visuals.text_cursor.stroke = Stroke::new(2.0, acc_bright);
 
             visuals.window_shadow = Shadow {
                 offset: [0, 12],
@@ -182,8 +199,10 @@ pub fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
                 spread: 0,
                 color: Color32::from_rgba_unmultiplied(2, 4, 12, 175),
             };
-            visuals.window_stroke =
-                Stroke::new(1.2, Color32::from_rgba_unmultiplied(148, 98, 255, 110));
+            visuals.window_stroke = Stroke::new(
+                1.2,
+                Color32::from_rgba_unmultiplied(acc_bright.r(), acc_bright.g(), acc_bright.b(), 95),
+            );
 
             visuals.widgets.noninteractive.bg_fill = BG_HUD_DARK;
             visuals.widgets.noninteractive.weak_bg_fill = BG_HUD_DARK;
@@ -198,13 +217,13 @@ pub fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
 
             visuals.widgets.hovered.bg_fill = BG_CARD_HOVER_DARK;
             visuals.widgets.hovered.weak_bg_fill = BG_CARD_HOVER_DARK;
-            visuals.widgets.hovered.bg_stroke = Stroke::new(1.4, ACCENT_EMERALD);
+            visuals.widgets.hovered.bg_stroke = Stroke::new(1.4, acc_bright);
             visuals.widgets.hovered.fg_stroke = Stroke::new(1.2, Color32::WHITE);
             visuals.widgets.hovered.expansion = 1.0;
 
-            visuals.widgets.active.bg_fill = ACCENT_EMERALD_DIM;
-            visuals.widgets.active.weak_bg_fill = ACCENT_EMERALD_DIM;
-            visuals.widgets.active.bg_stroke = Stroke::new(1.6, ACCENT_EMERALD);
+            visuals.widgets.active.bg_fill = acc_dim;
+            visuals.widgets.active.weak_bg_fill = acc_dim;
+            visuals.widgets.active.bg_stroke = Stroke::new(1.6, acc_bright);
             visuals.widgets.active.fg_stroke = Stroke::new(1.5, Color32::WHITE);
             visuals.widgets.active.expansion = -0.8;
         }
@@ -221,9 +240,14 @@ pub fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
             visuals.extreme_bg_color = Color32::from_rgb(248, 250, 253);
             visuals.faint_bg_color = bg_card;
             visuals.override_text_color = Some(text_dark);
-            visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(16, 185, 129, 52);
-            visuals.selection.stroke = Stroke::new(1.5, Color32::from_rgb(13, 148, 96));
-            visuals.text_cursor.stroke = Stroke::new(2.0, Color32::from_rgb(13, 148, 96));
+            visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(
+                acc_bright.r(),
+                acc_bright.g(),
+                acc_bright.b(),
+                52,
+            );
+            visuals.selection.stroke = Stroke::new(1.5, acc_dim);
+            visuals.text_cursor.stroke = Stroke::new(2.0, acc_dim);
 
             visuals.window_shadow = Shadow {
                 offset: [0, 10],
@@ -244,8 +268,7 @@ pub fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
             visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, border);
             visuals.widgets.hovered.bg_fill = bg_hover;
             visuals.widgets.hovered.weak_bg_fill = bg_hover;
-            visuals.widgets.hovered.bg_stroke =
-                Stroke::new(1.3, Color32::from_rgb(13, 148, 96));
+            visuals.widgets.hovered.bg_stroke = Stroke::new(1.3, acc_dim);
             visuals.widgets.hovered.expansion = 1.0;
             visuals.widgets.active.expansion = -0.8;
         }
