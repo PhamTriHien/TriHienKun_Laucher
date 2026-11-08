@@ -40,6 +40,7 @@ impl HelperCase {
 
     fn run(&self) -> std::process::Output {
         std::process::Command::new("powershell.exe")
+            .env_remove("PSModulePath")
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -202,6 +203,7 @@ fn helper_replaces_with_real_executable_and_keeps_original_backup() {
         .parse()
         .unwrap();
     let output = std::process::Command::new("powershell.exe")
+        .env_remove("PSModulePath")
         .args(["-NoProfile", "-NonInteractive", "-Command"])
         .arg(format!("$p = Get-Process -Id {process_id} -ErrorAction Ignore; if ($null -ne $p) {{ if (-not $p.WaitForExit(20000)) {{ throw 'Test executable did not exit' }}; $p.Dispose() }}; exit 0"))
         .creation_flags(0x0800_0000)

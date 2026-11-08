@@ -201,7 +201,8 @@ jobs:
           }
 
       - name: Build 16 KB Page-Aligned Release APK
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android-apk.ps1 -Profile release
+        shell: pwsh
+        run: ./scripts/build-android-apk.ps1 -Profile release
 
       - name: Stage Android Release Asset & Compute SHA-256
         shell: bash

@@ -574,7 +574,7 @@ fn server_cpu_details_wrapped(
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows"))]
 fn server_system_cpu_row_ui(
     ui: &mut egui::Ui,
     host_cpu: &CpuHardwareInfo,

@@ -35,8 +35,19 @@ try {
     }
     [System.IO.File]::Copy($config.source, $config.staged, $false)
     $staged = $true
-    $actual = (Get-FileHash -LiteralPath $config.staged -Algorithm SHA256).Hash
-    if ($actual -ne $config.sha256) {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($config.staged)
+        try {
+            $hashBytes = $sha256.ComputeHash($stream)
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha256.Dispose()
+    }
+    $actual = [System.BitConverter]::ToString($hashBytes).Replace('-', '')
+    if (-not [string]::Equals($actual, [string]$config.sha256, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'Staged update SHA-256 does not match the verified download.'
     }
 

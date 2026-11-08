@@ -286,6 +286,7 @@ pub fn apply_downloaded_update(update: &VerifiedUpdate) -> ThkResult<bool> {
 
                 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
                 std::process::Command::new("powershell.exe")
+                    .env_remove("PSModulePath")
                     .args([
                         "-NoProfile",
                         "-NonInteractive",
