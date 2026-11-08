@@ -1,7 +1,11 @@
-use crate::scanner::{find_java_executable_in_dir, probe_java_binary, JavaInstallation};
+use crate::distros::{ensure_android_openjdk_java, ensure_fallback_distro_java};
+use crate::scanner::{
+    find_java_executable_in_dir, probe_java_binary, scan_java_installations, JavaInstallation,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use thk_core::archive::is_safe_internal_symlink;
 use thk_core::models::DownloadProgress;
 use thk_core::paths::SafePath;
 use thk_core::{DownloadManager, DownloadTask, ThkError, ThkResult};
@@ -34,8 +38,10 @@ impl RequiredJavaSpec {
         let major_ver = infer_java_major_from_mc_version(mc_version);
         let component = match major_ver {
             0..=8 => "jre-legacy",
-            9..=17 => "java-runtime-gamma",
-            _ => "java-runtime-delta",
+            9..=16 => "java-runtime-alpha",
+            17 => "java-runtime-gamma",
+            18..=21 => "java-runtime-delta",
+            _ => "java-runtime-epsilon",
         }
         .to_string();
 
@@ -54,7 +60,7 @@ pub fn infer_java_major_from_mc_version(mc_version: &str) -> u32 {
         .collect();
 
     match parts.as_slice() {
-        // New Mojang calendar-style versions (e.g. 26.1+) require Java 21+
+        [first, ..] if *first >= 26 => 25,
         [first, ..] if *first >= 25 => 21,
         [1, minor, patch, ..] => {
             if *minor > 20 || (*minor == 20 && *patch >= 5) {
@@ -93,29 +99,31 @@ struct MojangManifestRef {
 }
 
 #[derive(Deserialize)]
-struct MojangFilesManifest {
-    files: HashMap<String, MojangRuntimeFile>,
+pub(crate) struct MojangFilesManifest {
+    pub(crate) files: HashMap<String, MojangRuntimeFile>,
 }
 
 #[derive(Deserialize)]
-struct MojangRuntimeFile {
+pub(crate) struct MojangRuntimeFile {
     #[serde(rename = "type")]
-    entry_type: String,
+    pub(crate) entry_type: String,
     #[serde(default)]
-    executable: bool,
-    downloads: Option<MojangFileDownloads>,
+    pub(crate) executable: bool,
+    #[serde(default)]
+    pub(crate) target: Option<String>,
+    pub(crate) downloads: Option<MojangFileDownloads>,
 }
 
 #[derive(Deserialize)]
-struct MojangFileDownloads {
-    raw: Option<MojangRawDownload>,
+pub(crate) struct MojangFileDownloads {
+    pub(crate) raw: Option<MojangRawDownload>,
 }
 
 #[derive(Deserialize)]
-struct MojangRawDownload {
-    url: String,
-    sha1: String,
-    size: u64,
+pub(crate) struct MojangRawDownload {
+    pub(crate) url: String,
+    pub(crate) sha1: String,
+    pub(crate) size: u64,
 }
 
 pub async fn ensure_mojang_java<F>(
@@ -128,6 +136,10 @@ pub async fn ensure_mojang_java<F>(
 where
     F: Fn(DownloadProgress) + Send + Sync + 'static,
 {
+    if cfg!(target_os = "android") {
+        return ensure_android_openjdk_java(downloader, runtimes_dir, spec, cancel, on_progress)
+            .await;
+    }
     let target_dir = SafePath::resolve_child(runtimes_dir, &spec.component)?;
     if let Some(existing_bin) = find_java_executable_in_dir(&target_dir, 4) {
         if let Ok(info) = probe_java_binary(&existing_bin, true) {
@@ -141,23 +153,39 @@ where
         downloader.get_json(MOJANG_JRE_MANIFEST_URL).await?;
 
     let platform_key = mojang_platform_key();
-    let comp_entries = all_platforms
+    let comp_entries_opt = all_platforms
         .get(platform_key)
         .and_then(|m| m.get(&spec.component))
         .filter(|v| !v.is_empty())
         .or_else(|| {
-            // Fallback on arm64 to x64 Rosetta/emulation if Mojang lacks native arm64 legacy JRE
             mojang_fallback_platform_key()
                 .and_then(|fb| all_platforms.get(fb))
                 .and_then(|m| m.get(&spec.component))
                 .filter(|v| !v.is_empty())
-        })
-        .ok_or_else(|| {
+        });
+
+    let Some(comp_entries) = comp_entries_opt else {
+        if let Some(installed) = scan_java_installations(runtimes_dir)
+            .into_iter()
+            .find(|j| j.major_version >= spec.major_version)
+        {
+            return Ok(installed);
+        }
+        return ensure_fallback_distro_java(
+            downloader,
+            runtimes_dir,
+            spec.major_version,
+            cancel,
+            on_progress,
+        )
+        .await
+        .map_err(|e| {
             ThkError::Java(format!(
-                "Mojang runtime '{}' is unavailable on platform '{}'",
-                spec.component, platform_key
+                "Mojang runtime '{}' is unavailable on platform '{platform_key}' and fallback failed: {e}",
+                spec.component
             ))
-        })?;
+        });
+    };
 
     let files_manifest: MojangFilesManifest =
         downloader.get_json(&comp_entries[0].manifest.url).await?;
@@ -165,6 +193,7 @@ where
     tokio::fs::create_dir_all(&target_dir).await?;
     let mut tasks = Vec::new();
     let mut exec_paths = Vec::new();
+    let mut pending_links: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     for (rel_path, entry) in files_manifest.files {
         let dest = SafePath::resolve_child(&target_dir, &rel_path)?;
@@ -181,6 +210,14 @@ where
                     tasks.push(task);
                     if entry.executable {
                         exec_paths.push(dest);
+                    }
+                }
+            }
+            "link" => {
+                if let Some(link_target) = entry.target {
+                    let target_path = PathBuf::from(&link_target);
+                    if is_safe_internal_symlink(&target_dir, &dest, &target_path) {
+                        pending_links.push((target_path, dest));
                     }
                 }
             }
@@ -201,6 +238,13 @@ where
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        for (link_target, dest) in pending_links {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let _ = std::fs::remove_file(&dest);
+            std::os::unix::fs::symlink(&link_target, &dest)?;
+        }
         for exe in exec_paths {
             if let Ok(meta) = std::fs::metadata(&exe) {
                 let mut perms = meta.permissions();
@@ -210,7 +254,7 @@ where
         }
     }
     #[cfg(not(unix))]
-    let _ = exec_paths;
+    let _ = (exec_paths, pending_links);
 
     let java_bin = find_java_executable_in_dir(&target_dir, 4).ok_or_else(|| {
         ThkError::Java(format!(
@@ -219,7 +263,14 @@ where
         ))
     })?;
 
-    probe_java_binary(&java_bin, true)
+    let installation = probe_java_binary(&java_bin, true)?;
+    if installation.major_version < spec.major_version {
+        return Err(ThkError::Java(format!(
+            "Mojang component '{}' provides Java {}, but Java {} is required",
+            spec.component, installation.major_version, spec.major_version
+        )));
+    }
+    Ok(installation)
 }
 
 fn mojang_platform_key() -> &'static str {
@@ -239,13 +290,24 @@ fn mojang_platform_key() -> &'static str {
     {
         "mac-os"
     }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        "linux-arm64"
+    }
     #[cfg(all(target_os = "linux", target_arch = "x86"))]
     {
         "linux-i386"
     }
-    #[cfg(all(target_os = "linux", not(target_arch = "x86")))]
+    #[cfg(all(
+        target_os = "linux",
+        not(any(target_arch = "x86", target_arch = "aarch64"))
+    ))]
     {
         "linux"
+    }
+    #[cfg(target_os = "android")]
+    {
+        "linux-arm64"
     }
 }
 

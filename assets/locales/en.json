@@ -1,6 +1,6 @@
 {
   "app.name": "TriHienKun Laucher",
-  "app.tagline": "High-performance Pure Rust Minecraft Launcher",
+  "app.tagline": "Fast and lightweight Minecraft Launcher",
   "nav.home": "Home",
   "nav.modpacks": "Modpacks",
   "nav.servers": "Local Servers",
@@ -45,7 +45,7 @@
   "server.console": "Console",
   "server.files": "File Manager",
   "server.plugins": "Plugins / Mods",
-  "server.network": "Network & Bore Tunnel",
+  "server.network": "Network & Deploy",
   "server.properties": "Server Properties",
   "account.add_ms": "Sign in with Microsoft",
   "account.add_offline": "Add Offline Account",
@@ -54,7 +54,7 @@
   "account.elytra": "Elytra",
   "account.model_wide": "Classic (Wide 4px)",
   "account.model_slim": "Alex (Slim 3px)",
-  "lan.title": "LAN World Sharing via Bore Tunnel",
+  "lan.title": "LAN World Sharing & Remote Tunnel",
   "lan.scan_active": "Listening for local Open to LAN worlds...",
   "lan.start_tunnel": "Expose Public Tunnel (bore.pub)",
   "lan.stop_tunnel": "Stop Tunnel",
@@ -73,5 +73,6 @@
   "settings.discord_rpc": "Discord Rich Presence",
   "settings.sfx": "Interface Sound Effects",
   "settings.check_update": "Check for Updates",
-  "common.cancel": "Cancel"
+  "common.cancel": "Cancel",
+  "common.delete": "Delete"
 }

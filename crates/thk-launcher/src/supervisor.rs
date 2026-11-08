@@ -1,21 +1,25 @@
-use crate::crash::{analyze_crash_logs, CrashAnalysisReport};
+use crate::crash::{analyze_crash_logs_with_instance_dir, CrashAnalysisReport};
 use crate::loaders::prepare_loader_patch;
+use crate::mobile_jvm::{run_android_jvm_session, MobileSessionHandle};
 use crate::vanilla::{
-    evaluate_rules, library_dedup_key, prepare_vanilla_files, resolve_vanilla_version_json,
-    MojangRule, VanillaVersionJson,
+    evaluate_rules, library_dedup_key, prepare_vanilla_files_with_natives,
+    resolve_vanilla_version_json, MojangRule, VanillaVersionJson,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use thk_auth::{
-    ensure_authlib_injector, ensure_valid_minecraft_token, start_local_yggdrasil,
+    ensure_authlib_injector, ensure_valid_minecraft_token, start_local_yggdrasil_with_paths,
     LocalYggdrasilHandle,
 };
-use thk_core::models::{Account, AccountType, DownloadProgress, GameProfile, LoaderType};
+use thk_core::models::{
+    Account, AccountType, DownloadProgress, GameProfile, JavaRuntimeMode, LoaderType,
+    MobileRendererMode, SkinVariant,
+};
 use thk_core::{AppPaths, Database, DownloadManager, ThkError, ThkResult};
-use thk_java::{ensure_mojang_java, probe_java_binary, RequiredJavaSpec};
+use thk_java::{ensure_mojang_java, ensure_optimal_java, probe_java_binary, RequiredJavaSpec};
 use thk_mods::ensure_fabric_performance_mods;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -46,6 +50,10 @@ pub struct LaunchRequest {
     pub quick_play_server: Option<String>,
     pub custom_ms_client_id: Option<String>,
     pub high_process_priority: bool,
+    pub java_runtime_mode: JavaRuntimeMode,
+    pub mobile_renderer: MobileRendererMode,
+    pub mobile_render_scale_pct: u32,
+    pub mobile_surface_size: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +95,7 @@ struct RunningInstanceEntry {
     pub stop_signal: CancellationToken,
     pub logs: Arc<Mutex<VecDeque<String>>>,
     pub _yggdrasil: Option<LocalYggdrasilHandle>,
+    pub mobile_session: Option<MobileSessionHandle>,
 }
 
 #[derive(Clone)]
@@ -163,21 +172,62 @@ impl InstanceSupervisor {
         false
     }
 
-    pub fn launch_async(&self, req: LaunchRequest) -> ThkResult<CancellationToken> {
+    pub fn mobile_session(&self, key: &InstanceKey) -> Option<MobileSessionHandle> {
+        let guard = self.running.read().unwrap_or_else(|e| e.into_inner());
+        guard.get(key).and_then(|e| e.mobile_session.clone())
+    }
+
+    pub fn active_mobile_session(&self) -> Option<(InstanceKey, MobileSessionHandle)> {
+        let guard = self.running.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .iter()
+            .find_map(|(k, e)| e.mobile_session.clone().map(|s| (k.clone(), s)))
+    }
+
+    pub fn launch_async(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        req: LaunchRequest,
+    ) -> ThkResult<CancellationToken> {
         let key = InstanceKey::new(req.profile.id.clone(), req.account.id.clone());
-        if self.is_running(&key) {
-            return Err(ThkError::Process(format!(
-                "Profile '{}' đang chạy dưới tài khoản '{}' rồi.",
-                req.profile.name, req.account.username
-            )));
+        let cancel = CancellationToken::new();
+        let logs_buf = Arc::new(Mutex::new(VecDeque::with_capacity(
+            MAX_LOG_LINES_PER_INSTANCE,
+        )));
+
+        {
+            let mut guard = self.running.write().unwrap_or_else(|e| e.into_inner());
+            if guard.contains_key(&key) {
+                return Err(ThkError::Process(format!(
+                    "Profile '{}' đang chạy hoặc đang chuẩn bị dưới tài khoản '{}' rồi.",
+                    req.profile.name, req.account.username
+                )));
+            }
+            guard.insert(
+                key.clone(),
+                RunningInstanceEntry {
+                    pid: None,
+                    started_at: Instant::now(),
+                    stop_signal: cancel.clone(),
+                    logs: Arc::clone(&logs_buf),
+                    _yggdrasil: None,
+                    mobile_session: None,
+                },
+            );
         }
 
-        let cancel = CancellationToken::new();
         let sup = self.clone();
         let cancel_clone = cancel.clone();
 
-        tokio::spawn(async move {
-            if let Err(err) = sup.execute_launch_pipeline(req, key.clone(), cancel_clone).await {
+        runtime.spawn(async move {
+            if let Err(err) = sup
+                .execute_launch_pipeline(req, key.clone(), cancel_clone, logs_buf)
+                .await
+            {
+                {
+                    let mut guard = sup.running.write().unwrap_or_else(|e| e.into_inner());
+                    guard.remove(&key);
+                }
                 let _ = sup.events_tx.send(LauncherEvent::LaunchFailed {
                     key,
                     error: err.to_string(),
@@ -193,7 +243,11 @@ impl InstanceSupervisor {
         mut req: LaunchRequest,
         key: InstanceKey,
         cancel: CancellationToken,
+        logs_buf: Arc<Mutex<VecDeque<String>>>,
     ) -> ThkResult<()> {
+        if cancel.is_cancelled() {
+            return Err(ThkError::Cancelled);
+        }
         tokio::fs::create_dir_all(&req.profile.instance_path).await?;
 
         let emit_progress = {
@@ -207,21 +261,25 @@ impl InstanceSupervisor {
             }
         };
 
-        let mc_access_token = ensure_valid_minecraft_token(
-            &mut req.account,
-            req.custom_ms_client_id.as_deref(),
-        )
-        .await?;
+        let mc_access_token = tokio::select! {
+            _ = cancel.cancelled() => return Err(ThkError::Cancelled),
+            res = ensure_valid_minecraft_token(
+                &mut req.account,
+                req.custom_ms_client_id.as_deref(),
+            ) => res?,
+        };
         if req.account.account_type == AccountType::Microsoft {
             let _ = self.db.upsert_account(&req.account);
         }
 
-        let version_json = resolve_vanilla_version_json(
-            &self.downloader,
-            &self.paths,
-            &req.profile.game_version,
-        )
-        .await?;
+        let version_json = tokio::select! {
+            _ = cancel.cancelled() => return Err(ThkError::Cancelled),
+            res = resolve_vanilla_version_json(
+                &self.downloader,
+                &self.paths,
+                &req.profile.game_version,
+            ) => res?,
+        };
 
         let java_spec = RequiredJavaSpec::for_minecraft_version(
             &req.profile.game_version,
@@ -235,28 +293,95 @@ impl InstanceSupervisor {
                 .and_then(|j| j.major_version),
         );
 
-        let java_install = match req.profile.java_path.as_deref().filter(|p| p.is_file()) {
-            Some(custom_bin) => probe_java_binary(custom_bin, false)?,
-            None => {
-                ensure_mojang_java(
-                    &self.downloader,
-                    &self.paths.runtimes_dir,
-                    &java_spec,
-                    Some(cancel.clone()),
-                    emit_progress.clone(),
-                )
-                .await?
+        let java_install = match req
+            .profile
+            .java_path
+            .as_deref()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            Some(custom_bin) => {
+                let inst = probe_java_binary(custom_bin, false)?;
+                if inst.major_version < java_spec.major_version {
+                    return Err(ThkError::Java(format!(
+                        "Profile '{}' requires Java {} or newer; selected Java is {} ({})",
+                        req.profile.name,
+                        java_spec.major_version,
+                        inst.major_version,
+                        custom_bin.display()
+                    )));
+                }
+                inst
             }
+            None => match req.java_runtime_mode {
+                JavaRuntimeMode::OptimalGraalVm => {
+                    ensure_optimal_java(
+                        &self.downloader,
+                        &self.paths.runtimes_dir,
+                        &java_spec,
+                        Some(cancel.clone()),
+                        emit_progress.clone(),
+                    )
+                    .await?
+                }
+                JavaRuntimeMode::MojangOfficial => {
+                    ensure_mojang_java(
+                        &self.downloader,
+                        &self.paths.runtimes_dir,
+                        &java_spec,
+                        Some(cancel.clone()),
+                        emit_progress.clone(),
+                    )
+                    .await?
+                }
+            },
         };
 
-        let mut vanilla = prepare_vanilla_files(
+        let rt_log_line = format!(
+            "[THK] Java Runtime: {} {} (Java {} -> {})",
+            java_install.vendor,
+            java_install.full_version,
+            java_install.major_version,
+            java_install.path.display()
+        );
+        {
+            let mut guard = logs_buf.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.len() >= MAX_LOG_LINES_PER_INSTANCE {
+                guard.pop_front();
+            }
+            guard.push_back(rt_log_line.clone());
+        }
+        let _ = self.events_tx.send(LauncherEvent::LogLine {
+            key: key.clone(),
+            line: rt_log_line,
+        });
+
+        let isolated_natives_dir = req
+            .profile
+            .instance_path
+            .join(format!(".thk-natives-{}", uuid::Uuid::new_v4()));
+        let mut natives_guard = IsolatedNativesGuard::new(isolated_natives_dir.clone());
+
+        let mut vanilla = prepare_vanilla_files_with_natives(
             &self.downloader,
             &self.paths,
             &version_json,
+            Some(isolated_natives_dir),
             Some(cancel.clone()),
             emit_progress.clone(),
         )
         .await?;
+
+        if vanilla.map_to_resources {
+            if let Some(ref vdir) = vanilla.virtual_assets_dir {
+                let src_root = vdir.clone();
+                let dst_root = req.profile.instance_path.join("resources");
+                tokio::task::spawn_blocking(move || {
+                    copy_missing_tree_sync(&src_root, &dst_root);
+                })
+                .await
+                .ok();
+            }
+        }
 
         let loader_patch = prepare_loader_patch(
             &self.downloader,
@@ -271,7 +396,11 @@ impl InstanceSupervisor {
         )
         .await?;
 
-        if req.profile.loader == LoaderType::Fabric && req.profile.auto_perf_mods {
+        let allow_auto_perf_mods = req.profile.loader == LoaderType::Fabric
+            && req.profile.auto_perf_mods
+            && (!cfg!(target_os = "android")
+                || req.mobile_renderer == MobileRendererMode::MobileGlues);
+        if allow_auto_perf_mods {
             let _ = ensure_fabric_performance_mods(
                 &self.downloader,
                 &self.db,
@@ -282,18 +411,64 @@ impl InstanceSupervisor {
             .await;
         }
 
-        let mut yggdrasil_handle = None;
-        let mut authlib_jvm_arg = None;
-        let has_offline_custom_textures = req.account.account_type == AccountType::Offline
-            && (req.account.custom_skin_path.as_ref().is_some_and(|p| p.is_file())
-                || req.account.custom_cape_path.as_ref().is_some_and(|p| p.is_file())
-                || req.account.custom_elytra_path.as_ref().is_some_and(|p| p.is_file()));
+        if cancel.is_cancelled() {
+            return Err(ThkError::Cancelled);
+        }
 
-        if has_offline_custom_textures {
-            if let Ok(agent_jar) = ensure_authlib_injector(&self.downloader, &self.paths).await {
-                if let Ok(handle) = start_local_yggdrasil(&req.account).await {
-                    authlib_jvm_arg = Some(handle.jvm_agent_arg(&agent_jar));
-                    yggdrasil_handle = Some(handle);
+        let mut yggdrasil_handle = None;
+        let mut authlib_jvm_args = Vec::new();
+        let needs_local_yggdrasil = req.account.account_type == AccountType::Offline
+            && (req.account.skin_variant == SkinVariant::Slim
+                || req
+                    .account
+                    .custom_skin_path
+                    .as_ref()
+                    .is_some_and(|p| p.is_file())
+                || req
+                    .account
+                    .custom_cape_path
+                    .as_ref()
+                    .is_some_and(|p| p.is_file())
+                || req
+                    .account
+                    .custom_elytra_path
+                    .as_ref()
+                    .is_some_and(|p| p.is_file()));
+
+        if needs_local_yggdrasil {
+            match ensure_authlib_injector(&self.downloader, &self.paths).await {
+                Ok(agent_jar) => {
+                    match start_local_yggdrasil_with_paths(&req.account, Some(&self.paths)).await {
+                        Ok(handle) => {
+                            emit_supervisor_log(
+                                &logs_buf,
+                                &self.events_tx,
+                                &key,
+                                format!(
+                                    "[THK] Local Yggdrasil skin server active on http://127.0.0.1:{}",
+                                    handle.port
+                                ),
+                            );
+                            authlib_jvm_args = handle.jvm_args(&agent_jar);
+                            yggdrasil_handle = Some(handle);
+                        }
+                        Err(e) => {
+                            emit_supervisor_log(
+                                &logs_buf,
+                                &self.events_tx,
+                                &key,
+                                format!("[THK] Warning: Local skin server unavailable: {e}"),
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    emit_supervisor_log(
+                        &logs_buf,
+                        &self.events_tx,
+                        &key,
+                        format!("[THK] Warning: Failed to prepare authlib-injector: {e}"),
+                    );
                 }
             }
         }
@@ -328,6 +503,74 @@ impl InstanceSupervisor {
             vanilla.libraries = merged;
         }
 
+        if cfg!(target_os = "android") {
+            let running_ref = Arc::clone(&self.running);
+            let key_for_cb = key.clone();
+            let cancel_for_cb = cancel.clone();
+            let logs_for_cb = Arc::clone(&logs_buf);
+            let mut ygg_opt = yggdrasil_handle;
+
+            let (exit_code, elapsed_secs, crash_report) = run_android_jvm_session(
+                &self.paths,
+                &self.db,
+                &req.profile,
+                &req.account,
+                &mc_access_token,
+                &vanilla,
+                &java_install.path,
+                java_install.major_version,
+                &main_class,
+                include_client_jar,
+                &loader_jvm_args,
+                &loader_game_args,
+                legacy_mc_args_override.as_deref(),
+                &authlib_jvm_args,
+                req.quick_play_server.as_deref(),
+                req.mobile_renderer,
+                req.mobile_render_scale_pct,
+                req.mobile_surface_size,
+                key.clone(),
+                cancel.clone(),
+                Arc::clone(&logs_buf),
+                self.events_tx.clone(),
+                move |pid, started_at, session| {
+                    let mut guard = running_ref.write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(entry) = guard.get_mut(&key_for_cb) {
+                        entry.pid = (pid > 0).then_some(pid);
+                        entry.started_at = started_at;
+                        entry._yggdrasil = ygg_opt.take();
+                        entry.mobile_session = Some(session);
+                    } else {
+                        guard.insert(
+                            key_for_cb,
+                            RunningInstanceEntry {
+                                pid: (pid > 0).then_some(pid),
+                                started_at,
+                                stop_signal: cancel_for_cb,
+                                logs: logs_for_cb,
+                                _yggdrasil: ygg_opt.take(),
+                                mobile_session: Some(session),
+                            },
+                        );
+                    }
+                },
+            )
+            .await?;
+
+            natives_guard.cleanup_now().await;
+            {
+                let mut guard = self.running.write().unwrap_or_else(|e| e.into_inner());
+                guard.remove(&key);
+            }
+            let _ = self.events_tx.send(LauncherEvent::Exited {
+                key,
+                exit_code,
+                elapsed_secs,
+                crash_report,
+            });
+            return Ok(());
+        }
+
         let full_args = build_full_jvm_and_game_args(
             &req.profile,
             &req.account,
@@ -338,7 +581,7 @@ impl InstanceSupervisor {
             &loader_jvm_args,
             &loader_game_args,
             legacy_mc_args_override.as_deref(),
-            authlib_jvm_arg.as_deref(),
+            &authlib_jvm_args,
             req.quick_play_server.as_deref(),
         );
 
@@ -360,37 +603,55 @@ impl InstanceSupervisor {
             cmd.creation_flags(flags);
         }
 
+        let started_at_wall = SystemTime::now();
         let mut child = cmd
             .spawn()
             .map_err(|e| ThkError::Process(format!("Không thể khởi chạy JVM Minecraft: {e}")))?;
 
         let pid = child.id().unwrap_or(0);
-        let logs_buf = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_LOG_LINES_PER_INSTANCE)));
         let started_at = Instant::now();
 
         {
             let mut guard = self.running.write().unwrap_or_else(|e| e.into_inner());
-            guard.insert(
-                key.clone(),
-                RunningInstanceEntry {
-                    pid: child.id(),
-                    started_at,
-                    stop_signal: cancel.clone(),
-                    logs: Arc::clone(&logs_buf),
-                    _yggdrasil: yggdrasil_handle,
-                },
-            );
+            if let Some(entry) = guard.get_mut(&key) {
+                entry.pid = child.id();
+                entry.started_at = started_at;
+                entry._yggdrasil = yggdrasil_handle;
+            } else {
+                guard.insert(
+                    key.clone(),
+                    RunningInstanceEntry {
+                        pid: child.id(),
+                        started_at,
+                        stop_signal: cancel.clone(),
+                        logs: Arc::clone(&logs_buf),
+                        _yggdrasil: yggdrasil_handle,
+                        mobile_session: None,
+                    },
+                );
+            }
         }
 
-        let _ = self
-            .events_tx
-            .send(LauncherEvent::Started { key: key.clone(), pid });
+        let _ = self.events_tx.send(LauncherEvent::Started {
+            key: key.clone(),
+            pid,
+        });
 
         if let Some(stdout) = child.stdout.take() {
-            spawn_log_reader(stdout, Arc::clone(&logs_buf), self.events_tx.clone(), key.clone());
+            spawn_log_reader(
+                stdout,
+                Arc::clone(&logs_buf),
+                self.events_tx.clone(),
+                key.clone(),
+            );
         }
         if let Some(stderr) = child.stderr.take() {
-            spawn_log_reader(stderr, Arc::clone(&logs_buf), self.events_tx.clone(), key.clone());
+            spawn_log_reader(
+                stderr,
+                Arc::clone(&logs_buf),
+                self.events_tx.clone(),
+                key.clone(),
+            );
         }
 
         let exit_code = tokio::select! {
@@ -406,6 +667,8 @@ impl InstanceSupervisor {
             }
         };
 
+        natives_guard.cleanup_now().await;
+
         let elapsed_secs = started_at.elapsed().as_secs();
         let collected_logs: Vec<String> = {
             let mut guard = self.running.write().unwrap_or_else(|e| e.into_inner());
@@ -420,7 +683,12 @@ impl InstanceSupervisor {
             .record_play_session(&req.profile.id, elapsed_secs, crashed);
 
         let crash_report = if crashed {
-            Some(analyze_crash_logs(&collected_logs, exit_code))
+            Some(analyze_crash_logs_with_instance_dir(
+                &collected_logs,
+                exit_code,
+                Some(&req.profile.instance_path),
+                Some(started_at_wall),
+            ))
         } else {
             None
         };
@@ -433,6 +701,48 @@ impl InstanceSupervisor {
         });
 
         Ok(())
+    }
+}
+
+struct IsolatedNativesGuard {
+    dir: Option<PathBuf>,
+}
+
+impl IsolatedNativesGuard {
+    fn new(dir: PathBuf) -> Self {
+        Self { dir: Some(dir) }
+    }
+
+    async fn cleanup_now(&mut self) {
+        if let Some(dir) = self.dir.take() {
+            let _ = tokio::fs::remove_dir_all(dir).await;
+        }
+    }
+}
+
+impl Drop for IsolatedNativesGuard {
+    fn drop(&mut self) {
+        if let Some(dir) = self.dir.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+fn copy_missing_tree_sync(src: &Path, dst: &Path) {
+    let Ok(entries) = std::fs::read_dir(src) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(dst);
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        let target = dst.join(entry.file_name());
+        if ft.is_dir() {
+            copy_missing_tree_sync(&entry.path(), &target);
+        } else if ft.is_file() && !target.is_file() {
+            let _ = std::fs::copy(entry.path(), &target);
+        }
     }
 }
 
@@ -460,6 +770,25 @@ fn spawn_log_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     });
 }
 
+fn emit_supervisor_log(
+    logs_buf: &Arc<Mutex<VecDeque<String>>>,
+    tx: &mpsc::UnboundedSender<LauncherEvent>,
+    key: &InstanceKey,
+    line: String,
+) {
+    {
+        let mut guard = logs_buf.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.len() >= MAX_LOG_LINES_PER_INSTANCE {
+            guard.pop_front();
+        }
+        guard.push_back(line.clone());
+    }
+    let _ = tx.send(LauncherEvent::LogLine {
+        key: key.clone(),
+        line,
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_full_jvm_and_game_args(
     profile: &GameProfile,
@@ -471,7 +800,7 @@ pub(crate) fn build_full_jvm_and_game_args(
     loader_jvm_args: &[String],
     loader_game_args: &[String],
     legacy_mc_args_override: Option<&str>,
-    authlib_jvm_arg: Option<&str>,
+    authlib_jvm_args: &[String],
     quick_play_server: Option<&str>,
 ) -> Vec<String> {
     let cp_sep = if cfg!(windows) { ";" } else { ":" };
@@ -498,21 +827,31 @@ pub(crate) fn build_full_jvm_and_game_args(
         }
     }
 
-    if let Some(agent_flag) = authlib_jvm_arg {
-        args.push(agent_flag.to_string());
+    for agent_flag in authlib_jvm_args {
+        args.push(agent_flag.clone());
     }
 
     let mut vars = HashMap::new();
-    vars.insert("natives_directory", vanilla.natives_dir.display().to_string());
+    vars.insert(
+        "natives_directory",
+        vanilla.natives_dir.display().to_string(),
+    );
     vars.insert("launcher_name", "TriHienKun-Laucher".to_string());
     vars.insert("launcher_version", "1.0.0".to_string());
     vars.insert("classpath", classpath_str.clone());
     vars.insert("classpath_separator", cp_sep.to_string());
     vars.insert("auth_player_name", account.username.clone());
     vars.insert("version_name", profile.game_version.clone());
-    vars.insert("game_directory", profile.instance_path.display().to_string());
+    vars.insert(
+        "game_directory",
+        profile.instance_path.display().to_string(),
+    );
+    let game_assets_dir = vanilla
+        .virtual_assets_dir
+        .as_ref()
+        .unwrap_or(&vanilla.assets_dir);
     vars.insert("assets_root", vanilla.assets_dir.display().to_string());
-    vars.insert("game_assets", vanilla.assets_dir.display().to_string());
+    vars.insert("game_assets", game_assets_dir.display().to_string());
     vars.insert("assets_index_name", vanilla.asset_index_id.clone());
     vars.insert("auth_uuid", account.uuid.replace('-', ""));
     vars.insert("auth_access_token", access_token.to_string());
@@ -561,14 +900,30 @@ pub(crate) fn build_full_jvm_and_game_args(
         args.push(classpath_str);
     }
 
-    for l_jvm in loader_jvm_args {
-        args.push(substitute_placeholders(l_jvm, &vars));
+    let mut idx = 0;
+    while idx < loader_jvm_args.len() {
+        let token = substitute_placeholders(&loader_jvm_args[idx], &vars);
+        if (token == "-cp" || token == "-classpath") && idx + 1 < loader_jvm_args.len() {
+            let cp_val = substitute_placeholders(&loader_jvm_args[idx + 1], &vars);
+            if let Some(existing_pos) = args.iter().position(|a| a == "-cp" || a == "-classpath") {
+                if existing_pos + 1 < args.len() {
+                    args[existing_pos + 1] = cp_val;
+                }
+            } else {
+                args.push(token);
+                args.push(cp_val);
+            }
+            idx += 2;
+        } else {
+            args.push(token);
+            idx += 1;
+        }
     }
 
     args.push(main_class.to_string());
 
-    let legacy_tpl = legacy_mc_args_override
-        .or(vanilla.version_json.minecraft_arguments.as_deref());
+    let legacy_tpl =
+        legacy_mc_args_override.or(vanilla.version_json.minecraft_arguments.as_deref());
 
     if let Some(tpl) = legacy_tpl {
         for tok in tpl.split_whitespace() {

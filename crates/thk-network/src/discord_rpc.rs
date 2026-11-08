@@ -118,10 +118,21 @@ fn rpc_worker_loop(rx: mpsc::Receiver<RpcCommand>) {
                     active_client = try_connect_ipc(&desired_app_id);
                 }
 
+                let mut reconnected = false;
                 if let Some((_, ref mut client)) = active_client {
                     if apply_activity(client, &current_state, started_epoch).is_err() {
                         let _ = client.close();
                         active_client = None;
+                        reconnected = true;
+                    }
+                }
+                if reconnected {
+                    active_client = try_connect_ipc(&desired_app_id);
+                    if let Some((_, ref mut client)) = active_client {
+                        if apply_activity(client, &current_state, started_epoch).is_err() {
+                            let _ = client.close();
+                            active_client = None;
+                        }
                     }
                 }
             }
@@ -185,13 +196,33 @@ fn apply_activity(
         ),
     };
 
+    let safe_details = truncate_discord_field(&details_text, 128);
+    let safe_state = truncate_discord_field(&state_text, 128);
+
     let payload = activity::Activity::new()
-        .details(&details_text)
-        .state(&state_text)
+        .details(&safe_details)
+        .state(&safe_state)
         .timestamps(activity::Timestamps::new().start(started_epoch));
 
     client.set_activity(payload)?;
     Ok(())
+}
+
+pub fn truncate_discord_field(s: &str, max_bytes: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() < 2 {
+        return format!("{trimmed}  ");
+    }
+    if trimmed.len() <= max_bytes {
+        return trimmed.to_string();
+    }
+    let ellipsis = "…";
+    let budget = max_bytes.saturating_sub(ellipsis.len());
+    let mut end = budget.min(trimmed.len());
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ellipsis}", &trimmed[..end])
 }
 
 fn current_unix_secs() -> i64 {

@@ -21,9 +21,15 @@ pub fn compute_offline_uuid(username: &str) -> String {
     )
 }
 
-pub fn create_offline_account(username: &str, skin_variant: SkinVariant) -> thk_core::ThkResult<Account> {
+pub fn create_offline_account(
+    username: &str,
+    skin_variant: SkinVariant,
+) -> thk_core::ThkResult<Account> {
     let clean = username.trim();
-    if clean.len() < 3 || clean.len() > 16 || !clean.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    if clean.len() < 3
+        || clean.len() > 16
+        || !clean.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
         return Err(thk_core::ThkError::InvalidInput(
             "Minecraft username must be 3-16 characters (letters, digits, or underscore)".into(),
         ));
@@ -41,6 +47,7 @@ pub fn create_offline_account(username: &str, skin_variant: SkinVariant) -> thk_
         custom_cape_path: None,
         custom_elytra_path: None,
         token_expires_at: None,
+        oauth_client_id: None,
         created_at: Utc::now().timestamp(),
     })
 }

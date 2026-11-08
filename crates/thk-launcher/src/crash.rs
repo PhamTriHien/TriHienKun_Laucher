@@ -1,8 +1,9 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
 use thk_core::models::{ContentKind, DownloadProgress, GameProfile, LoaderType, ProviderSource};
 use thk_core::{Database, DownloadManager, ThkError, ThkResult};
 use thk_mods::{
@@ -28,6 +29,7 @@ pub enum CrashFixAction {
     InstallMod,
     UpdateMod,
     UpgradeJava,
+    UpgradeLoader,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +71,7 @@ fn regexes() -> &'static CrashRegexes {
         )
         .unwrap(),
         pat_req_missing: Regex::new(
-            r#"(?i)^[-*]?\s*Mod\s+['"]?([^'"(]+)['"]?\s*\(([^)]+)\)[^r]*requires\s+(?:version\s+)?([\w.+\-\[\],\s()]+?)\s+of\s+['"]?([\w\-\s]+?)['"]?,?\s+which\s+is\s+missing"#,
+            r#"(?i)^[-*]?\s*Mod\s+['"]?([^'"(]+)['"]?\s*\(([^)]+)\).*?\brequires\s+(?:version\s+)?([\w.+\-\[\],\s()]+?)\s+of\s+['"]?([\w\-\s]+?)['"]?,?\s+which\s+is\s+missing"#,
         )
         .unwrap(),
         pat_req_of: Regex::new(
@@ -89,10 +91,31 @@ fn regexes() -> &'static CrashRegexes {
 }
 
 pub fn analyze_crash_logs(logs: &[String], exit_code: i32) -> CrashAnalysisReport {
-    let full = logs.join("\n");
+    analyze_crash_logs_with_instance_dir(logs, exit_code, None, None)
+}
+
+pub fn analyze_crash_logs_with_instance_dir(
+    logs: &[String],
+    exit_code: i32,
+    instance_dir: Option<&Path>,
+    started_at_wall: Option<SystemTime>,
+) -> CrashAnalysisReport {
+    let mut merged_logs: Vec<String>;
+    let effective_logs: &[String] = if let Some(extra) =
+        instance_dir.and_then(|dir| read_latest_crash_report_lines(dir, started_at_wall))
+    {
+        merged_logs = Vec::with_capacity(logs.len() + extra.len());
+        merged_logs.extend_from_slice(logs);
+        merged_logs.extend(extra);
+        &merged_logs
+    } else {
+        logs
+    };
+
+    let full = effective_logs.join("\n");
     let lower_full = full.to_ascii_lowercase();
 
-    let is_fabric_incompat = logs.iter().any(|l| {
+    let is_fabric_incompat = effective_logs.iter().any(|l| {
         let low = l.to_ascii_lowercase();
         low.contains("incompatible mod")
             || low.contains("some of your mods are incompatible")
@@ -111,8 +134,7 @@ pub fn analyze_crash_logs(logs: &[String], exit_code: i32) -> CrashAnalysisRepor
         || lower_full.contains("loadingmodlist")
     {
         CrashCategory::ForgeMissingDep
-    } else if lower_full.contains("hs_err_pid")
-        || lower_full.contains("exception_access_violation")
+    } else if lower_full.contains("hs_err_pid") || lower_full.contains("exception_access_violation")
     {
         CrashCategory::JvmNativeCrash
     } else if lower_full.contains("exception in thread") || lower_full.contains("caused by:") {
@@ -121,7 +143,7 @@ pub fn analyze_crash_logs(logs: &[String], exit_code: i32) -> CrashAnalysisRepor
         CrashCategory::UnknownExitCode
     };
 
-    let (solutions, mut missing_mods) = parse_fabric_and_forge_advice(logs);
+    let (solutions, mut missing_mods) = parse_fabric_and_forge_advice(effective_logs);
     if category == CrashCategory::JavaVersionMismatch && missing_mods.is_empty() {
         missing_mods.push(MissingModAdvice {
             mod_id: "java".into(),
@@ -157,8 +179,8 @@ pub fn analyze_crash_logs(logs: &[String], exit_code: i32) -> CrashAnalysisRepor
         }
     };
 
-    let root_cause_line = extract_root_cause(logs);
-    let relevant_lines = collect_relevant_lines(logs);
+    let root_cause_line = extract_root_cause(effective_logs);
+    let relevant_lines = collect_relevant_lines(effective_logs);
 
     CrashAnalysisReport {
         category,
@@ -169,6 +191,45 @@ pub fn analyze_crash_logs(logs: &[String], exit_code: i32) -> CrashAnalysisRepor
         missing_mods,
         relevant_lines,
     }
+}
+
+fn read_latest_crash_report_lines(
+    instance_dir: &Path,
+    started_at_wall: Option<SystemTime>,
+) -> Option<Vec<String>> {
+    let reports_dir = instance_dir.join("crash-reports");
+    let entries = std::fs::read_dir(reports_dir).ok()?;
+    let min_mtime = started_at_wall.and_then(|t| t.checked_sub(Duration::from_secs(3)));
+
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let fname_str = fname.to_string_lossy();
+        if !fname_str.starts_with("crash-") || !fname_str.ends_with(".txt") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() > 2 * 1024 * 1024 {
+            continue;
+        }
+        let Ok(mtime) = meta.modified() else {
+            continue;
+        };
+        if let Some(threshold) = min_mtime {
+            if mtime < threshold {
+                continue;
+            }
+        }
+        if newest.as_ref().is_none_or(|(prev_t, _)| mtime > *prev_t) {
+            newest = Some((mtime, entry.path()));
+        }
+    }
+
+    let (_, path) = newest?;
+    let content = std::fs::read_to_string(path).ok()?;
+    Some(content.lines().take(500).map(ToString::to_string).collect())
 }
 
 fn parse_fabric_and_forge_advice(logs: &[String]) -> (Vec<String>, Vec<MissingModAdvice>) {
@@ -195,18 +256,16 @@ fn parse_fabric_and_forge_advice(logs: &[String]) -> (Vec<String>, Vec<MissingMo
         if let Some(cap) = rx.pat_install.captures(trimmed) {
             let mod_id = cap[1].trim().to_ascii_lowercase();
             let ver_desc = cap[2].trim().to_string();
-            let action = if is_java_token(&mod_id) {
-                CrashFixAction::UpgradeJava
-            } else {
-                CrashFixAction::InstallMod
-            };
-            missing.entry(mod_id.clone()).or_insert_with(|| MissingModAdvice {
-                display_name: cap[1].trim().to_string(),
-                mod_id,
-                required_version: Some(ver_desc),
-                required_by: Vec::new(),
-                action,
-            });
+            let action = classify_fix_action(&mod_id, CrashFixAction::InstallMod);
+            missing
+                .entry(mod_id.clone())
+                .or_insert_with(|| MissingModAdvice {
+                    display_name: cap[1].trim().to_string(),
+                    mod_id,
+                    required_version: Some(ver_desc),
+                    required_by: Vec::new(),
+                    action,
+                });
             continue;
         }
 
@@ -214,13 +273,16 @@ fn parse_fabric_and_forge_advice(logs: &[String]) -> (Vec<String>, Vec<MissingMo
             let disp = cap[1].trim().to_string();
             let mod_id = cap[2].trim().to_ascii_lowercase();
             if !is_java_token(&mod_id) {
-                missing.entry(mod_id.clone()).or_insert_with(|| MissingModAdvice {
-                    mod_id,
-                    display_name: disp,
-                    required_version: Some(format!("current: {}", cap[3].trim())),
-                    required_by: Vec::new(),
-                    action: CrashFixAction::UpdateMod,
-                });
+                let action = classify_fix_action(&mod_id, CrashFixAction::UpdateMod);
+                missing
+                    .entry(mod_id.clone())
+                    .or_insert_with(|| MissingModAdvice {
+                        mod_id,
+                        display_name: disp,
+                        required_version: Some(format!("current: {}", cap[3].trim())),
+                        required_by: Vec::new(),
+                        action,
+                    });
             }
             continue;
         }
@@ -230,18 +292,16 @@ fn parse_fabric_and_forge_advice(logs: &[String]) -> (Vec<String>, Vec<MissingMo
             let req_ver = cap[3].trim().to_string();
             let raw_target = cap[4].trim();
             let key = raw_target.to_ascii_lowercase().replace(' ', "-");
-            let action = if is_java_token(&key) {
-                CrashFixAction::UpgradeJava
-            } else {
-                CrashFixAction::InstallMod
-            };
-            let entry = missing.entry(key.clone()).or_insert_with(|| MissingModAdvice {
-                mod_id: key,
-                display_name: raw_target.to_string(),
-                required_version: Some(req_ver),
-                required_by: Vec::new(),
-                action,
-            });
+            let action = classify_fix_action(&key, CrashFixAction::InstallMod);
+            let entry = missing
+                .entry(key.clone())
+                .or_insert_with(|| MissingModAdvice {
+                    mod_id: key,
+                    display_name: raw_target.to_string(),
+                    required_version: Some(req_ver),
+                    required_by: Vec::new(),
+                    action,
+                });
             if !entry.required_by.contains(&req_by) {
                 entry.required_by.push(req_by);
             }
@@ -252,13 +312,16 @@ fn parse_fabric_and_forge_advice(logs: &[String]) -> (Vec<String>, Vec<MissingMo
             let ver = cap[1].trim().to_string();
             let mod_id = cap[2].trim().to_ascii_lowercase();
             if !is_java_token(&mod_id) {
-                missing.entry(mod_id.clone()).or_insert_with(|| MissingModAdvice {
-                    display_name: cap[2].trim().to_string(),
-                    mod_id,
-                    required_version: Some(format!("{ver}+")),
-                    required_by: Vec::new(),
-                    action: CrashFixAction::InstallMod,
-                });
+                let action = classify_fix_action(&mod_id, CrashFixAction::InstallMod);
+                missing
+                    .entry(mod_id.clone())
+                    .or_insert_with(|| MissingModAdvice {
+                        display_name: cap[2].trim().to_string(),
+                        mod_id,
+                        required_version: Some(format!("{ver}+")),
+                        required_by: Vec::new(),
+                        action,
+                    });
             }
             continue;
         }
@@ -268,13 +331,16 @@ fn parse_fabric_and_forge_advice(logs: &[String]) -> (Vec<String>, Vec<MissingMo
             let ver = cap[3].trim().to_string();
             let mod_id = cap[4].trim().to_ascii_lowercase();
             if !is_java_token(&mod_id) {
-                let entry = missing.entry(mod_id.clone()).or_insert_with(|| MissingModAdvice {
-                    display_name: cap[4].trim().to_string(),
-                    mod_id,
-                    required_version: Some(ver),
-                    required_by: Vec::new(),
-                    action: CrashFixAction::UpdateMod,
-                });
+                let action = classify_fix_action(&mod_id, CrashFixAction::UpdateMod);
+                let entry = missing
+                    .entry(mod_id.clone())
+                    .or_insert_with(|| MissingModAdvice {
+                        display_name: cap[4].trim().to_string(),
+                        mod_id,
+                        required_version: Some(ver),
+                        required_by: Vec::new(),
+                        action,
+                    });
                 if !entry.required_by.contains(&req_by) {
                     entry.required_by.push(req_by);
                 }
@@ -287,13 +353,16 @@ fn parse_fabric_and_forge_advice(logs: &[String]) -> (Vec<String>, Vec<MissingMo
             let mod_id = cap[2].trim().to_ascii_lowercase();
             let range = cap[3].trim().to_string();
             if !is_java_token(&mod_id) {
-                let entry = missing.entry(mod_id.clone()).or_insert_with(|| MissingModAdvice {
-                    display_name: cap[2].trim().to_string(),
-                    mod_id,
-                    required_version: Some(range),
-                    required_by: Vec::new(),
-                    action: CrashFixAction::InstallMod,
-                });
+                let action = classify_fix_action(&mod_id, CrashFixAction::InstallMod);
+                let entry = missing
+                    .entry(mod_id.clone())
+                    .or_insert_with(|| MissingModAdvice {
+                        display_name: cap[2].trim().to_string(),
+                        mod_id,
+                        required_version: Some(range),
+                        required_by: Vec::new(),
+                        action,
+                    });
                 if !entry.required_by.contains(&req_by) {
                     entry.required_by.push(req_by);
                 }
@@ -304,14 +373,17 @@ fn parse_fabric_and_forge_advice(logs: &[String]) -> (Vec<String>, Vec<MissingMo
         if let Some(cap) = rx.pat_forge_dep.captures(trimmed) {
             let mod_id = cap[1].trim().to_ascii_lowercase();
             let req_by = cap[2].trim().to_string();
-            if mod_id != "minecraft" && mod_id != "forge" && mod_id != "neoforge" && !is_java_token(&mod_id) {
-                let entry = missing.entry(mod_id.clone()).or_insert_with(|| MissingModAdvice {
-                    display_name: cap[1].trim().to_string(),
-                    mod_id,
-                    required_version: None,
-                    required_by: Vec::new(),
-                    action: CrashFixAction::InstallMod,
-                });
+            if mod_id != "minecraft" && !is_java_token(&mod_id) {
+                let action = classify_fix_action(&mod_id, CrashFixAction::InstallMod);
+                let entry = missing
+                    .entry(mod_id.clone())
+                    .or_insert_with(|| MissingModAdvice {
+                        display_name: cap[1].trim().to_string(),
+                        mod_id,
+                        required_version: None,
+                        required_by: Vec::new(),
+                        action,
+                    });
                 if !entry.required_by.contains(&req_by) {
                     entry.required_by.push(req_by);
                 }
@@ -322,8 +394,25 @@ fn parse_fabric_and_forge_advice(logs: &[String]) -> (Vec<String>, Vec<MissingMo
     (solutions, missing.into_values().collect())
 }
 
+fn classify_fix_action(key: &str, default_action: CrashFixAction) -> CrashFixAction {
+    if is_java_token(key) {
+        CrashFixAction::UpgradeJava
+    } else if is_loader_token(key) {
+        CrashFixAction::UpgradeLoader
+    } else {
+        default_action
+    }
+}
+
 fn is_java_token(key: &str) -> bool {
     matches!(key, "java" | "openjdk" | "jdk" | "jre")
+}
+
+fn is_loader_token(key: &str) -> bool {
+    matches!(
+        key,
+        "fabricloader" | "fabric-loader" | "quilt_loader" | "quilt-loader" | "forge" | "neoforge"
+    )
 }
 
 fn extract_root_cause(logs: &[String]) -> Option<String> {
@@ -380,9 +469,16 @@ pub async fn auto_fix_mod_from_modrinth<F>(
 where
     F: Fn(DownloadProgress) + Send + Sync + 'static,
 {
-    let mapped_query = match mod_id_query {
-        "fabric" | "fabricloader" => "fabric-api",
-        other => other,
+    let lower_q = mod_id_query.trim().to_ascii_lowercase();
+    if is_loader_token(&lower_q) {
+        return Err(ThkError::InvalidInput(
+            "Đây là Mod Loader của Profile (Fabric/Quilt/Forge/NeoForge). Hãy nâng cấp phiên bản Loader trong phần Chỉnh sửa Profile."
+                .into(),
+        ));
+    }
+    let mapped_query = match lower_q.as_str() {
+        "fabric" => "fabric-api",
+        _ => mod_id_query.trim(),
     };
 
     let loader = (profile.loader != LoaderType::Vanilla).then_some(profile.loader);

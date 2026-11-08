@@ -140,6 +140,8 @@ pub struct Account {
     pub custom_cape_path: Option<PathBuf>,
     pub custom_elytra_path: Option<PathBuf>,
     pub token_expires_at: Option<i64>,
+    #[serde(default)]
+    pub oauth_client_id: Option<String>,
     pub created_at: i64,
 }
 
@@ -385,6 +387,88 @@ pub enum CloseBehavior {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+pub enum JavaRuntimeMode {
+    #[default]
+    OptimalGraalVm,
+    MojangOfficial,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MobileOrientationMode {
+    #[default]
+    FullSensor,
+    #[serde(alias = "unspecified")]
+    Auto,
+    SensorLandscape,
+    Landscape,
+    ReverseLandscape,
+    Portrait,
+}
+
+impl MobileOrientationMode {
+    pub const ALL: [MobileOrientationMode; 6] = [
+        Self::FullSensor,
+        Self::Auto,
+        Self::SensorLandscape,
+        Self::Landscape,
+        Self::ReverseLandscape,
+        Self::Portrait,
+    ];
+
+    pub fn as_bridge_str(&self) -> &'static str {
+        match self {
+            Self::FullSensor => "full_sensor",
+            Self::Auto => "unspecified",
+            Self::SensorLandscape => "sensor_landscape",
+            Self::Landscape => "landscape",
+            Self::ReverseLandscape => "reverse_landscape",
+            Self::Portrait => "portrait",
+        }
+    }
+
+    pub fn next_cycle(&self) -> Self {
+        match self {
+            Self::FullSensor => Self::Auto,
+            Self::Auto => Self::SensorLandscape,
+            Self::SensorLandscape => Self::Landscape,
+            Self::Landscape => Self::ReverseLandscape,
+            Self::ReverseLandscape => Self::Portrait,
+            Self::Portrait => Self::FullSensor,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MobileRendererMode {
+    #[default]
+    HolyGl4es,
+    MobileGlues,
+}
+
+impl MobileRendererMode {
+    pub const ALL: [MobileRendererMode; 2] = [Self::HolyGl4es, Self::MobileGlues];
+}
+
+pub const MIN_MOBILE_RENDER_SCALE_PCT: u32 = 50;
+pub const MAX_MOBILE_RENDER_SCALE_PCT: u32 = 100;
+pub const DEFAULT_MOBILE_RENDER_SCALE_PCT: u32 = 85;
+
+pub fn sanitize_mobile_render_scale_pct(pct: u32) -> u32 {
+    pct.clamp(MIN_MOBILE_RENDER_SCALE_PCT, MAX_MOBILE_RENDER_SCALE_PCT)
+}
+
+fn default_mobile_true() -> bool {
+    true
+}
+
+fn default_mobile_render_scale_pct() -> u32 {
+    DEFAULT_MOBILE_RENDER_SCALE_PCT
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum AccentPreset {
     #[default]
     Emerald,
@@ -417,7 +501,23 @@ impl AccentPreset {
     }
 }
 
+pub const MIN_FONT_SCALE: f32 = 0.50;
+pub const MAX_FONT_SCALE: f32 = 2.00;
+pub const DEFAULT_FONT_SCALE: f32 = 1.0;
+
+pub fn sanitize_font_scale(scale: f32) -> f32 {
+    if !scale.is_finite() {
+        return DEFAULT_FONT_SCALE;
+    }
+    ((scale * 1000.0).round() / 1000.0).clamp(MIN_FONT_SCALE, MAX_FONT_SCALE)
+}
+
+fn default_font_scale() -> f32 {
+    DEFAULT_FONT_SCALE
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub language: Language,
     pub theme: ThemeMode,
@@ -441,31 +541,55 @@ pub struct AppSettings {
     #[serde(default)]
     pub high_process_priority: bool,
     #[serde(default)]
+    pub low_ram_mode: bool,
+    #[serde(default)]
     pub accent_preset: AccentPreset,
+    #[serde(default)]
+    pub java_runtime_mode: JavaRuntimeMode,
+    #[serde(default = "default_font_scale")]
+    pub font_scale: f32,
+    #[serde(default)]
+    pub mobile_orientation: MobileOrientationMode,
+    #[serde(default = "default_mobile_true")]
+    pub mobile_keep_alive: bool,
+    #[serde(default = "default_mobile_true")]
+    pub mobile_floating_overlay: bool,
+    #[serde(default)]
+    pub mobile_renderer: MobileRendererMode,
+    #[serde(default = "default_mobile_render_scale_pct")]
+    pub mobile_render_scale_pct: u32,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             language: Language::Vi,
-            theme: ThemeMode::Dark,
+            theme: ThemeMode::Light,
             close_behavior: CloseBehavior::Ask,
             default_ram_mb: 4096,
             max_concurrent_downloads: 12,
             discord_rpc_enabled: true,
             sfx_enabled: true,
-            music_enabled: false,
+            music_enabled: true,
             music_volume: 0.35,
             custom_background_path: None,
             curseforge_api_key: None,
             auto_check_updates: true,
-            github_repo: "trihienkun/trihienkun-laucher".to_string(),
+            github_repo: "PhamTriHien/TriHienKun_Laucher".to_string(),
             discord_client_id: None,
             setup_completed: false,
             hide_launcher_on_launch: false,
             open_logs_on_launch: false,
             high_process_priority: false,
+            low_ram_mode: false,
             accent_preset: AccentPreset::Emerald,
+            java_runtime_mode: JavaRuntimeMode::OptimalGraalVm,
+            font_scale: DEFAULT_FONT_SCALE,
+            mobile_orientation: MobileOrientationMode::FullSensor,
+            mobile_keep_alive: true,
+            mobile_floating_overlay: true,
+            mobile_renderer: MobileRendererMode::HolyGl4es,
+            mobile_render_scale_pct: DEFAULT_MOBILE_RENDER_SCALE_PCT,
         }
     }
 }

@@ -1,6 +1,6 @@
 {
   "app.name": "TriHienKun Laucher",
-  "app.tagline": "Trình khởi chạy Minecraft hiệu năng cao viết bằng Pure Rust",
+  "app.tagline": "Trình khởi chạy Minecraft gọn nhẹ và hiệu năng cao",
   "nav.home": "Trang chủ",
   "nav.modpacks": "Kho Modpack",
   "nav.servers": "Máy chủ cục bộ",
@@ -45,7 +45,7 @@
   "server.console": "Bảng điều khiển",
   "server.files": "Quản lý Tệp",
   "server.plugins": "Plugins / Mods",
-  "server.network": "Mạng & Bore Tunnel",
+  "server.network": "Mạng & Triển khai",
   "server.properties": "Cấu hình Server",
   "account.add_ms": "Đăng nhập Microsoft (Bản quyền)",
   "account.add_offline": "Thêm tài khoản Offline",
@@ -54,7 +54,7 @@
   "account.elytra": "Cánh (Elytra)",
   "account.model_wide": "Cổ điển (Wide 4px)",
   "account.model_slim": "Thon gọn (Slim 3px)",
-  "lan.title": "Chia sẻ Mạng LAN qua Bore Tunnel",
+  "lan.title": "Chia sẻ Mạng LAN & Kết nối từ xa",
   "lan.scan_active": "Đang lắng nghe thế giới Open to LAN nội bộ...",
   "lan.start_tunnel": "Mở cổng công khai (bore.pub)",
   "lan.stop_tunnel": "Đóng cổng",
@@ -73,5 +73,6 @@
   "settings.discord_rpc": "Hiển thị trạng thái trên Discord (Rich Presence)",
   "settings.sfx": "Âm thanh hiệu ứng giao diện",
   "settings.check_update": "Kiểm tra bản cập nhật mới",
-  "common.cancel": "Huỷ"
+  "common.cancel": "Huỷ",
+  "common.delete": "Xóa"
 }

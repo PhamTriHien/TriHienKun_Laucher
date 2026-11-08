@@ -240,14 +240,14 @@ pub fn build_character_meshes(
         BackEquipmentMode::None => {}
         BackEquipmentMode::Cape => {
             let cape_wave = 0.19 + (anim_phase_rad * 0.5).sin().abs() * 0.08;
-            let cape_xf = Mat4::from_translation(Vec3::new(0.0, 24.0, -2.25))
-                * Mat4::from_rotation_x(-cape_wave)
+            let cape_xf = Mat4::from_translation(Vec3::new(0.0, 24.0, -2.30))
+                * Mat4::from_rotation_x(cape_wave)
                 * Mat4::from_rotation_y(std::f32::consts::PI);
             append_mc_cuboid(
                 &mut batch.back_vertices,
                 &mut batch.back_indices,
                 cape_xf,
-                Vec3::new(0.0, -8.0, -0.5),
+                Vec3::new(0.0, -8.0, 0.5),
                 Vec3::new(10.0, 16.0, 1.0),
                 0.0,
                 (0.0, 0.0),
@@ -259,15 +259,15 @@ pub fn build_character_meshes(
         BackEquipmentMode::Elytra => {
             let wing_flare = 0.26 + (anim_phase_rad * 0.5).sin().abs() * 0.05;
             // Left Elytra Wing (+X)
-            let left_wing_xf = Mat4::from_translation(Vec3::new(5.0, 24.0, -2.2))
-                * Mat4::from_rotation_x(-0.22)
+            let left_wing_xf = Mat4::from_translation(Vec3::new(0.5, 24.0, -2.35))
+                * Mat4::from_rotation_x(0.22)
                 * Mat4::from_rotation_z(wing_flare)
-                * Mat4::from_rotation_y(0.15 + std::f32::consts::PI);
+                * Mat4::from_rotation_y(std::f32::consts::PI + 0.12);
             append_mc_cuboid(
                 &mut batch.back_vertices,
                 &mut batch.back_indices,
                 left_wing_xf,
-                Vec3::new(5.0, -10.0, -1.0),
+                Vec3::new(-4.5, -10.0, 1.0),
                 Vec3::new(10.0, 20.0, 2.0),
                 0.0,
                 (22.0, 0.0),
@@ -277,15 +277,15 @@ pub fn build_character_meshes(
             );
 
             // Right Elytra Wing (-X, mirrored UVs)
-            let right_wing_xf = Mat4::from_translation(Vec3::new(-5.0, 24.0, -2.2))
-                * Mat4::from_rotation_x(-0.22)
+            let right_wing_xf = Mat4::from_translation(Vec3::new(-0.5, 24.0, -2.35))
+                * Mat4::from_rotation_x(0.22)
                 * Mat4::from_rotation_z(-wing_flare)
-                * Mat4::from_rotation_y(-0.15 + std::f32::consts::PI);
+                * Mat4::from_rotation_y(std::f32::consts::PI - 0.12);
             append_mc_cuboid(
                 &mut batch.back_vertices,
                 &mut batch.back_indices,
                 right_wing_xf,
-                Vec3::new(-5.0, -10.0, -1.0),
+                Vec3::new(4.5, -10.0, 1.0),
                 Vec3::new(10.0, 20.0, 2.0),
                 0.0,
                 (22.0, 0.0),
@@ -450,7 +450,9 @@ fn push_quad(
     uv_max: Vec2,
 ) {
     let base = vertices.len() as u32;
-    let world_normal = transform.transform_vector3(local_normal).normalize_or_zero();
+    let world_normal = transform
+        .transform_vector3(local_normal)
+        .normalize_or_zero();
     let uvs = [
         [uv_min.x, uv_min.y],
         [uv_max.x, uv_min.y],
@@ -471,99 +473,30 @@ fn push_quad(
     indices.extend_from_slice(&[base, base + 3, base + 2, base, base + 2, base + 1]);
 }
 
-pub fn build_stage_pedestal_meshes(anim_time: f32) -> StageMeshBatch {
+pub fn build_stage_pedestal_meshes(_anim_time: f32) -> StageMeshBatch {
     let mut batch = StageMeshBatch::default();
-    let pulse = (anim_time * 2.4).sin() * 0.5 + 0.5;
 
-    // 1. Lower octagonal obsidian base
     append_regular_prism(
         &mut batch,
         8,
-        12.4,
-        -2.5,
-        -1.05,
+        10.8,
+        -1.6,
+        -0.55,
         0.0,
-        [0.08, 0.11, 0.19, 1.0],
-        [0.05, 0.07, 0.13, 1.0],
+        [0.09, 0.11, 0.16, 1.0],
+        [0.06, 0.08, 0.12, 1.0],
     );
 
-    // 2. Upper arena dais
     append_regular_prism(
         &mut batch,
         8,
-        9.6,
-        -1.05,
-        -0.06,
+        8.4,
+        -0.55,
+        0.0,
         std::f32::consts::FRAC_PI_8,
-        [0.12, 0.17, 0.28, 1.0],
-        [0.08, 0.12, 0.21, 1.0],
+        [0.14, 0.17, 0.23, 1.0],
+        [0.10, 0.12, 0.18, 1.0],
     );
-
-    // 3. Glowing emerald energy pad right beneath character boots
-    let pad_g = 0.72 + pulse * 0.24;
-    append_regular_prism(
-        &mut batch,
-        8,
-        6.1,
-        -0.06,
-        0.0,
-        0.0,
-        [0.10, pad_g, 0.46, 1.0],
-        [0.06, 0.48, 0.31, 1.0],
-    );
-
-    // 4. Inner rotating emerald holographic segments
-    let seg_count = 8usize;
-    for i in 0..seg_count {
-        let angle =
-            (i as f32 / seg_count as f32) * std::f32::consts::TAU + anim_time * 0.85;
-        let bob = (anim_time * 2.0 + i as f32 * 0.8).sin() * 0.18;
-        let xf = Mat4::from_rotation_y(angle)
-            * Mat4::from_translation(Vec3::new(0.0, -0.18 + bob, 11.4));
-        let col = if i % 2 == 0 {
-            [0.16, 0.88, 0.56, 1.0]
-        } else {
-            [0.14, 0.72, 0.92, 1.0]
-        };
-        append_stage_cuboid(&mut batch, xf, Vec3::new(2.3, 0.28, 0.48), col);
-    }
-
-    // 5. Outer tilted amethyst/cyan orbital segments
-    let orbit_tilt = Mat4::from_translation(Vec3::new(0.0, 2.2, 0.0))
-        * Mat4::from_rotation_z(0.14)
-        * Mat4::from_rotation_x(0.11);
-    for i in 0..seg_count {
-        let angle =
-            (i as f32 / seg_count as f32) * std::f32::consts::TAU - anim_time * 0.52;
-        let xf = orbit_tilt
-            * Mat4::from_rotation_y(angle)
-            * Mat4::from_translation(Vec3::new(0.0, 0.0, 14.3));
-        let col = if i % 2 == 0 {
-            [0.58, 0.38, 0.98, 1.0]
-        } else {
-            [0.22, 0.76, 0.96, 1.0]
-        };
-        append_stage_cuboid(&mut batch, xf, Vec3::new(2.0, 0.20, 0.34), col);
-    }
-
-    // 6. Floating 3D voxel crystal motes rising gently around the character
-    for i in 0..6usize {
-        let seed = i as f32 * std::f32::consts::FRAC_PI_3;
-        let orbit_a = seed + anim_time * (0.38 + (i % 3) as f32 * 0.11);
-        let radius = 11.2 + (i % 2) as f32 * 2.6;
-        let base_y = 5.5 + i as f32 * 3.6 + (anim_time * 1.6 + seed).sin() * 1.35;
-        let pos = Vec3::new(orbit_a.cos() * radius, base_y, orbit_a.sin() * radius);
-        let spin_xf = Mat4::from_translation(pos)
-            * Mat4::from_rotation_y(anim_time * 1.7 + seed)
-            * Mat4::from_rotation_x(anim_time * 1.2 + seed * 0.5);
-        let col = match i % 3 {
-            0 => [0.20, 0.92, 0.60, 1.0],
-            1 => [0.65, 0.46, 0.99, 1.0],
-            _ => [0.22, 0.80, 0.98, 1.0],
-        };
-        let s = 0.72 + (i % 2) as f32 * 0.22;
-        append_stage_cuboid(&mut batch, spin_xf, Vec3::splat(s), col);
-    }
 
     batch
 }
@@ -599,7 +532,9 @@ fn append_regular_prism(
     for i in 0..n {
         let cur = ring_start + i as u32;
         let next = ring_start + ((i + 1) % n) as u32;
-        batch.indices.extend_from_slice(&[top_center_idx, cur, next]);
+        batch
+            .indices
+            .extend_from_slice(&[top_center_idx, cur, next]);
     }
 
     for i in 0..n {
@@ -611,87 +546,11 @@ fn append_regular_prism(
         let p0_bot = Vec3::new(a0.sin() * radius, y_bottom, a0.cos() * radius);
         let mid_a = 0.5 * (a0 + a1);
         let normal = Vec3::new(mid_a.sin(), 0.0, mid_a.cos()).normalize_or_zero();
-        push_stage_quad(
-            batch,
-            [p0_top, p1_top, p1_bot, p0_bot],
-            normal,
-            side_color,
-        );
+        push_stage_quad(batch, [p0_top, p1_top, p1_bot, p0_bot], normal, side_color);
     }
 }
 
-fn append_stage_cuboid(batch: &mut StageMeshBatch, xf: Mat4, size: Vec3, color: [f32; 4]) {
-    let h = size * 0.5;
-    let faces: [([Vec3; 4], Vec3); 6] = [
-        (
-            [
-                Vec3::new(-h.x, h.y, h.z),
-                Vec3::new(h.x, h.y, h.z),
-                Vec3::new(h.x, -h.y, h.z),
-                Vec3::new(-h.x, -h.y, h.z),
-            ],
-            Vec3::Z,
-        ),
-        (
-            [
-                Vec3::new(h.x, h.y, -h.z),
-                Vec3::new(-h.x, h.y, -h.z),
-                Vec3::new(-h.x, -h.y, -h.z),
-                Vec3::new(h.x, -h.y, -h.z),
-            ],
-            Vec3::NEG_Z,
-        ),
-        (
-            [
-                Vec3::new(-h.x, h.y, -h.z),
-                Vec3::new(-h.x, h.y, h.z),
-                Vec3::new(-h.x, -h.y, h.z),
-                Vec3::new(-h.x, -h.y, -h.z),
-            ],
-            Vec3::NEG_X,
-        ),
-        (
-            [
-                Vec3::new(h.x, h.y, h.z),
-                Vec3::new(h.x, h.y, -h.z),
-                Vec3::new(h.x, -h.y, -h.z),
-                Vec3::new(h.x, -h.y, h.z),
-            ],
-            Vec3::X,
-        ),
-        (
-            [
-                Vec3::new(-h.x, h.y, -h.z),
-                Vec3::new(h.x, h.y, -h.z),
-                Vec3::new(h.x, h.y, h.z),
-                Vec3::new(-h.x, h.y, h.z),
-            ],
-            Vec3::Y,
-        ),
-        (
-            [
-                Vec3::new(-h.x, -h.y, h.z),
-                Vec3::new(h.x, -h.y, h.z),
-                Vec3::new(h.x, -h.y, -h.z),
-                Vec3::new(-h.x, -h.y, -h.z),
-            ],
-            Vec3::NEG_Y,
-        ),
-    ];
-
-    for (corners, local_n) in faces {
-        let world_corners = corners.map(|c| xf.transform_point3(c));
-        let world_n = xf.transform_vector3(local_n).normalize_or_zero();
-        push_stage_quad(batch, world_corners, world_n, color);
-    }
-}
-
-fn push_stage_quad(
-    batch: &mut StageMeshBatch,
-    corners: [Vec3; 4],
-    normal: Vec3,
-    color: [f32; 4],
-) {
+fn push_stage_quad(batch: &mut StageMeshBatch, corners: [Vec3; 4], normal: Vec3, color: [f32; 4]) {
     let base = batch.vertices.len() as u32;
     for p in corners {
         batch.vertices.push(StageVertex {

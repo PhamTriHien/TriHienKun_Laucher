@@ -94,6 +94,7 @@ impl Database {
                 custom_cape_path    TEXT,
                 custom_elytra_path  TEXT,
                 token_expires_at    INTEGER,
+                oauth_client_id     TEXT,
                 created_at          INTEGER NOT NULL
             );
 
@@ -134,12 +135,31 @@ impl Database {
                 enabled         INTEGER NOT NULL DEFAULT 1,
                 installed_at    INTEGER NOT NULL,
                 PRIMARY KEY (profile_id, content_kind, file_name)
-            );",
+            );
+
+            CREATE TRIGGER IF NOT EXISTS trg_profiles_delete_installed_content
+            AFTER DELETE ON profiles
+            BEGIN
+                DELETE FROM installed_content WHERE profile_id = OLD.id;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_servers_delete_installed_content
+            AFTER DELETE ON servers
+            BEGIN
+                DELETE FROM installed_content
+                WHERE profile_id = OLD.id OR profile_id = ('server:' || OLD.id);
+            END;",
         )?;
         ensure_column(&conn, "profiles", "window_width", "INTEGER")?;
         ensure_column(&conn, "profiles", "window_height", "INTEGER")?;
-        ensure_column(&conn, "profiles", "fullscreen", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(
+            &conn,
+            "profiles",
+            "fullscreen",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         ensure_column(&conn, "accounts", "cape_url", "TEXT")?;
+        ensure_column(&conn, "accounts", "oauth_client_id", "TEXT")?;
         Ok(())
     }
 
@@ -153,7 +173,20 @@ impl Database {
             )
             .optional()?;
         match raw {
-            Some(json) => Ok(serde_json::from_str(&json).unwrap_or_default()),
+            Some(json) => {
+                let mut settings: AppSettings = serde_json::from_str(&json)?;
+                if settings
+                    .github_repo
+                    .eq_ignore_ascii_case("trihienkun/trihienkun-laucher")
+                {
+                    settings.github_repo = AppSettings::default().github_repo;
+                    conn.execute(
+                        "UPDATE kv_state SET value = ?1 WHERE key = 'app_settings'",
+                        params![serde_json::to_string(&settings)?],
+                    )?;
+                }
+                Ok(settings)
+            }
             None => Ok(AppSettings::default()),
         }
     }
@@ -172,9 +205,11 @@ impl Database {
     pub fn get_kv(&self, key: &str) -> ThkResult<Option<String>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Ok(conn
-            .query_row("SELECT value FROM kv_state WHERE key = ?1", params![key], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT value FROM kv_state WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
             .optional()?)
     }
 
@@ -226,68 +261,47 @@ impl Database {
 
     pub fn upsert_profile(&self, p: &GameProfile) -> ThkResult<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
-            "INSERT INTO profiles (
-                id, name, game_version, loader, loader_version, instance_path,
-                is_custom_path, ram_mb, java_path, jvm_args, auto_perf_mods, icon_url,
-                window_width, window_height, fullscreen,
-                total_play_seconds, session_count, crash_count, last_played_at, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
-             ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                game_version = excluded.game_version,
-                loader = excluded.loader,
-                loader_version = excluded.loader_version,
-                instance_path = excluded.instance_path,
-                is_custom_path = excluded.is_custom_path,
-                ram_mb = excluded.ram_mb,
-                java_path = excluded.java_path,
-                jvm_args = excluded.jvm_args,
-                auto_perf_mods = excluded.auto_perf_mods,
-                icon_url = excluded.icon_url,
-                window_width = excluded.window_width,
-                window_height = excluded.window_height,
-                fullscreen = excluded.fullscreen",
-            params![
-                p.id,
-                p.name,
-                p.game_version,
-                p.loader.as_str(),
-                p.loader_version,
-                p.instance_path.to_string_lossy().as_ref(),
-                p.is_custom_path as i32,
-                p.ram_mb,
-                p.java_path.as_ref().map(|j| j.to_string_lossy().to_string()),
-                p.jvm_args,
-                p.auto_perf_mods as i32,
-                p.icon_url,
-                p.window_width,
-                p.window_height,
-                p.fullscreen as i32,
-                p.total_play_seconds as i64,
-                p.session_count,
-                p.crash_count,
-                p.last_played_at,
-                p.created_at,
-            ],
-        )?;
+        upsert_profile_on_conn(&conn, p)
+    }
+
+    pub fn upsert_profile_with_installed_content(
+        &self,
+        p: &GameProfile,
+        records: &[InstalledContentRecord],
+    ) -> ThkResult<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        upsert_profile_on_conn(&tx, p)?;
+        commit_installed_content_on_tx(&tx, records)?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn delete_profile(&self, id: &str) -> ThkResult<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute("DELETE FROM installed_content WHERE profile_id = ?1", params![id])?;
-        conn.execute("DELETE FROM profiles WHERE id = ?1", params![id])?;
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM installed_content WHERE profile_id = ?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM profiles WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
-    pub fn record_play_session(&self, profile_id: &str, duration_secs: u64, crashed: bool) -> ThkResult<()> {
+    pub fn record_play_session(
+        &self,
+        profile_id: &str,
+        duration_secs: u64,
+        crashed: bool,
+    ) -> ThkResult<()> {
         let now = Utc::now();
         let ts = now.timestamp();
         let day = now.format("%Y-%m-%d").to_string();
         let crash_inc = if crashed { 1 } else { 0 };
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        tx.execute(
             "UPDATE profiles
              SET total_play_seconds = total_play_seconds + ?2,
                  session_count = session_count + 1,
@@ -296,17 +310,22 @@ impl Database {
              WHERE id = ?1",
             params![profile_id, duration_secs as i64, crash_inc, ts],
         )?;
-        conn.execute(
+        tx.execute(
             "INSERT INTO daily_play_stats (profile_id, day_yyyy_mm_dd, seconds_played)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(profile_id, day_yyyy_mm_dd) DO UPDATE SET
                 seconds_played = seconds_played + excluded.seconds_played",
             params![profile_id, day, duration_secs as i64],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
-    pub fn get_daily_play_stats(&self, profile_id: &str, limit_days: u32) -> ThkResult<Vec<DailyPlayStat>> {
+    pub fn get_daily_play_stats(
+        &self,
+        profile_id: &str,
+        limit_days: u32,
+    ) -> ThkResult<Vec<DailyPlayStat>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT day_yyyy_mm_dd, seconds_played
@@ -332,7 +351,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, username, uuid, account_type, skin_variant, skin_url, cape_url,
                     custom_skin_path, custom_cape_path, custom_elytra_path,
-                    token_expires_at, created_at
+                    token_expires_at, oauth_client_id, created_at
              FROM accounts
              ORDER BY created_at ASC",
         )?;
@@ -346,7 +365,7 @@ impl Database {
             .query_row(
                 "SELECT id, username, uuid, account_type, skin_variant, skin_url, cape_url,
                         custom_skin_path, custom_cape_path, custom_elytra_path,
-                        token_expires_at, created_at
+                        token_expires_at, oauth_client_id, created_at
                  FROM accounts WHERE id = ?1",
                 params![id],
                 map_account_row,
@@ -360,8 +379,8 @@ impl Database {
             "INSERT INTO accounts (
                 id, username, uuid, account_type, skin_variant, skin_url, cape_url,
                 custom_skin_path, custom_cape_path, custom_elytra_path,
-                token_expires_at, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                token_expires_at, oauth_client_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 username = excluded.username,
                 uuid = excluded.uuid,
@@ -372,7 +391,8 @@ impl Database {
                 custom_skin_path = excluded.custom_skin_path,
                 custom_cape_path = excluded.custom_cape_path,
                 custom_elytra_path = excluded.custom_elytra_path,
-                token_expires_at = excluded.token_expires_at",
+                token_expires_at = excluded.token_expires_at,
+                oauth_client_id = excluded.oauth_client_id",
             params![
                 a.id,
                 a.username,
@@ -381,10 +401,17 @@ impl Database {
                 a.skin_variant.as_str(),
                 a.skin_url,
                 a.cape_url,
-                a.custom_skin_path.as_ref().map(|p| p.to_string_lossy().to_string()),
-                a.custom_cape_path.as_ref().map(|p| p.to_string_lossy().to_string()),
-                a.custom_elytra_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                a.custom_skin_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                a.custom_cape_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                a.custom_elytra_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
                 a.token_expires_at,
+                a.oauth_client_id,
                 a.created_at,
             ],
         )?;
@@ -450,7 +477,9 @@ impl Database {
                 s.port as i64,
                 s.ram_min_mb,
                 s.ram_max_mb,
-                s.java_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                s.java_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
                 s.jvm_flags,
                 s.jar_file,
                 s.created_at,
@@ -460,8 +489,15 @@ impl Database {
     }
 
     pub fn delete_server(&self, id: &str) -> ThkResult<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute("DELETE FROM servers WHERE id = ?1", params![id])?;
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        let scoped = format!("server:{id}");
+        tx.execute(
+            "DELETE FROM installed_content WHERE profile_id = ?1 OR profile_id = ?2",
+            params![id, scoped],
+        )?;
+        tx.execute("DELETE FROM servers WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -535,36 +571,14 @@ impl Database {
 
     pub fn upsert_installed_content(&self, rec: &InstalledContentRecord) -> ThkResult<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
-            "INSERT INTO installed_content (
-                profile_id, content_kind, file_name, sha1, provider, project_id,
-                version_id, title, version_number, icon_url, enabled, installed_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-             ON CONFLICT(profile_id, content_kind, file_name) DO UPDATE SET
-                sha1 = excluded.sha1,
-                provider = excluded.provider,
-                project_id = excluded.project_id,
-                version_id = excluded.version_id,
-                title = excluded.title,
-                version_number = excluded.version_number,
-                icon_url = excluded.icon_url,
-                enabled = excluded.enabled,
-                installed_at = excluded.installed_at",
-            params![
-                rec.profile_id,
-                rec.content_kind.as_str(),
-                rec.file_name,
-                rec.sha1,
-                rec.provider.as_str(),
-                rec.project_id,
-                rec.version_id,
-                rec.title,
-                rec.version_number,
-                rec.icon_url,
-                rec.enabled as i32,
-                rec.installed_at,
-            ],
-        )?;
+        upsert_content_record(&conn, rec)
+    }
+
+    pub fn commit_installed_content(&self, records: &[InstalledContentRecord]) -> ThkResult<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        commit_installed_content_on_tx(&tx, records)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -577,7 +591,8 @@ impl Database {
     ) -> ThkResult<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
-            "UPDATE installed_content SET enabled = ?4 WHERE profile_id = ?1 AND content_kind = ?2 AND file_name = ?3",
+            "UPDATE installed_content SET enabled = ?4
+             WHERE profile_id = ?1 AND content_kind = ?2 AND file_name = ?3 COLLATE NOCASE",
             params![profile_id, kind.as_str(), file_name, enabled as i32],
         )?;
         Ok(())
@@ -591,7 +606,8 @@ impl Database {
     ) -> ThkResult<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
-            "DELETE FROM installed_content WHERE profile_id = ?1 AND content_kind = ?2 AND file_name = ?3",
+            "DELETE FROM installed_content
+             WHERE profile_id = ?1 AND content_kind = ?2 AND file_name = ?3 COLLATE NOCASE",
             params![profile_id, kind.as_str(), file_name],
         )?;
         Ok(())
@@ -616,6 +632,131 @@ impl Database {
         )?;
         Ok(rows)
     }
+}
+
+fn upsert_profile_on_conn(conn: &Connection, p: &GameProfile) -> ThkResult<()> {
+    conn.execute(
+        "INSERT INTO profiles (
+            id, name, game_version, loader, loader_version, instance_path,
+            is_custom_path, ram_mb, java_path, jvm_args, auto_perf_mods, icon_url,
+            window_width, window_height, fullscreen,
+            total_play_seconds, session_count, crash_count, last_played_at, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            game_version = excluded.game_version,
+            loader = excluded.loader,
+            loader_version = excluded.loader_version,
+            instance_path = excluded.instance_path,
+            is_custom_path = excluded.is_custom_path,
+            ram_mb = excluded.ram_mb,
+            java_path = excluded.java_path,
+            jvm_args = excluded.jvm_args,
+            auto_perf_mods = excluded.auto_perf_mods,
+            icon_url = excluded.icon_url,
+            window_width = excluded.window_width,
+            window_height = excluded.window_height,
+            fullscreen = excluded.fullscreen",
+        params![
+            p.id,
+            p.name,
+            p.game_version,
+            p.loader.as_str(),
+            p.loader_version,
+            p.instance_path.to_string_lossy().as_ref(),
+            p.is_custom_path as i32,
+            p.ram_mb,
+            p.java_path.as_ref().map(|j| j.to_string_lossy().to_string()),
+            p.jvm_args,
+            p.auto_perf_mods as i32,
+            p.icon_url,
+            p.window_width,
+            p.window_height,
+            p.fullscreen as i32,
+            p.total_play_seconds as i64,
+            p.session_count,
+            p.crash_count,
+            p.last_played_at,
+            p.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn commit_installed_content_on_tx(
+    tx: &Connection,
+    records: &[InstalledContentRecord],
+) -> ThkResult<()> {
+    for rec in records {
+        let conflicting_owner: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM installed_content
+             WHERE profile_id = ?1 AND content_kind = ?2 AND file_name = ?3 COLLATE NOCASE
+             AND (provider != ?4 OR project_id != ?5))",
+            params![
+                rec.profile_id,
+                rec.content_kind.as_str(),
+                rec.file_name,
+                rec.provider.as_str(),
+                rec.project_id
+            ],
+            |row| row.get(0),
+        )?;
+        if conflicting_owner {
+            return Err(crate::ThkError::InvalidInput(format!(
+                "Filename belongs to another installed project: {}",
+                rec.file_name
+            )));
+        }
+        tx.execute(
+            "DELETE FROM installed_content WHERE profile_id = ?1 AND content_kind = ?2
+             AND provider = ?3 AND project_id = ?4 AND file_name != ?5",
+            params![
+                rec.profile_id,
+                rec.content_kind.as_str(),
+                rec.provider.as_str(),
+                rec.project_id,
+                rec.file_name
+            ],
+        )?;
+        upsert_content_record(tx, rec)?;
+    }
+    Ok(())
+}
+
+fn upsert_content_record(conn: &Connection, rec: &InstalledContentRecord) -> ThkResult<()> {
+    conn.execute(
+        "DELETE FROM installed_content
+         WHERE profile_id = ?1 AND content_kind = ?2
+           AND file_name = ?3 COLLATE NOCASE AND file_name != ?3",
+        params![rec.profile_id, rec.content_kind.as_str(), rec.file_name],
+    )?;
+    conn.execute(
+        "INSERT INTO installed_content (
+            profile_id, content_kind, file_name, sha1, provider, project_id,
+            version_id, title, version_number, icon_url, enabled, installed_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT(profile_id, content_kind, file_name) DO UPDATE SET
+            sha1 = excluded.sha1, provider = excluded.provider,
+            project_id = excluded.project_id, version_id = excluded.version_id,
+            title = excluded.title, version_number = excluded.version_number,
+            icon_url = excluded.icon_url, enabled = excluded.enabled,
+            installed_at = excluded.installed_at",
+        params![
+            rec.profile_id,
+            rec.content_kind.as_str(),
+            rec.file_name,
+            rec.sha1,
+            rec.provider.as_str(),
+            rec.project_id,
+            rec.version_id,
+            rec.title,
+            rec.version_number,
+            rec.icon_url,
+            rec.enabled as i32,
+            rec.installed_at
+        ],
+    )?;
+    Ok(())
 }
 
 fn ensure_column(
@@ -692,7 +833,8 @@ fn map_account_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
         custom_cape_path: cape_p.map(PathBuf::from),
         custom_elytra_path: elytra_p.map(PathBuf::from),
         token_expires_at: r.get(10)?,
-        created_at: r.get(11)?,
+        oauth_client_id: r.get(11)?,
+        created_at: r.get(12)?,
     })
 }
 

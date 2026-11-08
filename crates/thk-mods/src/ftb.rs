@@ -1,13 +1,24 @@
-use crate::curseforge::resolve_curseforge_file_download;
+use crate::curseforge::{
+    build_curseforge_cdn_fallback_url, cf_get_json, resolve_curseforge_file_download, CfEnvelope,
+    CfFile,
+};
+use crate::matcher::split_filename_title_and_version;
 use crate::provider::{
     GalleryImage, ImportedPackMetadata, ProjectDetail, ProjectSummary, ProjectVersion, SearchPage,
     SearchQuery, VersionFile,
 };
-use chrono::DateTime;
+use crate::server_pack::{
+    is_cf_file_client_only, is_mrpack_entry_server_compatible, loader_to_server_engine,
+    prune_client_only_server_files, ServerModpackOutcome,
+};
+use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt};
 use serde::Deserialize;
-use std::path::Path;
-use thk_core::models::{ContentKind, DownloadProgress, LoaderType, ProviderSource};
+use std::path::{Path, PathBuf};
+use thk_core::hash::sha1_file;
+use thk_core::models::{
+    ContentKind, DownloadProgress, InstalledContentRecord, LoaderType, ProviderSource,
+};
 use thk_core::paths::SafePath;
 use thk_core::{DownloadManager, DownloadTask, ThkError, ThkResult};
 use tokio_util::sync::CancellationToken;
@@ -107,6 +118,10 @@ struct FtbFileEntry {
     size: u64,
     #[serde(default)]
     serveronly: bool,
+    #[serde(default)]
+    clientonly: bool,
+    #[serde(default)]
+    optional: bool,
     curseforge: Option<FtbCurseForgeRef>,
 }
 
@@ -222,7 +237,8 @@ pub async fn get_ftb_project(
         for t in &v.targets {
             if t.target_type == "game" && !t.version.is_empty() && !gvs.contains(&t.version) {
                 gvs.push(t.version.clone());
-            } else if t.target_type == "modloader" && !t.name.is_empty() && !ldrs.contains(&t.name) {
+            } else if t.target_type == "modloader" && !t.name.is_empty() && !ldrs.contains(&t.name)
+            {
                 ldrs.push(t.name.clone());
             }
         }
@@ -309,6 +325,7 @@ pub async fn get_ftb_versions(
                     primary: true,
                 }],
                 dependencies: Vec::new(),
+                server_pack_file_id: None,
             }
         })
         .collect();
@@ -346,9 +363,15 @@ where
         .find(|t| t.target_type == "game")
         .map(|t| t.version.clone())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| ThkError::InvalidInput("FTB version manifest missing Minecraft version target".into()))?;
+        .ok_or_else(|| {
+            ThkError::InvalidInput("FTB version manifest missing Minecraft version target".into())
+        })?;
 
-    let (loader, loader_version) = match manifest.targets.iter().find(|t| t.target_type == "modloader") {
+    let (loader, loader_version) = match manifest
+        .targets
+        .iter()
+        .find(|t| t.target_type == "modloader")
+    {
         Some(t) => (
             LoaderType::from_str_lossy(&t.name),
             (!t.version.is_empty()).then(|| t.version.clone()),
@@ -357,6 +380,9 @@ where
     };
 
     let mut tasks = Vec::new();
+    let mut tracked_files: Vec<(PathBuf, InstalledContentRecord)> = Vec::new();
+    let now = Utc::now().timestamp();
+
     for entry in manifest.files {
         if entry.serveronly {
             continue;
@@ -381,16 +407,64 @@ where
         };
         let dest = SafePath::resolve_child(instance_dir, &rel_full)?;
 
+        let cf_ids = entry.curseforge.as_ref().map(|cf| (cf.project, cf.file));
         let (primary_url, expected_sha1) = if !entry.url.is_empty() {
             (entry.url, entry.sha1)
         } else if let Some(cf) = entry.curseforge {
-            match resolve_curseforge_file_download(downloader, cf.project, cf.file, cf_api_key).await {
+            match resolve_curseforge_file_download(downloader, cf.project, cf.file, cf_api_key)
+                .await
+            {
                 Ok((u, _, s)) => (u, entry.sha1.or(s)),
-                Err(_) => continue,
+                Err(ThkError::Cancelled) => return Err(ThkError::Cancelled),
+                Err(err) => {
+                    if entry.optional {
+                        continue;
+                    }
+                    return Err(ThkError::Provider(format!(
+                        "Failed resolving required FTB CurseForge file '{clean_fname}' (project {}, file {}): {err}",
+                        cf.project, cf.file
+                    )));
+                }
             }
         } else {
-            continue;
+            if entry.optional {
+                continue;
+            }
+            return Err(ThkError::Provider(format!(
+                "Required FTB file '{clean_fname}' is missing both URL and CurseForge coordinates"
+            )));
         };
+
+        let content_kind = match clean_rel_dir.to_ascii_lowercase().as_str() {
+            "mods" => Some(ContentKind::Mod),
+            "shaderpacks" => Some(ContentKind::Shader),
+            "resourcepacks" => Some(ContentKind::ResourcePack),
+            _ => None,
+        };
+        if let Some(kind) = content_kind {
+            let (title, version_number) = split_filename_title_and_version(clean_fname);
+            let (provider, project_id, version_id) = match cf_ids {
+                Some((pid, fid)) => (ProviderSource::CurseForge, pid.to_string(), fid.to_string()),
+                None => (ProviderSource::Ftb, String::new(), String::new()),
+            };
+            tracked_files.push((
+                dest.clone(),
+                InstalledContentRecord {
+                    profile_id: String::new(),
+                    content_kind: kind,
+                    file_name: clean_fname.to_string(),
+                    sha1: expected_sha1.clone().unwrap_or_default(),
+                    provider,
+                    project_id,
+                    version_id,
+                    title,
+                    version_number,
+                    icon_url: None,
+                    enabled: true,
+                    installed_at: now,
+                },
+            ));
+        }
 
         let mut task = DownloadTask::new(primary_url, dest);
         task.fallback_urls = entry.mirrors;
@@ -417,12 +491,253 @@ where
         )
         .await?;
 
+    let installed_content = tokio::task::spawn_blocking(move || -> Vec<InstalledContentRecord> {
+        tracked_files
+            .into_iter()
+            .map(|(path, mut rec)| {
+                if rec.sha1.is_empty() {
+                    rec.sha1 = sha1_file(&path).unwrap_or_default();
+                }
+                rec
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| ThkError::Process(format!("FTB hash worker failed: {e}")))?;
+
     Ok(ImportedPackMetadata {
         name: full_name,
         game_version,
         loader,
         loader_version,
         icon_url,
+        recommended_ram_mb: manifest.specs.and_then(|s| s.recommended),
+        installed_content,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn populate_server_from_ftb_version<F>(
+    downloader: &DownloadManager,
+    pack_id: &str,
+    version_id: &str,
+    pack_title: &str,
+    server_dir: &Path,
+    cf_api_key: Option<&str>,
+    max_concurrent: usize,
+    cancel: Option<CancellationToken>,
+    on_progress: F,
+) -> ThkResult<ServerModpackOutcome>
+where
+    F: Fn(DownloadProgress) + Send + Sync + Clone + 'static,
+{
+    populate_server_from_ftb_version_with_url(
+        downloader,
+        pack_id,
+        version_id,
+        pack_title,
+        None,
+        server_dir,
+        cf_api_key,
+        max_concurrent,
+        cancel,
+        on_progress,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn populate_server_from_ftb_version_with_url<F>(
+    downloader: &DownloadManager,
+    pack_id: &str,
+    version_id: &str,
+    pack_title: &str,
+    manifest_url_override: Option<&str>,
+    server_dir: &Path,
+    cf_api_key: Option<&str>,
+    max_concurrent: usize,
+    cancel: Option<CancellationToken>,
+    on_progress: F,
+) -> ThkResult<ServerModpackOutcome>
+where
+    F: Fn(DownloadProgress) + Send + Sync + Clone + 'static,
+{
+    if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+        return Err(ThkError::Cancelled);
+    }
+
+    let manifest_url = manifest_url_override
+        .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "{FTB_API_BASE}/modpack/{}/{}",
+                urlencoding::encode(pack_id),
+                urlencoding::encode(version_id)
+            )
+        });
+
+    let manifest: FtbVersionManifest = tokio::select! {
+        biased;
+        _ = async {
+            match cancel.as_ref() {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        } => return Err(ThkError::Cancelled),
+        res = downloader.get_json(&manifest_url) => res?,
+    };
+
+    let game_version = manifest
+        .targets
+        .iter()
+        .find(|t| t.target_type == "game")
+        .map(|t| t.version.clone())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ThkError::InvalidInput("FTB version manifest missing Minecraft version target".into())
+        })?;
+
+    let loader = manifest
+        .targets
+        .iter()
+        .find(|t| t.target_type == "modloader")
+        .map(|t| LoaderType::from_str_lossy(&t.name))
+        .unwrap_or(LoaderType::Forge);
+    let engine = loader_to_server_engine(loader)?;
+
+    tokio::fs::create_dir_all(server_dir).await?;
+
+    let mut tasks = Vec::new();
+    let mut skipped_client = 0usize;
+
+    for entry in manifest.files {
+        if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            return Err(ThkError::Cancelled);
+        }
+
+        let clean_rel_dir = entry
+            .path
+            .trim_start_matches("./")
+            .trim_start_matches(".\\")
+            .trim_matches('/')
+            .trim_matches('\\');
+        let clean_fname = SafePath::validate_single_name(&entry.name)?;
+        let rel_full = if clean_rel_dir.is_empty() {
+            clean_fname.to_string()
+        } else {
+            format!("{clean_rel_dir}/{clean_fname}")
+        };
+
+        if entry.clientonly || !is_mrpack_entry_server_compatible(None, &rel_full) {
+            skipped_client += 1;
+            continue;
+        }
+
+        let dest = SafePath::resolve_child(server_dir, &rel_full)?;
+        let (primary_url, expected_sha1) = if !entry.url.is_empty() {
+            (entry.url, entry.sha1)
+        } else if let Some(cf) = entry.curseforge {
+            let endpoint = format!("/mods/{}/files/{}", cf.project, cf.file);
+            let meta_res: ThkResult<CfEnvelope<CfFile>> = tokio::select! {
+                biased;
+                _ = async {
+                    match cancel.as_ref() {
+                        Some(token) => token.cancelled().await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => return Err(ThkError::Cancelled),
+                res = cf_get_json(downloader, &endpoint, cf_api_key) => res,
+            };
+            match meta_res {
+                Ok(env) => {
+                    if is_cf_file_client_only(&env.data.game_versions) {
+                        skipped_client += 1;
+                        continue;
+                    }
+                    let sha1 = env
+                        .data
+                        .hashes
+                        .iter()
+                        .find(|h| h.algo == 1)
+                        .map(|h| h.value.clone());
+                    let url = env.data.download_url.unwrap_or_else(|| {
+                        build_curseforge_cdn_fallback_url(env.data.id, &env.data.file_name)
+                    });
+                    (url, entry.sha1.or(sha1))
+                }
+                Err(_) => {
+                    let dl_res = tokio::select! {
+                        biased;
+                        _ = async {
+                            match cancel.as_ref() {
+                                Some(token) => token.cancelled().await,
+                                None => std::future::pending::<()>().await,
+                            }
+                        } => return Err(ThkError::Cancelled),
+                        res = resolve_curseforge_file_download(downloader, cf.project, cf.file, cf_api_key) => res,
+                    };
+                    match dl_res {
+                        Ok((u, _, s)) => (u, entry.sha1.or(s)),
+                        Err(ThkError::Cancelled) => return Err(ThkError::Cancelled),
+                        Err(err) => {
+                            if entry.optional {
+                                continue;
+                            }
+                            return Err(ThkError::Provider(format!(
+                                "Failed resolving required FTB CurseForge file '{clean_fname}' (project {}, file {}): {err}",
+                                cf.project, cf.file
+                            )));
+                        }
+                    }
+                }
+            }
+        } else {
+            if entry.optional {
+                continue;
+            }
+            return Err(ThkError::Provider(format!(
+                "Required FTB file '{clean_fname}' is missing both URL and CurseForge coordinates"
+            )));
+        };
+
+        let mut task = DownloadTask::new(primary_url, dest);
+        task.fallback_urls = entry.mirrors;
+        task.expected_sha1 = expected_sha1;
+        if entry.size > 0 {
+            task.expected_size = Some(entry.size);
+        }
+        task.label = clean_fname.to_string();
+        tasks.push(task);
+    }
+
+    let full_name = match manifest.name {
+        Some(vname) if !vname.is_empty() => format!("{pack_title} ({vname})"),
+        _ => pack_title.to_string(),
+    };
+    let downloaded_count = tasks.len();
+
+    downloader
+        .download_batch(
+            &format!("Downloading server files for {full_name}"),
+            tasks,
+            max_concurrent.clamp(1, 16),
+            cancel,
+            on_progress,
+        )
+        .await?;
+
+    let dest_owned = server_dir.to_path_buf();
+    let pruned = tokio::task::spawn_blocking(move || prune_client_only_server_files(&dest_owned))
+        .await
+        .map_err(|e| ThkError::Process(format!("FTB server prune worker failed: {e}")))??;
+
+    Ok(ServerModpackOutcome {
+        name: full_name,
+        game_version,
+        engine,
+        installed_files: downloaded_count.saturating_sub(pruned),
+        skipped_client_files: skipped_client + pruned,
         recommended_ram_mb: manifest.specs.and_then(|s| s.recommended),
     })
 }

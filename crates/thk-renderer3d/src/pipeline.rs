@@ -1,7 +1,10 @@
 use crate::geometry::{
     build_character_meshes, build_stage_pedestal_meshes, BackEquipmentMode, SkinVertex, StageVertex,
 };
-use crate::skin_image::{generate_default_brand_cape, generate_default_steve_skin};
+use crate::skin_image::{
+    generate_default_brand_cape, generate_default_steve_skin,
+    generate_default_steve_skin_for_variant,
+};
 use bytemuck::{Pod, Zeroable};
 use core::num::NonZeroU64;
 use egui_wgpu::wgpu::util::DeviceExt;
@@ -14,7 +17,31 @@ use thk_core::models::SkinVariant;
 
 const MSAA_SAMPLES: u32 = 4;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+#[cfg(not(target_os = "android"))]
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+#[cfg(target_os = "android")]
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+
+fn select_offscreen_sample_count(adapter: &wgpu::Adapter) -> u32 {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = adapter;
+        MSAA_SAMPLES
+    }
+    #[cfg(target_os = "android")]
+    {
+        let color_flags = adapter.get_texture_format_features(COLOR_FORMAT).flags;
+        let depth_flags = adapter.get_texture_format_features(DEPTH_FORMAT).flags;
+        if color_flags.sample_count_supported(MSAA_SAMPLES)
+            && color_flags.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE)
+            && depth_flags.sample_count_supported(MSAA_SAMPLES)
+        {
+            MSAA_SAMPLES
+        } else {
+            1
+        }
+    }
+}
 const MAX_VERTICES: usize = 2048;
 const MAX_INDICES: usize = 3072;
 const MAX_STAGE_VERTICES: usize = 2048;
@@ -58,6 +85,13 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+fn gamma_from_linear_rgb(rgb: vec3<f32>) -> vec3<f32> {
+    let cutoff = rgb < vec3<f32>(0.0031308);
+    let lower = rgb * vec3<f32>(12.92);
+    let higher = vec3<f32>(1.055) * pow(rgb, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(higher, lower, cutoff);
+}
+
 fn shade_sample(sample: vec4<f32>, normal_in: vec3<f32>, world_pos: vec3<f32>) -> vec4<f32> {
     let n = normalize(normal_in);
     let key_dir = normalize(scene.light_dir.xyz);
@@ -68,9 +102,10 @@ fn shade_sample(sample: vec4<f32>, normal_in: vec3<f32>, world_pos: vec3<f32>) -
     let hemi = n.y * 0.09 + 0.52;
     let rim = pow(clamp(1.0 - max(dot(n, view_dir), 0.0), 0.0, 1.0), 3.1);
     let intensity = clamp(hemi + key * 0.42 + fill * 0.16, 0.36, 1.12);
-    let rim_tint = mix(vec3<f32>(0.13, 0.86, 0.56), vec3<f32>(0.56, 0.38, 0.96), clamp((world_pos.x + 8.0) / 16.0, 0.0, 1.0));
-    let rgb = clamp(sample.rgb * intensity + rim_tint * (rim * 0.22), vec3<f32>(0.0), vec3<f32>(1.0));
-    return vec4<f32>(rgb * sample.a, sample.a);
+    let rim_tint = vec3<f32>(0.86, 0.90, 0.96);
+    let rgb = clamp(sample.rgb * intensity + rim_tint * (rim * 0.08), vec3<f32>(0.0), vec3<f32>(1.0));
+    let srgb = gamma_from_linear_rgb(rgb);
+    return vec4<f32>(srgb * sample.a, sample.a);
 }
 
 @fragment
@@ -153,8 +188,8 @@ struct SceneUniforms {
 struct OffscreenTarget {
     width: u32,
     height: u32,
-    _msaa_color: wgpu::Texture,
-    msaa_view: wgpu::TextureView,
+    _msaa_color: Option<wgpu::Texture>,
+    msaa_view: Option<wgpu::TextureView>,
     _resolved_color: wgpu::Texture,
     resolved_view: wgpu::TextureView,
     _depth_tex: wgpu::Texture,
@@ -175,8 +210,12 @@ pub struct SkinPreviewViewport {
     pub animate_walk: bool,
     pub auto_rotate: bool,
     pub show_stage: bool,
+    pub low_power: bool,
     anim_phase: f32,
     stage_time: f32,
+    dirty: bool,
+    last_state: Option<(SkinVariant, BackEquipmentMode, bool, bool)>,
+    sample_count: u32,
 
     cutout_pipeline: wgpu::RenderPipeline,
     translucent_pipeline: wgpu::RenderPipeline,
@@ -260,12 +299,14 @@ impl SkinPreviewViewport {
                 immediate_size: 0,
             });
 
+        let sample_count = select_offscreen_sample_count(&render_state.adapter);
         let cutout_pipeline = create_skin_pipeline(
             device,
             &pipeline_layout,
             &shader,
             "fs_cutout",
             true,
+            sample_count,
         );
         let translucent_pipeline = create_skin_pipeline(
             device,
@@ -273,8 +314,10 @@ impl SkinPreviewViewport {
             &shader,
             "fs_translucent",
             false,
+            sample_count,
         );
-        let stage_pipeline = create_stage_pipeline(device, &stage_pipeline_layout, &stage_shader);
+        let stage_pipeline =
+            create_stage_pipeline(device, &stage_pipeline_layout, &stage_shader, sample_count);
 
         let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("thk_skin3d_nearest_sampler"),
@@ -307,8 +350,7 @@ impl SkinPreviewViewport {
 
         let vbuf_bytes = (MAX_VERTICES * core::mem::size_of::<SkinVertex>()) as u64;
         let ibuf_bytes = (MAX_INDICES * core::mem::size_of::<u32>()) as u64;
-        let stage_vbuf_bytes =
-            (MAX_STAGE_VERTICES * core::mem::size_of::<StageVertex>()) as u64;
+        let stage_vbuf_bytes = (MAX_STAGE_VERTICES * core::mem::size_of::<StageVertex>()) as u64;
         let stage_ibuf_bytes = (MAX_STAGE_INDICES * core::mem::size_of::<u32>()) as u64;
 
         let skin_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -375,13 +417,17 @@ impl SkinPreviewViewport {
             target_pitch: 0.16,
             target_distance: 50.0,
             variant: SkinVariant::Wide,
-            back_mode: BackEquipmentMode::Cape,
+            back_mode: BackEquipmentMode::None,
             show_outer_layer: true,
             animate_walk: true,
             auto_rotate: false,
-            show_stage: true,
+            show_stage: false,
+            low_power: false,
             anim_phase: 0.0,
             stage_time: 0.0,
+            dirty: true,
+            last_state: None,
+            sample_count,
             cutout_pipeline,
             translucent_pipeline,
             stage_pipeline,
@@ -410,11 +456,20 @@ impl SkinPreviewViewport {
             img,
             "thk_user_skin_tex",
         );
+        self.dirty = true;
+    }
+
+    pub fn set_default_skin_for_variant(
+        &mut self,
+        render_state: &RenderState,
+        variant: SkinVariant,
+    ) {
+        let img = generate_default_steve_skin_for_variant(variant);
+        self.set_skin_rgba(render_state, &img);
     }
 
     pub fn reset_default_skin(&mut self, render_state: &RenderState) {
-        let img = generate_default_steve_skin();
-        self.set_skin_rgba(render_state, &img);
+        self.set_default_skin_for_variant(render_state, self.variant);
     }
 
     pub fn set_cape_rgba(&mut self, render_state: &RenderState, img: &RgbaImage) {
@@ -426,6 +481,7 @@ impl SkinPreviewViewport {
             img,
             "thk_user_cape_tex",
         );
+        self.dirty = true;
     }
 
     pub fn reset_default_cape(&mut self, render_state: &RenderState) {
@@ -433,10 +489,24 @@ impl SkinPreviewViewport {
         self.set_cape_rgba(render_state, &img);
     }
 
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub fn release_offscreen_target(&mut self, render_state: Option<&RenderState>) {
+        if let Some(prev) = self.target.take() {
+            if let Some(rs) = render_state {
+                rs.renderer.write().free_texture(&prev.egui_tex_id);
+            }
+        }
+        self.dirty = true;
+    }
+
     pub fn snap_to_preset(&mut self, yaw: f32, pitch: f32, distance: f32) {
         self.target_yaw = yaw;
         self.target_pitch = pitch.clamp(-1.35, 1.35);
         self.target_distance = distance.clamp(28.0, 84.0);
+        self.dirty = true;
     }
 
     pub fn reset_camera(&mut self, face_back: bool) {
@@ -448,7 +518,12 @@ impl SkinPreviewViewport {
         self.snap_to_preset(yaw, 0.16, 50.0);
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, render_state: &RenderState, desired_size: egui::Vec2) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        render_state: &RenderState,
+        desired_size: egui::Vec2,
+    ) {
         let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
         if !ui.is_rect_visible(rect) {
             return;
@@ -466,6 +541,7 @@ impl SkinPreviewViewport {
             let delta = response.drag_delta();
             self.target_yaw += delta.x * 0.014;
             self.target_pitch = (self.target_pitch + delta.y * 0.011).clamp(-1.35, 1.35);
+            self.dirty = true;
         }
         if response.double_clicked() {
             self.reset_camera(self.back_mode != BackEquipmentMode::None && self.yaw.cos() < 0.0);
@@ -473,24 +549,37 @@ impl SkinPreviewViewport {
         if response.hovered() {
             let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll_y.abs() > 0.01 {
-                self.target_distance =
-                    (self.target_distance - scroll_y * 0.065).clamp(28.0, 84.0);
+                self.target_distance = (self.target_distance - scroll_y * 0.065).clamp(28.0, 84.0);
+                self.dirty = true;
             }
         }
 
+        let state_key = (
+            self.variant,
+            self.back_mode,
+            self.show_outer_layer,
+            self.show_stage,
+        );
+        if self.last_state != Some(state_key) {
+            self.last_state = Some(state_key);
+            self.dirty = true;
+        }
+
         let dt = ui.input(|i| i.unstable_dt).clamp(0.001, 0.1);
-        self.stage_time = (self.stage_time + dt) % (std::f32::consts::TAU * 64.0);
-
-        if self.animate_walk {
-            self.anim_phase = (self.anim_phase + dt * 3.1) % (std::f32::consts::TAU * 2.0);
+        if self.low_power {
+            self.anim_phase = 0.0;
         } else {
-            self.anim_phase = (self.stage_time * 1.3).sin() * 0.18;
-        }
-        if self.auto_rotate && !response.dragged() {
-            self.target_yaw += dt * 0.68;
+            self.stage_time = (self.stage_time + dt) % (std::f32::consts::TAU * 64.0);
+            if self.animate_walk {
+                self.anim_phase = (self.anim_phase + dt * 3.1) % (std::f32::consts::TAU * 2.0);
+            } else {
+                self.anim_phase = 0.0;
+            }
+            if self.auto_rotate && !response.dragged() {
+                self.target_yaw += dt * 0.68;
+            }
         }
 
-        // Exponential spring camera smoothing
         let alpha = (1.0 - (-14.0 * dt).exp()).clamp(0.05, 1.0);
         self.yaw += (self.target_yaw - self.yaw) * alpha;
         self.pitch += (self.target_pitch - self.pitch) * alpha;
@@ -500,35 +589,56 @@ impl SkinPreviewViewport {
             || (self.target_pitch - self.pitch).abs() > 0.001
             || (self.target_distance - self.distance).abs() > 0.01;
 
-        if self.animate_walk || self.auto_rotate || self.show_stage || camera_settling {
+        let continuous = !self.low_power && (self.animate_walk || self.auto_rotate);
+        if continuous || camera_settling {
             ui.ctx().request_repaint_after(Duration::from_millis(16));
         }
 
         let ppp = ui.ctx().pixels_per_point().max(1.0);
-        let px_w = ((rect.width() * ppp) as u32).clamp(128, 1024);
-        let px_h = ((rect.height() * ppp) as u32).clamp(128, 1024);
+        let max_px = if self.low_power { 384 } else { 1024 };
+        let px_w = ((rect.width() * ppp) as u32).clamp(128, max_px);
+        let px_h = ((rect.height() * ppp) as u32).clamp(128, max_px);
 
+        let target_resized = self
+            .target
+            .as_ref()
+            .map(|t| t.width != px_w || t.height != px_h)
+            .unwrap_or(true);
         self.ensure_offscreen_target(render_state, px_w, px_h);
-        self.render_offscreen_frame(render_state, px_w, px_h);
+        if self.dirty || target_resized || continuous || camera_settling || response.dragged() {
+            self.render_offscreen_frame(render_state, px_w, px_h);
+            self.dirty = false;
+        }
 
         if let Some(ref target) = self.target {
             let painter = ui.painter();
-            let cr = egui::CornerRadius::same(14);
-            painter.rect_filled(rect, cr, egui::Color32::from_rgb(10, 13, 24));
-
-            // Atmospheric dual-nebula studio glow behind the 3D character
-            let center = rect.center();
-            let r_outer = rect.width().min(rect.height()) * 0.44;
-            painter.circle_filled(
-                egui::pos2(center.x - r_outer * 0.18, center.y - r_outer * 0.14),
-                r_outer,
-                egui::Color32::from_rgba_unmultiplied(124, 58, 237, 22),
-            );
-            painter.circle_filled(
-                egui::pos2(center.x + r_outer * 0.14, center.y + r_outer * 0.24),
-                r_outer * 0.85,
-                egui::Color32::from_rgba_unmultiplied(16, 185, 129, 24),
-            );
+            let cr = egui::CornerRadius::same(12);
+            let dark = ui.visuals().dark_mode;
+            if dark {
+                painter.rect_filled(rect, cr, egui::Color32::from_rgb(16, 23, 36));
+            } else {
+                painter.rect_filled(rect, cr, egui::Color32::from_rgb(220, 236, 252));
+                let horizon_y = rect.top() + rect.height() * 0.64;
+                let ground_rect =
+                    egui::Rect::from_min_max(egui::pos2(rect.left(), horizon_y), rect.max);
+                painter.rect_filled(
+                    ground_rect,
+                    egui::CornerRadius {
+                        nw: 0,
+                        ne: 0,
+                        sw: 12,
+                        se: 12,
+                    },
+                    egui::Color32::from_rgb(236, 245, 254),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(rect.left() + 8.0, horizon_y),
+                        egui::pos2(rect.right() - 8.0, horizon_y),
+                    ],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(59, 130, 246, 56)),
+                );
+            }
 
             let mut mesh = egui::Mesh::with_texture(target.egui_tex_id);
             mesh.add_rect_with_uv(
@@ -538,37 +648,21 @@ impl SkinPreviewViewport {
             );
             painter.add(egui::Shape::mesh(mesh));
 
-            let border_alpha = if response.hovered() { 145 } else { 85 };
-            painter.rect_stroke(
-                rect,
-                cr,
+            let stroke = if dark {
+                let border_alpha = if response.hovered() { 112 } else { 56 };
                 egui::Stroke::new(
                     1.2,
-                    egui::Color32::from_rgba_unmultiplied(52, 211, 153, border_alpha),
-                ),
-                egui::StrokeKind::Inside,
-            );
-
-            // Tactical corner brackets
-            let bk = 11.0f32.min(rect.width() * 0.12);
-            let inset = rect.shrink(6.0);
-            let corner_col = egui::Color32::from_rgba_unmultiplied(167, 139, 250, 130);
-            let corner_stroke = egui::Stroke::new(1.5, corner_col);
-            for (corner, dx, dy) in [
-                (inset.left_top(), bk, bk),
-                (inset.right_top(), -bk, bk),
-                (inset.left_bottom(), bk, -bk),
-                (inset.right_bottom(), -bk, -bk),
-            ] {
-                painter.line_segment(
-                    [corner, egui::pos2(corner.x + dx, corner.y)],
-                    corner_stroke,
-                );
-                painter.line_segment(
-                    [corner, egui::pos2(corner.x, corner.y + dy)],
-                    corner_stroke,
-                );
-            }
+                    egui::Color32::from_rgba_unmultiplied(148, 163, 184, border_alpha),
+                )
+            } else {
+                let border_col = if response.hovered() {
+                    egui::Color32::from_rgb(27, 40, 56)
+                } else {
+                    egui::Color32::from_rgb(138, 162, 190)
+                };
+                egui::Stroke::new(1.5, border_col)
+            };
+            painter.rect_stroke(rect, cr, stroke, egui::StrokeKind::Inside);
         }
     }
 
@@ -589,17 +683,22 @@ impl SkinPreviewViewport {
             depth_or_array_layers: 1,
         };
 
-        let msaa_color = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("thk_skin3d_msaa_color"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: MSAA_SAMPLES,
-            dimension: wgpu::TextureDimension::D2,
-            format: COLOR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let msaa_view = msaa_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let (msaa_color, msaa_view) = if self.sample_count > 1 {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("thk_skin3d_msaa_color"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: self.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: COLOR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            (Some(tex), Some(view))
+        } else {
+            (None, None)
+        };
 
         let resolved_color = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("thk_skin3d_resolved_color"),
@@ -617,7 +716,7 @@ impl SkinPreviewViewport {
             label: Some("thk_skin3d_depth"),
             size: extent,
             mip_level_count: 1,
-            sample_count: MSAA_SAMPLES,
+            sample_count: self.sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -744,12 +843,22 @@ impl SkinPreviewViewport {
                 });
 
         {
+            let (color_view, resolve_target, color_store) =
+                if let Some(ref msaa_view) = target.msaa_view {
+                    (
+                        msaa_view,
+                        Some(&target.resolved_view),
+                        wgpu::StoreOp::Discard,
+                    )
+                } else {
+                    (&target.resolved_view, None, wgpu::StoreOp::Store)
+                };
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("thk_skin3d_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.msaa_view,
+                    view: color_view,
                     depth_slice: None,
-                    resolve_target: Some(&target.resolved_view),
+                    resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -757,7 +866,7 @@ impl SkinPreviewViewport {
                             b: 0.0,
                             a: 0.0,
                         }),
-                        store: wgpu::StoreOp::Discard,
+                        store: color_store,
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -782,7 +891,7 @@ impl SkinPreviewViewport {
                 rpass.draw_indexed(0..stage_i_cnt as u32, 0, 0..1);
             }
 
-            // Pass 1: Opaque / Alpha-Cutout Character & Back Equipment
+            // Pass 1: Opaque + Alpha-Cutout Character & Back Equipment
             rpass.set_pipeline(&self.cutout_pipeline);
             rpass.set_bind_group(0, &self.uniform_bg, &[]);
             if skin_i_cnt > 0 {
@@ -798,7 +907,7 @@ impl SkinPreviewViewport {
                 rpass.draw_indexed(0..back_i_cnt as u32, 0, 0..1);
             }
 
-            // Pass 2: Semi-transparent overlay pixels
+            // Pass 2: Semi-transparent overlay pixels (visors, tinted glasses, translucent capes)
             rpass.set_pipeline(&self.translucent_pipeline);
             rpass.set_bind_group(0, &self.uniform_bg, &[]);
             if skin_i_cnt > 0 {
@@ -807,9 +916,17 @@ impl SkinPreviewViewport {
                 rpass.set_index_buffer(self.skin_ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rpass.draw_indexed(0..skin_i_cnt as u32, 0, 0..1);
             }
+            if back_i_cnt > 0 {
+                rpass.set_bind_group(1, &self.cape_bg, &[]);
+                rpass.set_vertex_buffer(0, self.back_vbuf.slice(..));
+                rpass.set_index_buffer(self.back_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rpass.draw_indexed(0..back_i_cnt as u32, 0, 0..1);
+            }
         }
 
-        render_state.queue.submit(core::iter::once(encoder.finish()));
+        render_state
+            .queue
+            .submit(core::iter::once(encoder.finish()));
     }
 }
 
@@ -819,6 +936,7 @@ fn create_skin_pipeline(
     shader: &wgpu::ShaderModule,
     fs_entry: &str,
     depth_write: bool,
+    sample_count: u32,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(fs_entry),
@@ -854,7 +972,7 @@ fn create_skin_pipeline(
             bias: wgpu::DepthBiasState::default(),
         }),
         multisample: wgpu::MultisampleState {
-            count: MSAA_SAMPLES,
+            count: sample_count,
             mask: !0,
             alpha_to_coverage_enabled: false,
         },
@@ -877,6 +995,7 @@ fn create_stage_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
+    sample_count: u32,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("thk_stage3d_pipeline"),
@@ -912,7 +1031,7 @@ fn create_stage_pipeline(
             bias: wgpu::DepthBiasState::default(),
         }),
         multisample: wgpu::MultisampleState {
-            count: MSAA_SAMPLES,
+            count: sample_count,
             mask: !0,
             alpha_to_coverage_enabled: false,
         },

@@ -1,41 +1,76 @@
-use egui::epaint::Shadow;
 use egui::{
-    Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, IconData, Stroke,
-    TextStyle, Visuals,
+    epaint::Shadow, style::WidgetVisuals, Color32, CornerRadius, FontData, FontDefinitions,
+    FontFamily, FontId, IconData, Id, Stroke, TextStyle, Visuals,
 };
-use image::{Rgba, RgbaImage};
+use image::{imageops::FilterType, Rgba, RgbaImage};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
-use thk_core::models::{AccentPreset, ThemeMode};
+use thk_core::models::{sanitize_font_scale, AccentPreset, ThemeMode};
 
-pub const ACCENT_EMERALD: Color32 = Color32::from_rgb(16, 219, 134);
-pub const ACCENT_EMERALD_DIM: Color32 = Color32::from_rgb(13, 128, 82);
-pub const ACCENT_VIOLET: Color32 = Color32::from_rgb(148, 98, 255);
-pub const ACCENT_VIOLET_DIM: Color32 = Color32::from_rgb(76, 29, 149);
-pub const ACCENT_CYAN: Color32 = Color32::from_rgb(34, 211, 238);
-pub const ACCENT_BLUE: Color32 = Color32::from_rgb(56, 152, 255);
-pub const ACCENT_AMBER: Color32 = Color32::from_rgb(245, 165, 36);
-pub const ACCENT_ORANGE: Color32 = Color32::from_rgb(249, 115, 22);
-pub const ACCENT_RED: Color32 = Color32::from_rgb(244, 63, 94);
+// Vibrant Game-Engine Semantic Palette (Daylight & Studio Balanced)
+pub const ACCENT_EMERALD: Color32 = Color32::from_rgb(20, 184, 102);
+pub const ACCENT_EMERALD_GLOW: Color32 = Color32::from_rgb(82, 232, 152);
+pub const ACCENT_CYAN: Color32 = Color32::from_rgb(14, 165, 233);
+pub const ACCENT_BLUE: Color32 = Color32::from_rgb(37, 112, 235);
+pub const ACCENT_VIOLET: Color32 = Color32::from_rgb(124, 58, 237);
+pub const ACCENT_AMBER: Color32 = Color32::from_rgb(234, 138, 12);
+pub const ACCENT_RED: Color32 = Color32::from_rgb(225, 45, 72);
+pub const ACCENT_ORANGE: Color32 = Color32::from_rgb(234, 98, 24);
+
+// Bright Sunlit Game-Engine Surfaces (Light Mode - Default)
+pub const BG_SKY_LIGHT: Color32 = Color32::from_rgb(230, 239, 250);
+pub const BG_PANEL_LIGHT: Color32 = Color32::from_rgb(243, 248, 254);
+pub const BG_CARD_LIGHT: Color32 = Color32::from_rgb(252, 254, 255);
+pub const BG_SLOT_LIGHT: Color32 = Color32::from_rgb(222, 233, 246);
+pub const BORDER_GAME_OUTER_LIGHT: Color32 = Color32::from_rgb(154, 177, 205);
+pub const BORDER_GAME_LIP_LIGHT: Color32 = Color32::from_rgb(186, 205, 228);
+pub const BORDER_DARK_CONTOUR: Color32 = Color32::from_rgb(27, 40, 56);
+pub const TEXT_INK_LIGHT: Color32 = Color32::from_rgb(20, 33, 52);
+pub const TEXT_MUTED_LIGHT: Color32 = Color32::from_rgb(74, 95, 122);
+
+// Cobalt Dusk Game-Engine Studio Surfaces (Dark Mode)
+pub const BG_VOID_DARK: Color32 = Color32::from_rgb(24, 34, 50);
+pub const BG_PANEL_DARK: Color32 = Color32::from_rgb(29, 41, 60);
+pub const BG_CARD_DARK: Color32 = Color32::from_rgb(36, 50, 72);
+pub const BG_CARD_ELEVATED_DARK: Color32 = Color32::from_rgb(43, 59, 84);
+pub const BORDER_SUBTLE_DARK: Color32 = Color32::from_rgb(66, 88, 120);
 
 pub fn accent_palette(preset: AccentPreset) -> (Color32, Color32) {
     match preset {
-        AccentPreset::Emerald => (ACCENT_EMERALD, ACCENT_EMERALD_DIM),
-        AccentPreset::Cyan => (ACCENT_CYAN, Color32::from_rgb(14, 116, 144)),
-        AccentPreset::Blue => (ACCENT_BLUE, Color32::from_rgb(29, 78, 216)),
-        AccentPreset::Violet => (ACCENT_VIOLET, ACCENT_VIOLET_DIM),
-        AccentPreset::Amber => (ACCENT_AMBER, Color32::from_rgb(180, 83, 9)),
-        AccentPreset::Crimson => (ACCENT_RED, Color32::from_rgb(159, 18, 57)),
+        AccentPreset::Emerald => (ACCENT_EMERALD, ACCENT_EMERALD_GLOW),
+        AccentPreset::Cyan => (ACCENT_CYAN, Color32::from_rgb(103, 218, 255)),
+        AccentPreset::Blue => (ACCENT_BLUE, Color32::from_rgb(118, 172, 255)),
+        AccentPreset::Violet => (ACCENT_VIOLET, Color32::from_rgb(176, 132, 255)),
+        AccentPreset::Amber => (ACCENT_AMBER, Color32::from_rgb(252, 196, 76)),
+        AccentPreset::Crimson => (ACCENT_RED, Color32::from_rgb(252, 118, 138)),
     }
 }
 
-pub const BG_VOID_DARK: Color32 = Color32::from_rgb(9, 11, 20);
-pub const BG_HUD_DARK: Color32 = Color32::from_rgb(14, 18, 32);
-pub const BG_CARD_DARK: Color32 = Color32::from_rgb(21, 27, 46);
-pub const BG_CARD_HOVER_DARK: Color32 = Color32::from_rgb(29, 38, 64);
+pub fn active_accent_preset(ctx: &egui::Context) -> AccentPreset {
+    ctx.data(|d| d.get_temp::<AccentPreset>(Id::unique("thk_active_accent_preset")))
+        .unwrap_or(AccentPreset::Emerald)
+}
+
+/// Adjusts an accent hue for crisp WCAG-compliant foreground readability on bright or dark surfaces.
+pub fn readable_accent_ink(color: Color32, dark_mode: bool) -> Color32 {
+    if dark_mode {
+        let r = color.r().saturating_add((255 - color.r()) / 4);
+        let g = color.g().saturating_add((255 - color.g()) / 4);
+        let b = color.b().saturating_add((255 - color.b()) / 4);
+        Color32::from_rgba_unmultiplied(r, g, b, color.a())
+    } else {
+        let r = (color.r() as u16 * 56 / 100) as u8;
+        let g = (color.g() as u16 * 54 / 100) as u8;
+        let b = (color.b() as u16 * 60 / 100) as u8;
+        Color32::from_rgba_unmultiplied(r, g, b, color.a())
+    }
+}
 
 pub fn install_unicode_fonts(ctx: &egui::Context) {
-    let ui_candidates: &[&str] = if cfg!(target_os = "windows") {
+    let mut fonts = FontDefinitions::default();
+
+    let candidates: &[&str] = if cfg!(target_os = "windows") {
         &[
             r"C:\Windows\Fonts\seguisb.ttf",
             r"C:\Windows\Fonts\segoeui.ttf",
@@ -45,15 +80,43 @@ pub fn install_unicode_fonts(ctx: &egui::Context) {
         &[
             "/System/Library/Fonts/SFNS.ttf",
             "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        ]
+    } else if cfg!(target_os = "android") {
+        &[
+            "/system/fonts/Roboto-Medium.ttf",
+            "/system/fonts/Roboto-Regular.ttf",
+            "/system/fonts/RobotoStatic-Regular.ttf",
+            "/system/fonts/NotoSansCJK-Regular.ttc",
         ]
     } else {
         &[
             "/usr/share/fonts/truetype/noto/NotoSans-Medium.ttf",
             "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
         ]
     };
+
+    let mut installed_any = false;
+    for path_str in candidates {
+        let p = Path::new(path_str);
+        if let Ok(bytes) = std::fs::read(p) {
+            fonts.font_data.insert(
+                "thk_gaming_ui".to_owned(),
+                Arc::new(FontData::from_owned(bytes)),
+            );
+            if let Some(prop) = fonts.families.get_mut(&FontFamily::Proportional) {
+                prop.insert(0, "thk_gaming_ui".to_owned());
+            }
+            if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
+                mono.push("thk_gaming_ui".to_owned());
+            }
+            installed_any = true;
+            break;
+        }
+    }
 
     let mono_candidates: &[&str] = if cfg!(target_os = "windows") {
         &[
@@ -61,229 +124,293 @@ pub fn install_unicode_fonts(ctx: &egui::Context) {
             r"C:\Windows\Fonts\consola.ttf",
         ]
     } else if cfg!(target_os = "macos") {
-        &["/System/Library/Fonts/SFNSMono.ttf"]
+        &[
+            "/System/Library/Fonts/SFNSMono.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
+        ]
+    } else if cfg!(target_os = "android") {
+        &["/system/fonts/DroidSansMono.ttf"]
     } else {
         &[
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
         ]
     };
 
-    let mut defs = FontDefinitions::default();
-    let mut installed_any = false;
-
-    for path_str in ui_candidates {
-        let p = Path::new(path_str);
-        if p.is_file() {
-            if let Ok(bytes) = std::fs::read(p) {
-                defs.font_data.insert(
-                    "thk_gaming_ui".to_owned(),
-                    Arc::new(FontData::from_owned(bytes)),
-                );
-                if let Some(prop) = defs.families.get_mut(&FontFamily::Proportional) {
-                    prop.insert(0, "thk_gaming_ui".to_owned());
-                }
-                if let Some(mono) = defs.families.get_mut(&FontFamily::Monospace) {
-                    mono.push("thk_gaming_ui".to_owned());
-                }
-                installed_any = true;
-                break;
-            }
-        }
-    }
-
     for path_str in mono_candidates {
-        let p = Path::new(path_str);
-        if p.is_file() {
-            if let Ok(bytes) = std::fs::read(p) {
-                defs.font_data.insert(
-                    "thk_gaming_mono".to_owned(),
-                    Arc::new(FontData::from_owned(bytes)),
-                );
-                if let Some(mono) = defs.families.get_mut(&FontFamily::Monospace) {
-                    mono.insert(0, "thk_gaming_mono".to_owned());
-                }
-                installed_any = true;
-                break;
+        if let Ok(bytes) = std::fs::read(Path::new(path_str)) {
+            fonts.font_data.insert(
+                "thk_gaming_mono".to_owned(),
+                Arc::new(FontData::from_owned(bytes)),
+            );
+            if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
+                mono.insert(0, "thk_gaming_mono".to_owned());
             }
+            installed_any = true;
+            break;
         }
     }
 
     if installed_any {
-        ctx.set_fonts(defs);
+        ctx.set_fonts(fonts);
     }
 }
 
+pub fn base_text_styles() -> BTreeMap<TextStyle, FontId> {
+    let mut text_styles = BTreeMap::new();
+    text_styles.insert(
+        TextStyle::Heading,
+        FontId::new(19.5, FontFamily::Proportional),
+    );
+    text_styles.insert(
+        TextStyle::Name("HeroTitle".into()),
+        FontId::new(24.0, FontFamily::Proportional),
+    );
+    text_styles.insert(
+        TextStyle::Name("Subheading".into()),
+        FontId::new(15.2, FontFamily::Proportional),
+    );
+    text_styles.insert(TextStyle::Body, FontId::new(13.2, FontFamily::Proportional));
+    text_styles.insert(
+        TextStyle::Button,
+        FontId::new(13.2, FontFamily::Proportional),
+    );
+    text_styles.insert(
+        TextStyle::Monospace,
+        FontId::new(12.0, FontFamily::Monospace),
+    );
+    text_styles.insert(
+        TextStyle::Small,
+        FontId::new(11.2, FontFamily::Proportional),
+    );
+    text_styles
+}
+
+pub fn apply_font_scale(ctx: &egui::Context, scale: f32) {
+    let s = sanitize_font_scale(scale);
+    ctx.data_mut(|d| d.insert_temp(Id::unique("thk_active_font_scale"), s));
+    ctx.set_zoom_factor(s);
+}
+
 pub fn apply_theme(ctx: &egui::Context, mode: ThemeMode, accent: AccentPreset) {
+    let scale = ctx
+        .data(|d| d.get_temp::<f32>(Id::unique("thk_active_font_scale")))
+        .unwrap_or(1.0);
+    apply_theme_with_scale(ctx, mode, accent, scale);
+}
+
+pub fn apply_theme_with_scale(
+    ctx: &egui::Context,
+    mode: ThemeMode,
+    accent: AccentPreset,
+    font_scale: f32,
+) {
+    let clean_scale = sanitize_font_scale(font_scale);
+    ctx.data_mut(|d| {
+        d.insert_temp(Id::unique("thk_active_accent_preset"), accent);
+        d.insert_temp(Id::unique("thk_active_font_scale"), clean_scale);
+    });
+    ctx.set_zoom_factor(clean_scale);
+
     let egui_theme = match mode {
         ThemeMode::Dark => egui::Theme::Dark,
         ThemeMode::Light => egui::Theme::Light,
     };
     ctx.set_theme(egui_theme);
-    let (acc_bright, acc_dim) = accent_palette(accent);
 
+    let (primary_accent, glow_accent) = accent_palette(accent);
     let mut style = (*ctx.style_of(egui_theme)).clone();
+    style.text_styles = base_text_styles();
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(13.0, 7.5);
+    style.spacing.button_padding = egui::vec2(12.0, 7.0);
     style.spacing.window_margin = egui::Margin::same(16);
+    style.spacing.indent = 16.0;
     style.spacing.scroll.bar_width = 7.0;
     style.spacing.scroll.floating = true;
+    style.interaction.resize_grab_radius_side = 8.5;
+    style.interaction.resize_grab_radius_corner = 10.0;
     style.animation_time = 0.16;
 
-    style.text_styles.insert(
-        TextStyle::Heading,
-        FontId::new(19.5, FontFamily::Proportional),
-    );
-    style
-        .text_styles
-        .insert(TextStyle::Body, FontId::new(13.2, FontFamily::Proportional));
-    style.text_styles.insert(
-        TextStyle::Button,
-        FontId::new(13.2, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Small,
-        FontId::new(11.2, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Monospace,
-        FontId::new(12.0, FontFamily::Monospace),
-    );
+    let cr_small = CornerRadius::same(8);
+    let cr_med = CornerRadius::same(10);
+    let cr_card = CornerRadius::same(12);
 
     let mut visuals = match mode {
-        ThemeMode::Dark => Visuals::dark(),
-        ThemeMode::Light => Visuals::light(),
-    };
-
-    let cr_sm = CornerRadius::same(8);
-    let cr_md = CornerRadius::same(12);
-    visuals.widgets.noninteractive.corner_radius = cr_md;
-    visuals.widgets.inactive.corner_radius = cr_sm;
-    visuals.widgets.hovered.corner_radius = cr_sm;
-    visuals.widgets.active.corner_radius = cr_sm;
-    visuals.widgets.open.corner_radius = cr_sm;
-    visuals.window_corner_radius = CornerRadius::same(14);
-    visuals.menu_corner_radius = CornerRadius::same(10);
-    visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
-
-    match mode {
         ThemeMode::Dark => {
-            let border = Color32::from_rgb(46, 58, 92);
-            let text_main = Color32::from_rgb(241, 245, 252);
-
-            visuals.panel_fill = BG_VOID_DARK;
-            visuals.window_fill = BG_HUD_DARK;
-            visuals.extreme_bg_color = Color32::from_rgb(6, 8, 15);
-            visuals.faint_bg_color = BG_CARD_DARK;
-            visuals.override_text_color = Some(text_main);
-            visuals.hyperlink_color = ACCENT_CYAN;
-
-            visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(
-                acc_bright.r(),
-                acc_bright.g(),
-                acc_bright.b(),
-                64,
-            );
-            visuals.selection.stroke = Stroke::new(1.5, acc_bright);
-            visuals.text_cursor.stroke = Stroke::new(2.0, acc_bright);
-
-            visuals.window_shadow = Shadow {
-                offset: [0, 12],
-                blur: 32,
-                spread: 2,
-                color: Color32::from_rgba_unmultiplied(2, 4, 12, 195),
-            };
-            visuals.popup_shadow = Shadow {
-                offset: [0, 8],
-                blur: 22,
+            let mut v = Visuals::dark();
+            v.override_text_color = Some(Color32::from_rgb(236, 243, 252));
+            v.panel_fill = BG_PANEL_DARK;
+            v.window_fill = BG_CARD_DARK;
+            v.extreme_bg_color = Color32::from_rgb(19, 27, 41);
+            v.faint_bg_color = Color32::from_rgb(33, 46, 67);
+            v.code_bg_color = Color32::from_rgb(20, 29, 44);
+            v.window_corner_radius = cr_card;
+            v.menu_corner_radius = cr_med;
+            v.window_stroke = Stroke::new(1.5, Color32::from_rgb(76, 102, 138));
+            v.window_shadow = Shadow {
+                offset: [0, 6],
+                blur: 16,
                 spread: 0,
-                color: Color32::from_rgba_unmultiplied(2, 4, 12, 175),
+                color: Color32::from_black_alpha(110),
             };
-            visuals.window_stroke = Stroke::new(
-                1.2,
-                Color32::from_rgba_unmultiplied(acc_bright.r(), acc_bright.g(), acc_bright.b(), 95),
+            v.popup_shadow = Shadow {
+                offset: [0, 4],
+                blur: 10,
+                spread: 0,
+                color: Color32::from_black_alpha(95),
+            };
+
+            v.selection.bg_fill = Color32::from_rgba_unmultiplied(
+                primary_accent.r(),
+                primary_accent.g(),
+                primary_accent.b(),
+                72,
             );
+            v.selection.stroke = Stroke::new(1.6, glow_accent);
+            v.text_cursor.stroke = Stroke::new(2.0, glow_accent);
+            v.hyperlink_color = ACCENT_CYAN;
+            v.warn_fg_color = ACCENT_AMBER;
+            v.error_fg_color = ACCENT_RED;
 
-            visuals.widgets.noninteractive.bg_fill = BG_HUD_DARK;
-            visuals.widgets.noninteractive.weak_bg_fill = BG_HUD_DARK;
-            visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border);
-            visuals.widgets.noninteractive.fg_stroke =
-                Stroke::new(1.0, Color32::from_rgb(164, 178, 206));
-
-            visuals.widgets.inactive.bg_fill = BG_CARD_DARK;
-            visuals.widgets.inactive.weak_bg_fill = BG_CARD_DARK;
-            visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, border);
-            visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, text_main);
-
-            visuals.widgets.hovered.bg_fill = BG_CARD_HOVER_DARK;
-            visuals.widgets.hovered.weak_bg_fill = BG_CARD_HOVER_DARK;
-            visuals.widgets.hovered.bg_stroke = Stroke::new(1.4, acc_bright);
-            visuals.widgets.hovered.fg_stroke = Stroke::new(1.2, Color32::WHITE);
-            visuals.widgets.hovered.expansion = 1.0;
-
-            visuals.widgets.active.bg_fill = acc_dim;
-            visuals.widgets.active.weak_bg_fill = acc_dim;
-            visuals.widgets.active.bg_stroke = Stroke::new(1.6, acc_bright);
-            visuals.widgets.active.fg_stroke = Stroke::new(1.5, Color32::WHITE);
-            visuals.widgets.active.expansion = -0.8;
+            v.widgets.noninteractive = WidgetVisuals {
+                bg_fill: BG_CARD_DARK,
+                weak_bg_fill: BG_PANEL_DARK,
+                bg_stroke: Stroke::new(1.2, BORDER_SUBTLE_DARK),
+                corner_radius: cr_med,
+                fg_stroke: Stroke::new(1.0, Color32::from_rgb(184, 198, 222)),
+                expansion: 0.0,
+            };
+            v.widgets.inactive = WidgetVisuals {
+                bg_fill: BG_CARD_ELEVATED_DARK,
+                weak_bg_fill: Color32::from_rgb(38, 53, 76),
+                bg_stroke: Stroke::new(1.2, Color32::from_rgb(74, 98, 132)),
+                corner_radius: cr_small,
+                fg_stroke: Stroke::new(1.0, Color32::from_rgb(236, 243, 252)),
+                expansion: 0.0,
+            };
+            v.widgets.hovered = WidgetVisuals {
+                bg_fill: Color32::from_rgb(50, 68, 96),
+                weak_bg_fill: Color32::from_rgb(45, 62, 88),
+                bg_stroke: Stroke::new(1.6, primary_accent),
+                corner_radius: cr_small,
+                fg_stroke: Stroke::new(1.2, Color32::WHITE),
+                expansion: 1.0,
+            };
+            v.widgets.active = WidgetVisuals {
+                bg_fill: primary_accent,
+                weak_bg_fill: primary_accent,
+                bg_stroke: Stroke::new(1.6, glow_accent),
+                corner_radius: cr_small,
+                fg_stroke: Stroke::new(1.5, Color32::WHITE),
+                expansion: -0.5,
+            };
+            v.widgets.open = WidgetVisuals {
+                bg_fill: Color32::from_rgb(44, 61, 88),
+                weak_bg_fill: Color32::from_rgb(40, 56, 80),
+                bg_stroke: Stroke::new(1.4, ACCENT_CYAN),
+                corner_radius: cr_small,
+                fg_stroke: Stroke::new(1.2, Color32::WHITE),
+                expansion: 0.0,
+            };
+            v
         }
         ThemeMode::Light => {
-            let bg_main = Color32::from_rgb(241, 245, 251);
-            let bg_panel = Color32::from_rgb(255, 255, 255);
-            let bg_card = Color32::from_rgb(232, 238, 248);
-            let bg_hover = Color32::from_rgb(220, 231, 246);
-            let border = Color32::from_rgb(194, 207, 226);
-            let text_dark = Color32::from_rgb(15, 23, 42);
+            let mut v = Visuals::light();
+            v.override_text_color = Some(TEXT_INK_LIGHT);
+            v.panel_fill = BG_PANEL_LIGHT;
+            v.window_fill = BG_CARD_LIGHT;
+            v.extreme_bg_color = BG_SLOT_LIGHT;
+            v.faint_bg_color = Color32::from_rgb(232, 241, 251);
+            v.code_bg_color = Color32::from_rgb(225, 236, 248);
+            v.window_corner_radius = cr_card;
+            v.menu_corner_radius = cr_med;
+            v.window_stroke = Stroke::new(1.6, Color32::from_rgb(122, 149, 182));
+            v.window_shadow = Shadow {
+                offset: [0, 4],
+                blur: 10,
+                spread: 0,
+                color: Color32::from_rgba_unmultiplied(24, 42, 68, 34),
+            };
+            v.popup_shadow = Shadow {
+                offset: [0, 3],
+                blur: 8,
+                spread: 0,
+                color: Color32::from_rgba_unmultiplied(24, 42, 68, 28),
+            };
 
-            visuals.panel_fill = bg_main;
-            visuals.window_fill = bg_panel;
-            visuals.extreme_bg_color = Color32::from_rgb(248, 250, 253);
-            visuals.faint_bg_color = bg_card;
-            visuals.override_text_color = Some(text_dark);
-            visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(
-                acc_bright.r(),
-                acc_bright.g(),
-                acc_bright.b(),
-                52,
+            let ink_accent = readable_accent_ink(primary_accent, false);
+            v.selection.bg_fill = Color32::from_rgba_unmultiplied(
+                primary_accent.r(),
+                primary_accent.g(),
+                primary_accent.b(),
+                48,
             );
-            visuals.selection.stroke = Stroke::new(1.5, acc_dim);
-            visuals.text_cursor.stroke = Stroke::new(2.0, acc_dim);
+            v.selection.stroke = Stroke::new(1.6, ink_accent);
+            v.text_cursor.stroke = Stroke::new(2.0, ink_accent);
+            v.hyperlink_color = Color32::from_rgb(3, 105, 161);
+            v.warn_fg_color = Color32::from_rgb(180, 83, 9);
+            v.error_fg_color = Color32::from_rgb(185, 28, 28);
 
-            visuals.window_shadow = Shadow {
-                offset: [0, 10],
-                blur: 26,
-                spread: 0,
-                color: Color32::from_rgba_unmultiplied(15, 23, 42, 42),
+            v.widgets.noninteractive = WidgetVisuals {
+                bg_fill: BG_CARD_LIGHT,
+                weak_bg_fill: BG_PANEL_LIGHT,
+                bg_stroke: Stroke::new(1.2, BORDER_GAME_LIP_LIGHT),
+                corner_radius: cr_med,
+                fg_stroke: Stroke::new(1.0, TEXT_MUTED_LIGHT),
+                expansion: 0.0,
             };
-            visuals.popup_shadow = Shadow {
-                offset: [0, 6],
-                blur: 18,
-                spread: 0,
-                color: Color32::from_rgba_unmultiplied(15, 23, 42, 34),
+            v.widgets.inactive = WidgetVisuals {
+                bg_fill: Color32::from_rgb(235, 243, 252),
+                weak_bg_fill: Color32::from_rgb(228, 238, 249),
+                bg_stroke: Stroke::new(1.3, BORDER_GAME_OUTER_LIGHT),
+                corner_radius: cr_small,
+                fg_stroke: Stroke::new(1.1, TEXT_INK_LIGHT),
+                expansion: 0.0,
             };
-
-            visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border);
-            visuals.widgets.inactive.bg_fill = bg_card;
-            visuals.widgets.inactive.weak_bg_fill = bg_card;
-            visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, border);
-            visuals.widgets.hovered.bg_fill = bg_hover;
-            visuals.widgets.hovered.weak_bg_fill = bg_hover;
-            visuals.widgets.hovered.bg_stroke = Stroke::new(1.3, acc_dim);
-            visuals.widgets.hovered.expansion = 1.0;
-            visuals.widgets.active.expansion = -0.8;
+            v.widgets.hovered = WidgetVisuals {
+                bg_fill: Color32::from_rgb(222, 236, 252),
+                weak_bg_fill: Color32::from_rgb(216, 232, 250),
+                bg_stroke: Stroke::new(1.6, primary_accent),
+                corner_radius: cr_small,
+                fg_stroke: Stroke::new(1.3, Color32::from_rgb(12, 22, 38)),
+                expansion: 1.0,
+            };
+            v.widgets.active = WidgetVisuals {
+                bg_fill: Color32::from_rgb(196, 222, 250),
+                weak_bg_fill: Color32::from_rgb(204, 228, 252),
+                bg_stroke: Stroke::new(1.6, ink_accent),
+                corner_radius: cr_small,
+                fg_stroke: Stroke::new(1.4, Color32::from_rgb(12, 22, 38)),
+                expansion: -0.5,
+            };
+            v.widgets.open = WidgetVisuals {
+                bg_fill: Color32::from_rgb(219, 234, 250),
+                weak_bg_fill: Color32::from_rgb(214, 230, 248),
+                bg_stroke: Stroke::new(1.5, primary_accent),
+                corner_radius: cr_small,
+                fg_stroke: Stroke::new(1.2, TEXT_INK_LIGHT),
+                expansion: 0.0,
+            };
+            v
         }
-    }
+    };
 
+    visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     style.visuals = visuals;
     ctx.set_style_of(egui_theme, style);
 }
 
 pub fn generate_brand_icon_image(size: u32) -> RgbaImage {
+    if let Ok(decoded) =
+        image::load_from_memory(include_bytes!("../../../assets/ui/icon_brand.png"))
+    {
+        return image::imageops::resize(&decoded.to_rgba8(), size, size, FilterType::Lanczos3);
+    }
+
     let mut img = RgbaImage::from_pixel(size, size, Rgba([0, 0, 0, 0]));
     let s = size as f32;
     let center = s * 0.5;
     let radius = s * 0.45;
-
     for y in 0..size {
         for x in 0..size {
             let fx = x as f32 + 0.5;
@@ -294,43 +421,9 @@ pub fn generate_brand_icon_image(size: u32) -> RgbaImage {
             let qx = (dx - (radius - corner_r)).max(0.0);
             let qy = (dy - (radius - corner_r)).max(0.0);
             let dist = (qx * qx + qy * qy).sqrt() - corner_r;
-
             if dist <= 0.8 {
                 let alpha = ((0.8 - dist).clamp(0.0, 1.0) * 255.0) as u8;
-                let grad = (fy / s).clamp(0.0, 1.0);
-                let mut r = (12.0 + grad * 14.0) as u8;
-                let mut g = (16.0 + (1.0 - grad) * 20.0) as u8;
-                let mut b = (30.0 + grad * 22.0) as u8;
-
-                let nx = (fx - center) / radius;
-                let ny = (fy - center) / radius;
-
-                // Isometric 3D voxel diamond faces + glowing "T" emblem
-                let iso_top = (-0.62..=-0.04).contains(&ny)
-                    && (nx.abs() * 0.58 + (ny + 0.33).abs()) <= 0.30;
-                let in_t_top = (-0.50..=-0.22).contains(&ny) && nx.abs() <= 0.52;
-                let in_t_stem = (-0.22..=0.58).contains(&ny) && nx.abs() <= 0.19;
-                let in_border = dist > -2.4;
-
-                if in_t_top {
-                    r = 52;
-                    g = 235;
-                    b = 162;
-                } else if in_t_stem {
-                    r = 16;
-                    g = 219;
-                    b = 134;
-                } else if iso_top {
-                    r = 139;
-                    g = 92;
-                    b = 246;
-                } else if in_border {
-                    r = 20;
-                    g = 184;
-                    b = 118;
-                }
-
-                img.put_pixel(x, y, Rgba([r, g, b, alpha]));
+                img.put_pixel(x, y, Rgba([20, 184, 102, alpha]));
             }
         }
     }

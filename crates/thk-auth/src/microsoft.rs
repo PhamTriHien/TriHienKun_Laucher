@@ -90,11 +90,26 @@ fn random_hex_state() -> String {
 }
 
 fn build_http_client() -> ThkResult<Client> {
-    Client::builder()
-        .user_agent("TriHienKun-Laucher/1.0")
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(ThkError::from)
+    thk_core::downloader::configure_reqwest_client_builder(
+        Client::builder()
+            .user_agent("TriHienKun-Laucher/1.0")
+            .timeout(Duration::from_secs(30)),
+    )
+    .build()
+    .map_err(ThkError::from)
+}
+
+fn open_auth_browser_url(url: &str) -> ThkResult<()> {
+    #[cfg(target_os = "android")]
+    {
+        thk_core::android_bridge_open_url(url)
+            .map_err(|e| ThkError::Auth(format!("Không thể mở trình duyệt hệ thống: {e}")))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        open::that(url)
+            .map_err(|e| ThkError::Auth(format!("Không thể mở trình duyệt hệ thống: {e}")))
+    }
 }
 
 pub async fn start_device_code_login(open_browser: bool) -> ThkResult<DeviceCodeSession> {
@@ -135,7 +150,7 @@ pub async fn start_device_code_login(open_browser: bool) -> ThkResult<DeviceCode
     };
 
     if open_browser {
-        let _ = open::that(&session.verification_uri);
+        let _ = open_auth_browser_url(&session.verification_uri);
     }
 
     Ok(session)
@@ -180,6 +195,7 @@ pub async fn poll_device_code_login(
                 &client,
                 &access_token,
                 token_body.refresh_token,
+                None,
             )
             .await?;
             persist_tokens_in_keyring(&authed)?;
@@ -203,8 +219,12 @@ pub async fn poll_device_code_login(
                 ));
             }
             Some(other) => {
-                let desc = token_body.error_description.unwrap_or_else(|| other.to_string());
-                return Err(ThkError::Auth(format!("Đăng nhập Microsoft thất bại: {desc}")));
+                let desc = token_body
+                    .error_description
+                    .unwrap_or_else(|| other.to_string());
+                return Err(ThkError::Auth(format!(
+                    "Đăng nhập Microsoft thất bại: {desc}"
+                )));
             }
             None => continue,
         }
@@ -220,7 +240,7 @@ pub fn build_desktop_auth_challenge(open_browser: bool) -> DesktopAuthChallenge 
         urlencoding::encode(LIVE_SCOPE),
     );
     if open_browser {
-        let _ = open::that(&authorize_url);
+        let _ = open_auth_browser_url(&authorize_url);
     }
     DesktopAuthChallenge {
         authorize_url,
@@ -264,26 +284,27 @@ pub fn extract_auth_code_from_redirect_or_raw(
     }
 
     if let Some(exp_state) = expected_state {
-        if let Some(got_state) = params.get("state") {
-            if got_state != exp_state {
-                return Err(ThkError::Auth(
-                    "State OAuth không khớp (nghi vấn giả mạo phiên đăng nhập).".into(),
-                ));
-            }
+        if params.get("state").map(String::as_str) != Some(exp_state) {
+            return Err(ThkError::Auth(
+                "State OAuth thiếu hoặc không khớp (nghi vấn giả mạo phiên đăng nhập).".into(),
+            ));
         }
     }
 
     params
         .remove("code")
         .filter(|c| !c.is_empty())
-        .ok_or_else(|| ThkError::InvalidInput("Không tìm thấy tham số `code` trong URL đã dán.".into()))
+        .ok_or_else(|| {
+            ThkError::InvalidInput("Không tìm thấy tham số `code` trong URL đã dán.".into())
+        })
 }
 
 pub async fn complete_desktop_auth_challenge(
     challenge: &DesktopAuthChallenge,
     redirect_url_or_code: &str,
 ) -> ThkResult<AuthenticatedMinecraftSession> {
-    let code = extract_auth_code_from_redirect_or_raw(redirect_url_or_code, Some(&challenge.state))?;
+    let code =
+        extract_auth_code_from_redirect_or_raw(redirect_url_or_code, Some(&challenge.state))?;
     let client = build_http_client()?;
 
     let params = [
@@ -312,7 +333,8 @@ pub async fn complete_desktop_auth_challenge(
     })?;
 
     let authed =
-        exchange_ms_tokens_to_minecraft(&client, &access_token, token_body.refresh_token).await?;
+        exchange_ms_tokens_to_minecraft(&client, &access_token, token_body.refresh_token, None)
+            .await?;
     persist_tokens_in_keyring(&authed)?;
     Ok(authed)
 }
@@ -327,6 +349,12 @@ pub async fn login_with_loopback_pkce(
     custom_client_id: &str,
     cancel: CancellationToken,
 ) -> ThkResult<AuthenticatedMinecraftSession> {
+    let custom_client_id = custom_client_id.trim();
+    if custom_client_id.is_empty() {
+        return Err(ThkError::InvalidInput(
+            "Vui lòng nhập Azure Application (client) ID hợp lệ.".into(),
+        ));
+    }
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| ThkError::Auth(format!("Không thể mở cổng loopback OAuth2: {e}")))?;
@@ -346,7 +374,8 @@ pub async fn login_with_loopback_pkce(
         .route("/callback", get(handle_oauth_loopback))
         .with_state(cb_state);
 
-    let srv_cancel = cancel.clone();
+    let srv_cancel = cancel.child_token();
+    let server_guard = srv_cancel.clone().drop_guard();
     tokio::spawn(async move {
         let _ = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -362,16 +391,15 @@ pub async fn login_with_loopback_pkce(
         urlencoding::encode("XboxLive.signin offline_access"),
     );
 
-    open::that(&auth_url)
-        .map_err(|e| ThkError::Auth(format!("Không thể mở trình duyệt hệ thống: {e}")))?;
+    open_auth_browser_url(&auth_url)?;
 
     let code = tokio::select! {
         _ = cancel.cancelled() => return Err(ThkError::Cancelled),
         res = rx => {
-            cancel.cancel();
             res.map_err(|_| ThkError::Auth("Phiên callback OAuth2 đã đóng bất ngờ.".into()))??
         }
     };
+    drop(server_guard);
 
     let client = build_http_client()?;
     let params = [
@@ -399,8 +427,13 @@ pub async fn login_with_loopback_pkce(
         ThkError::Auth(desc)
     })?;
 
-    let authed =
-        exchange_ms_tokens_to_minecraft(&client, &access_token, token_body.refresh_token).await?;
+    let authed = exchange_ms_tokens_to_minecraft(
+        &client,
+        &access_token,
+        token_body.refresh_token,
+        Some(custom_client_id.to_string()),
+    )
+    .await?;
     persist_tokens_in_keyring(&authed)?;
     Ok(authed)
 }
@@ -409,12 +442,15 @@ async fn handle_oauth_loopback(
     State(state): State<LoopbackCallbackState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Html<&'static str> {
+    if params.get("state").map(String::as_str) != Some(state.expected_state.as_str()) {
+        return Html(
+            "OAuth state mismatch. Return to the launcher and retry the original sign-in link.",
+        );
+    }
     let outcome = if let Some(err) = params.get("error") {
         let desc = params.get("error_description").unwrap_or(err);
         Err(ThkError::Auth(format!("Microsoft OAuth error: {desc}")))
-    } else if params.get("state").map(String::as_str) != Some(state.expected_state.as_str()) {
-        Err(ThkError::Auth("OAuth state mismatch".into()))
-    } else if let Some(code) = params.get("code") {
+    } else if let Some(code) = params.get("code").filter(|code| !code.is_empty()) {
         Ok(code.clone())
     } else {
         Err(ThkError::Auth("Missing OAuth authorization code".into()))
@@ -429,6 +465,82 @@ async fn handle_oauth_loopback(
         Html("<!doctype html><html><head><meta charset='utf-8'><title>TriHienKun Laucher</title></head><body style='background:#0f1117;color:#e5e7eb;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0'><div style='text-align:center'><h2>Đăng nhập thành công!</h2><p>Bạn có thể đóng tab trình duyệt này và quay lại TriHienKun Laucher.</p></div></body></html>")
     } else {
         Html("<!doctype html><html><head><meta charset='utf-8'><title>TriHienKun Laucher</title></head><body style='background:#0f1117;color:#fca5a5;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0'><div style='text-align:center'><h2>Đăng nhập thất bại</h2><p>Vui lòng quay lại TriHienKun Laucher để kiểm tra chi tiết lỗi.</p></div></body></html>")
+    }
+}
+
+#[cfg(test)]
+mod loopback_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn untrusted_callbacks_do_not_consume_the_login_session() {
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let state = LoopbackCallbackState {
+            expected_state: "test-state".into(),
+            result_tx: Arc::new(Mutex::new(Some(tx))),
+        };
+        for params in [
+            HashMap::from([("code".into(), "test-code".into())]),
+            HashMap::from([
+                ("state".into(), "wrong".into()),
+                ("error".into(), "denied".into()),
+            ]),
+        ] {
+            let _ = handle_oauth_loopback(State(state.clone()), Query(params)).await;
+            assert!(matches!(
+                rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+        }
+        let _ = handle_oauth_loopback(
+            State(state),
+            Query(HashMap::from([
+                ("state".into(), "test-state".into()),
+                ("code".into(), "test-code".into()),
+            ])),
+        )
+        .await;
+        assert_eq!(rx.await.unwrap().unwrap(), "test-code");
+    }
+
+    #[tokio::test]
+    async fn empty_authorization_code_is_rejected() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let state = LoopbackCallbackState {
+            expected_state: "test-state".into(),
+            result_tx: Arc::new(Mutex::new(Some(tx))),
+        };
+        let _ = handle_oauth_loopback(
+            State(state),
+            Query(HashMap::from([
+                ("state".into(), "test-state".into()),
+                ("code".into(), String::new()),
+            ])),
+        )
+        .await;
+        assert!(matches!(rx.await.unwrap(), Err(ThkError::Auth(_))));
+    }
+
+    #[tokio::test]
+    async fn dropping_loopback_guard_releases_listener_without_cancelling_parent() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+        let guard = child.clone().drop_guard();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, Router::new())
+                .with_graceful_shutdown(child.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!parent.is_cancelled());
+        let _rebound = TcpListener::bind(address).await.unwrap();
     }
 }
 
@@ -455,10 +567,17 @@ pub async fn ensure_valid_minecraft_token(
     }
 
     let refresh_tok = stored.ms_refresh_token.ok_or_else(|| {
-        ThkError::Auth("Token Minecraft đã hết hạn và không có refresh_token. Vui lòng đăng nhập lại.".into())
+        ThkError::Auth(
+            "Token Minecraft đã hết hạn và không có refresh_token. Vui lòng đăng nhập lại.".into(),
+        )
     })?;
 
-    let refreshed = refresh_microsoft_session(&refresh_tok, custom_client_id).await?;
+    let refreshed = refresh_account_with_saved_or_fallback_client(
+        &refresh_tok,
+        account.oauth_client_id.as_deref(),
+        custom_client_id,
+    )
+    .await?;
     persist_tokens_in_keyring(&refreshed)?;
     account.username = refreshed.account.username;
     account.uuid = refreshed.account.uuid;
@@ -466,6 +585,7 @@ pub async fn ensure_valid_minecraft_token(
     account.cape_url = refreshed.account.cape_url;
     account.skin_variant = refreshed.account.skin_variant;
     account.token_expires_at = refreshed.account.token_expires_at;
+    account.oauth_client_id = refreshed.account.oauth_client_id;
     Ok(refreshed.mc_access_token)
 }
 
@@ -479,19 +599,45 @@ pub async fn force_refresh_account_session(
         ));
     }
     let stored = TokenStore::load_tokens(&account.id)?.ok_or_else(|| {
-        ThkError::Auth(
-            "Microsoft session not found in OS Keyring. Please sign in again.".into(),
-        )
+        ThkError::Auth("Microsoft session not found in OS Keyring. Please sign in again.".into())
     })?;
     let refresh_tok = stored.ms_refresh_token.ok_or_else(|| {
         ThkError::Auth("No refresh_token available in OS Keyring. Please sign in again.".into())
     })?;
-    let mut refreshed = refresh_microsoft_session(&refresh_tok, custom_client_id).await?;
+    let mut refreshed = refresh_account_with_saved_or_fallback_client(
+        &refresh_tok,
+        account.oauth_client_id.as_deref(),
+        custom_client_id,
+    )
+    .await?;
     refreshed.account.custom_skin_path = account.custom_skin_path.clone();
     refreshed.account.custom_cape_path = account.custom_cape_path.clone();
     refreshed.account.custom_elytra_path = account.custom_elytra_path.clone();
     persist_tokens_in_keyring(&refreshed)?;
     Ok(refreshed)
+}
+
+async fn refresh_account_with_saved_or_fallback_client(
+    refresh_token: &str,
+    saved_client_id: Option<&str>,
+    fallback_custom_client_id: Option<&str>,
+) -> ThkResult<AuthenticatedMinecraftSession> {
+    match refresh_microsoft_session(refresh_token, saved_client_id).await {
+        Ok(session) => Ok(session),
+        Err(primary_err) => {
+            let fallback = fallback_custom_client_id
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if saved_client_id.is_none() {
+                if let Some(cid) = fallback {
+                    if let Ok(session) = refresh_microsoft_session(refresh_token, Some(cid)).await {
+                        return Ok(session);
+                    }
+                }
+            }
+            Err(primary_err)
+        }
+    }
 }
 
 pub async fn sync_mojang_profile(
@@ -524,13 +670,18 @@ pub async fn upload_mojang_skin(
             "Mojang Skin API is only available for Microsoft accounts.".into(),
         ));
     }
+    let normalized_png = tokio::task::spawn_blocking(move || {
+        crate::yggdrasil::normalize_skin_png_bytes_for_minecraft(&png_bytes)
+    })
+    .await
+    .map_err(|e| ThkError::Process(format!("Skin normalization task failed: {e}")))??;
     let mc_token = ensure_valid_minecraft_token(account, custom_client_id).await?;
     let client = build_http_client()?;
     let variant_str = match variant {
         SkinVariant::Slim => "slim",
         SkinVariant::Wide => "classic",
     };
-    let file_part = reqwest::multipart::Part::bytes(png_bytes)
+    let file_part = reqwest::multipart::Part::bytes(normalized_png)
         .file_name("skin.png")
         .mime_str("image/png")
         .map_err(ThkError::from)?;
@@ -612,7 +763,11 @@ pub async fn refresh_microsoft_session(
     custom_client_id: Option<&str>,
 ) -> ThkResult<AuthenticatedMinecraftSession> {
     let client = build_http_client()?;
-    let (token_url, client_id) = match custom_client_id.filter(|s| !s.trim().is_empty()) {
+    let normalized_custom = custom_client_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    let (token_url, client_id) = match normalized_custom.as_deref() {
         Some(cid) => (
             "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
             cid,
@@ -646,7 +801,7 @@ pub async fn refresh_microsoft_session(
     let next_refresh = body
         .refresh_token
         .or_else(|| Some(refresh_token.to_string()));
-    exchange_ms_tokens_to_minecraft(&client, &ms_access, next_refresh).await
+    exchange_ms_tokens_to_minecraft(&client, &ms_access, next_refresh, normalized_custom).await
 }
 
 fn persist_tokens_in_keyring(session: &AuthenticatedMinecraftSession) -> ThkResult<()> {
@@ -711,6 +866,7 @@ async fn exchange_ms_tokens_to_minecraft(
     client: &Client,
     ms_access_token: &str,
     ms_refresh_token: Option<String>,
+    oauth_client_id: Option<String>,
 ) -> ThkResult<AuthenticatedMinecraftSession> {
     let (xbl_token, uhs) = authenticate_xbox_live(client, ms_access_token).await?;
     let xsts_token = authorize_xsts(client, &xbl_token).await?;
@@ -731,6 +887,7 @@ async fn exchange_ms_tokens_to_minecraft(
         custom_cape_path: None,
         custom_elytra_path: None,
         token_expires_at: Some(now + expires_in),
+        oauth_client_id,
         created_at: now,
     };
 
@@ -741,7 +898,10 @@ async fn exchange_ms_tokens_to_minecraft(
     })
 }
 
-async fn authenticate_xbox_live(client: &Client, ms_access_token: &str) -> ThkResult<(String, String)> {
+async fn authenticate_xbox_live(
+    client: &Client,
+    ms_access_token: &str,
+) -> ThkResult<(String, String)> {
     for rps_ticket in [format!("d={ms_access_token}"), ms_access_token.to_string()] {
         let payload = json!({
             "Properties": {
@@ -812,7 +972,9 @@ async fn authorize_xsts(client: &Client, xbl_token: &str) -> ThkResult<String> {
     }
 
     if !status.is_success() {
-        return Err(ThkError::Auth(format!("XSTS trả về mã trạng thái lỗi: {status}")));
+        return Err(ThkError::Auth(format!(
+            "XSTS trả về mã trạng thái lỗi: {status}"
+        )));
     }
 
     parsed
@@ -896,7 +1058,12 @@ async fn fetch_minecraft_profile(
 
     let active_skin = parsed.skins.as_ref().and_then(|list| {
         list.iter()
-            .find(|s| s.state.as_deref().unwrap_or("").eq_ignore_ascii_case("ACTIVE"))
+            .find(|s| {
+                s.state
+                    .as_deref()
+                    .unwrap_or("")
+                    .eq_ignore_ascii_case("ACTIVE")
+            })
             .or_else(|| list.first())
     });
 

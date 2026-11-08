@@ -36,16 +36,19 @@ struct SpigetIcon {
 struct SpigetFile {
     #[serde(rename = "type", default)]
     file_type: String,
-    #[serde(default)]
-    size: f64,
     #[serde(rename = "externalUrl")]
     external_url: Option<String>,
 }
 
-pub async fn search_spiget(
-    downloader: &DownloadManager,
-    q: &SearchQuery,
-) -> ThkResult<SearchPage> {
+#[derive(Deserialize)]
+struct SpigetVersionEntry {
+    id: u64,
+    name: String,
+    #[serde(rename = "releaseDate")]
+    release_date: Option<i64>,
+}
+
+pub async fn search_spiget(downloader: &DownloadManager, q: &SearchQuery) -> ThkResult<SearchPage> {
     let size = q.limit.clamp(1, 50);
     let page = (q.offset / size) + 1;
     let fields = "id,name,tag,downloads,testedVersions,icon,file,updateDate";
@@ -137,46 +140,79 @@ pub async fn get_spiget_versions(
         ))
         .await?;
 
-    let is_external = r
+    let ver_list: Vec<SpigetVersionEntry> = downloader
+        .get_json(&format!(
+            "{SPIGET_API_BASE}/resources/{}/versions?size=10&sort=-releaseDate",
+            r.id
+        ))
+        .await
+        .unwrap_or_default();
+
+    let file_type = r
         .file
         .as_ref()
-        .is_some_and(|f| f.file_type.eq_ignore_ascii_case("external"));
+        .map(|f| f.file_type.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_external = file_type == "external";
+    let is_non_jar = !is_external && !file_type.is_empty() && file_type != ".jar";
 
     let download_url = if is_external {
         r.file
             .as_ref()
             .and_then(|f| f.external_url.clone())
             .unwrap_or_else(|| format!("https://www.spigotmc.org/resources/{}", r.id))
+    } else if is_non_jar {
+        format!("spiget-unsupported://{}/{}", r.id, file_type)
     } else {
         format!("{SPIGET_API_BASE}/resources/{}/download", r.id)
     };
 
     let slug = SafePath::slugify_dir_name(&r.name);
+    let latest_ver = ver_list.into_iter().next();
+    let (ver_id_str, ver_name, published_at) = match latest_ver {
+        Some(v) => (
+            v.id.to_string(),
+            v.name,
+            v.release_date
+                .or(r.update_date)
+                .and_then(|ts| DateTime::from_timestamp(ts, 0).map(|d| d.to_rfc3339())),
+        ),
+        None => (
+            format!("latest-{}", r.id),
+            "latest".to_string(),
+            r.update_date
+                .and_then(|ts| DateTime::from_timestamp(ts, 0).map(|d| d.to_rfc3339())),
+        ),
+    };
+
+    let display_label = if is_external {
+        format!("{ver_name} (External Browser)")
+    } else if is_non_jar {
+        format!("{ver_name} ({file_type} archive)")
+    } else {
+        ver_name.clone()
+    };
+
     Ok(vec![ProjectVersion {
-        id: format!("latest-{}", r.id),
+        id: ver_id_str.clone(),
         project_id: r.id.to_string(),
         provider: ProviderSource::Spiget,
-        name: if is_external {
-            "External Release (Browser)".into()
-        } else {
-            "Latest Direct JAR".into()
-        },
-        version_number: "latest".into(),
+        name: display_label,
+        version_number: ver_name,
         release_channel: "release".into(),
-        published_at: r
-            .update_date
-            .and_then(|ts| DateTime::from_timestamp(ts, 0).map(|d| d.to_rfc3339())),
+        published_at,
         game_versions: r.tested_versions,
         loaders: vec!["paper".into(), "purpur".into()],
         files: vec![VersionFile {
             url: download_url,
-            filename: format!("{slug}-{}.jar", r.id),
-            size: r.file.map(|f| (f.size * 1024.0) as u64).unwrap_or(0),
+            filename: format!("{slug}-{}-{ver_id_str}.jar", r.id),
+            size: 0,
             sha1: None,
             sha512: None,
-            primary: !is_external,
+            primary: !is_external && !is_non_jar,
         }],
         dependencies: Vec::new(),
+        server_pack_file_id: None,
     }])
 }
 
@@ -201,6 +237,15 @@ where
         .ok_or_else(|| ThkError::Provider("No Spiget file entry found".into()))?;
 
     if !file.primary {
+        if let Some(ext) = file
+            .url
+            .strip_prefix(&format!("spiget-unsupported://{}/", ver.project_id))
+        {
+            return Err(ThkError::InvalidInput(format!(
+                "Resource '{plugin_name}' trên SpigotMC là tệp '{ext}', không phải plugin .jar trực tiếp. Vui lòng tải thủ công từ https://www.spigotmc.org/resources/{}",
+                ver.project_id
+            )));
+        }
         return Err(ThkError::InvalidInput(format!(
             "Plugin '{plugin_name}' được lưu trữ bên ngoài SpigotMC ({}). Vui lòng tải từ Modrinth hoặc mở trang nguồn.",
             file.url
@@ -213,6 +258,11 @@ where
     let dest = SafePath::resolve_child(&plugins_dir, clean_name)?;
 
     let mut task = DownloadTask::new(file.url.clone(), dest.clone());
+    task.fallback_urls = vec![format!(
+        "https://cdn.spiget.org/file/spiget-resources/{}.jar",
+        ver.project_id
+    )];
+    task.force_overwrite = true;
     task.label = plugin_name.to_string();
 
     downloader
@@ -224,6 +274,25 @@ where
             on_progress,
         )
         .await?;
+
+    // Remove older JAR versions of the same Spiget resource id so plugins/ has no duplicates
+    let slug_prefix = clean_name
+        .rsplit_once('-')
+        .map(|(lhs, _)| lhs)
+        .unwrap_or("");
+    if !slug_prefix.is_empty() {
+        if let Ok(entries) = std::fs::read_dir(&plugins_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name != clean_name
+                    && (name == format!("{slug_prefix}.jar")
+                        || (name.starts_with(&format!("{slug_prefix}-")) && name.ends_with(".jar")))
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
 
     Ok(dest)
 }

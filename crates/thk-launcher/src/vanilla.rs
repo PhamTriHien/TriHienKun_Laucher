@@ -123,6 +123,8 @@ pub struct PreparedVanillaAssets {
     pub libraries: Vec<PathBuf>,
     pub natives_dir: PathBuf,
     pub assets_dir: PathBuf,
+    pub virtual_assets_dir: Option<PathBuf>,
+    pub map_to_resources: bool,
     pub asset_index_id: String,
 }
 
@@ -175,15 +177,38 @@ pub async fn prepare_vanilla_files<F>(
 where
     F: Fn(DownloadProgress) + Send + Sync + Clone + 'static,
 {
+    prepare_vanilla_files_with_natives(downloader, paths, version_json, None, cancel, on_progress)
+        .await
+}
+
+pub async fn prepare_vanilla_files_with_natives<F>(
+    downloader: &DownloadManager,
+    paths: &AppPaths,
+    version_json: &VanillaVersionJson,
+    custom_natives_dir: Option<PathBuf>,
+    cancel: Option<CancellationToken>,
+    on_progress: F,
+) -> ThkResult<PreparedVanillaAssets>
+where
+    F: Fn(DownloadProgress) + Send + Sync + Clone + 'static,
+{
     let clean_ver = SafePath::validate_single_name(&version_json.id)?;
     let ver_dir = SafePath::resolve_child(&paths.versions_dir, clean_ver)?;
-    let natives_dir = SafePath::resolve_child(&ver_dir, "natives")?;
+    tokio::fs::create_dir_all(&ver_dir).await?;
+    let natives_dir = match custom_natives_dir {
+        Some(dir) => dir,
+        None => SafePath::resolve_child(&ver_dir, "natives")?,
+    };
     tokio::fs::create_dir_all(&natives_dir).await?;
 
     let client_jar = SafePath::resolve_child(&ver_dir, format!("{clean_ver}.jar"))?;
     let mut jar_and_lib_tasks = Vec::new();
 
-    if let Some(client_dl) = version_json.downloads.as_ref().and_then(|d| d.client.as_ref()) {
+    if let Some(client_dl) = version_json
+        .downloads
+        .as_ref()
+        .and_then(|d| d.client.as_ref())
+    {
         let mut t = DownloadTask::new(client_dl.url.clone(), client_jar.clone());
         t.expected_sha1 = client_dl.sha1.clone();
         t.expected_size = client_dl.size;
@@ -198,6 +223,24 @@ where
     for lib in &version_json.libraries {
         if !evaluate_rules(lib.rules.as_deref(), &features) {
             continue;
+        }
+
+        if cfg!(target_os = "android") && is_modern_native_library_coord(&lib.name) {
+            continue;
+        }
+
+        if cfg!(target_os = "android") {
+            if let Some((upgraded_coord, rel_path, url, sha1)) =
+                android_upgraded_library_spec(&lib.name)
+            {
+                let dest = SafePath::resolve_child(&paths.libraries_dir, rel_path)?;
+                classpath_libs.push(dest.clone());
+                let mut task = DownloadTask::new(url.to_string(), dest);
+                task.expected_sha1 = Some(sha1.to_string());
+                task.label = upgraded_coord.to_string();
+                jar_and_lib_tasks.push(task);
+                continue;
+            }
         }
 
         if let Some(art) = lib.downloads.as_ref().and_then(|d| d.artifact.as_ref()) {
@@ -239,35 +282,45 @@ where
         }
 
         // Legacy (< 1.19) classifier-based natives
-        if let (Some(natives_map), Some(classifiers)) = (
-            lib.natives.as_ref(),
-            lib.downloads.as_ref().and_then(|d| d.classifiers.as_ref()),
-        ) {
-            if let Some(classifier_tpl) = natives_map.get(current_mojang_os_name()) {
-                let arch_bits = if cfg!(target_pointer_width = "64") {
-                    "64"
-                } else {
-                    "32"
-                };
-                let key = classifier_tpl.replace("${arch}", arch_bits);
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                let chosen = classifiers.get(&key).or_else(|| {
-                    classifiers
-                        .get("natives-macos-arm64")
-                        .or_else(|| classifiers.get("natives-osx"))
-                });
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-                let chosen = classifiers.get(&key);
+        if !cfg!(target_os = "android") {
+            if let (Some(natives_map), Some(classifiers)) = (
+                lib.natives.as_ref(),
+                lib.downloads.as_ref().and_then(|d| d.classifiers.as_ref()),
+            ) {
+                if let Some(classifier_tpl) = natives_map.get(current_mojang_os_name()) {
+                    let arch_bits = if cfg!(target_pointer_width = "64") {
+                        "64"
+                    } else {
+                        "32"
+                    };
+                    let key = classifier_tpl.replace("${arch}", arch_bits);
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    let chosen = classifiers.get(&key).or_else(|| {
+                        classifiers
+                            .get("natives-macos-arm64")
+                            .or_else(|| classifiers.get("natives-osx"))
+                    });
+                    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+                    let chosen = classifiers
+                        .get("natives-linux-arm64")
+                        .or_else(|| classifiers.get("natives-linux-aarch64"))
+                        .or_else(|| classifiers.get(&key));
+                    #[cfg(not(any(
+                        all(target_os = "macos", target_arch = "aarch64"),
+                        all(target_os = "linux", target_arch = "aarch64")
+                    )))]
+                    let chosen = classifiers.get(&key);
 
-                if let Some(nat_art) = chosen {
-                    if let Some(ref rel_path) = nat_art.path {
-                        let dest = SafePath::resolve_child(&paths.libraries_dir, rel_path)?;
-                        native_jars.push(dest.clone());
-                        let mut task = DownloadTask::new(nat_art.url.clone(), dest);
-                        task.expected_sha1 = nat_art.sha1.clone();
-                        task.expected_size = nat_art.size;
-                        task.label = format!("{} ({key})", lib.name);
-                        jar_and_lib_tasks.push(task);
+                    if let Some(nat_art) = chosen {
+                        if let Some(ref rel_path) = nat_art.path {
+                            let dest = SafePath::resolve_child(&paths.libraries_dir, rel_path)?;
+                            native_jars.push(dest.clone());
+                            let mut task = DownloadTask::new(nat_art.url.clone(), dest);
+                            task.expected_sha1 = nat_art.sha1.clone();
+                            task.expected_size = nat_art.size;
+                            task.label = format!("{} ({key})", lib.name);
+                            jar_and_lib_tasks.push(task);
+                        }
                     }
                 }
             }
@@ -304,14 +357,8 @@ where
         .map_err(|e| ThkError::Process(format!("Native library extraction failed: {e}")))??;
     }
 
-    let asset_index_id = download_game_assets(
-        downloader,
-        paths,
-        version_json,
-        cancel,
-        on_progress,
-    )
-    .await?;
+    let (asset_index_id, virtual_assets_dir, map_to_resources) =
+        download_game_assets(downloader, paths, version_json, cancel, on_progress).await?;
 
     Ok(PreparedVanillaAssets {
         version_json: version_json.clone(),
@@ -319,6 +366,8 @@ where
         libraries: classpath_libs,
         natives_dir,
         assets_dir: paths.assets_dir.clone(),
+        virtual_assets_dir,
+        map_to_resources,
         asset_index_id,
     })
 }
@@ -344,12 +393,19 @@ async fn download_game_assets<F>(
     version_json: &VanillaVersionJson,
     cancel: Option<CancellationToken>,
     on_progress: F,
-) -> ThkResult<String>
+) -> ThkResult<(String, Option<PathBuf>, bool)>
 where
     F: Fn(DownloadProgress) + Send + Sync + 'static,
 {
     let Some(ref idx_ref) = version_json.asset_index else {
-        return Ok(version_json.assets.clone().unwrap_or_else(|| "legacy".into()));
+        return Ok((
+            version_json
+                .assets
+                .clone()
+                .unwrap_or_else(|| "legacy".into()),
+            None,
+            false,
+        ));
     };
 
     let indexes_dir = SafePath::resolve_child(&paths.assets_dir, "indexes")?;
@@ -363,10 +419,21 @@ where
     let mut idx_task = DownloadTask::new(idx_ref.url.clone(), idx_path.clone());
     idx_task.expected_sha1 = idx_ref.sha1.clone();
     idx_task.expected_size = idx_ref.size;
-    downloader.download_single(&idx_task, cancel.as_ref(), |_, _, _| {}).await?;
+    downloader
+        .download_single(&idx_task, cancel.as_ref(), |_, _, _| {})
+        .await?;
 
     let raw_idx = tokio::fs::read_to_string(&idx_path).await?;
     let parsed_idx: AssetIndexFile = serde_json::from_str(&raw_idx)?;
+
+    let virtual_root = if parsed_idx.is_virtual || parsed_idx.map_to_resources {
+        Some(SafePath::resolve_child(
+            &paths.assets_dir,
+            format!("virtual/{clean_id}"),
+        )?)
+    } else {
+        None
+    };
 
     let mut tasks = Vec::with_capacity(parsed_idx.objects.len());
     let mut seen_hashes = std::collections::HashSet::with_capacity(parsed_idx.objects.len());
@@ -388,9 +455,8 @@ where
             tasks.push(t);
         }
 
-        if parsed_idx.is_virtual || parsed_idx.map_to_resources {
-            let virtual_root = SafePath::resolve_child(&paths.assets_dir, format!("virtual/{clean_id}"))?;
-            if let Ok(vdest) = SafePath::resolve_child(&virtual_root, &logical_name) {
+        if let Some(ref vroot) = virtual_root {
+            if let Ok(vdest) = SafePath::resolve_child(vroot, &logical_name) {
                 virtual_copies.push((obj_dest, vdest));
             }
         }
@@ -421,7 +487,11 @@ where
         .ok();
     }
 
-    Ok(idx_ref.id.clone())
+    Ok((
+        idx_ref.id.clone(),
+        virtual_root,
+        parsed_idx.map_to_resources,
+    ))
 }
 
 pub fn evaluate_rules(rules: Option<&[MojangRule]>, features: &HashMap<String, bool>) -> bool {
@@ -489,6 +559,53 @@ fn is_modern_native_library_coord(coord: &str) -> bool {
     coord.contains(":natives-")
 }
 
+pub fn android_upgraded_library_spec(
+    coord: &str,
+) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    let parts: Vec<&str> = coord.split(':').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let ver_nums: Vec<u32> = parts[2]
+        .split('.')
+        .map(|s| {
+            s.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u32>()
+                .unwrap_or(0)
+        })
+        .collect();
+    let major = ver_nums.first().copied().unwrap_or(0);
+    let minor = ver_nums.get(1).copied().unwrap_or(0);
+
+    if coord.starts_with("net.java.dev.jna:jna:") && (major < 5 || (major == 5 && minor < 13)) {
+        return Some((
+            "net.java.dev.jna:jna:5.13.0",
+            "net/java/dev/jna/jna/5.13.0/jna-5.13.0.jar",
+            "https://repo1.maven.org/maven2/net/java/dev/jna/jna/5.13.0/jna-5.13.0.jar",
+            "1200e7ebeedbe0d10062093f32925a912020e747",
+        ));
+    }
+    if coord.starts_with("com.github.oshi:oshi-core:") && major == 6 && minor == 2 {
+        return Some((
+            "com.github.oshi:oshi-core:6.3.0",
+            "com/github/oshi/oshi-core/6.3.0/oshi-core-6.3.0.jar",
+            "https://repo1.maven.org/maven2/com/github/oshi/oshi-core/6.3.0/oshi-core-6.3.0.jar",
+            "9e98cf55be371cafdb9c70c35d04ec2a8c2b42ac",
+        ));
+    }
+    if coord.starts_with("org.ow2.asm:asm-all:") && major < 5 {
+        return Some((
+            "org.ow2.asm:asm-all:5.0.4",
+            "org/ow2/asm/asm-all/5.0.4/asm-all-5.0.4.jar",
+            "https://repo1.maven.org/maven2/org/ow2/asm/asm-all/5.0.4/asm-all-5.0.4.jar",
+            "e6244859997b3d4237a552669279780876228909",
+        ));
+    }
+    None
+}
+
 fn matches_current_os_native_coord(coord: &str) -> bool {
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
     {
@@ -513,9 +630,21 @@ fn matches_current_os_native_coord(coord: &str) -> bool {
         (coord.contains(":natives-macos") || coord.contains(":natives-osx"))
             && !coord.contains(":natives-macos-arm64")
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        target_arch = "aarch64"
+    ))]
     {
-        coord.contains(":natives-linux") && !coord.contains(":natives-linux-arm")
+        coord.contains(":natives-linux-arm64") || coord.contains(":natives-linux-aarch64")
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        not(target_arch = "aarch64")
+    ))]
+    {
+        coord.contains(":natives-linux")
+            && !coord.contains(":natives-linux-arm")
+            && !coord.contains(":natives-linux-aarch64")
     }
 }
 

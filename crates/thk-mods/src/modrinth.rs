@@ -1,3 +1,4 @@
+use crate::matcher::split_filename_title_and_version;
 use crate::provider::{
     DependencyRelation, DependencySpec, GalleryImage, ImportedPackMetadata, ProjectDetail,
     ProjectSummary, ProjectVersion, SearchPage, SearchQuery, VersionFile,
@@ -6,7 +7,7 @@ use chrono::Utc;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use thk_core::archive::{extract_zip_prefix_safe, read_zip_entry_string};
+use thk_core::archive::{extract_zip_prefix_cancellable, read_zip_entry_string};
 use thk_core::hash::sha1_file;
 use thk_core::models::{
     ContentKind, DownloadProgress, GameProfile, InstalledContentRecord, LoaderType, ProviderSource,
@@ -14,6 +15,7 @@ use thk_core::models::{
 use thk_core::paths::SafePath;
 use thk_core::{Database, DownloadManager, DownloadTask, ThkError, ThkResult};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 pub const MODRINTH_API_BASE: &str = "https://api.modrinth.com/v2";
 
@@ -301,6 +303,7 @@ pub(crate) fn map_modrinth_version(v: ModrinthVersionRaw) -> ProjectVersion {
                 })
             })
             .collect(),
+        server_pack_file_id: None,
     }
 }
 
@@ -318,19 +321,29 @@ pub async fn install_modrinth_content<F>(
 where
     F: Fn(DownloadProgress) + Send + Sync + 'static,
 {
-    let dest_subdir = SafePath::resolve_child(&profile.instance_path, content_kind.instance_subdir())?;
+    let dest_subdir =
+        SafePath::resolve_child(&profile.instance_path, content_kind.instance_subdir())?;
     tokio::fs::create_dir_all(&dest_subdir).await?;
 
-    let mut queue: Vec<(ProjectSummary, ProjectVersion, usize)> =
-        vec![(project_summary.clone(), version.clone(), 0)];
-    let mut visited = HashSet::new();
+    let mut queue = vec![(project_summary.clone(), version.clone())];
+    let mut visited = HashMap::new();
     let mut tasks = Vec::new();
     let mut pending_records = Vec::new();
 
-    while let Some((proj, ver, depth)) = queue.pop() {
-        if !visited.insert(proj.project_id.clone()) {
+    while let Some((proj, ver)) = queue.pop() {
+        if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            return Err(ThkError::Cancelled);
+        }
+        if let Some(selected) = visited.get(&proj.project_id) {
+            if selected != &ver.id {
+                return Err(ThkError::Provider(format!(
+                    "Conflicting versions for required project {}: {} and {}",
+                    proj.project_id, selected, ver.id
+                )));
+            }
             continue;
         }
+        visited.insert(proj.project_id.clone(), ver.id.clone());
 
         let Some(file) = ver
             .files
@@ -338,13 +351,14 @@ where
             .find(|f| f.primary)
             .or_else(|| ver.files.first())
         else {
-            continue;
+            return Err(ThkError::Provider(format!(
+                "No downloadable file for {}",
+                proj.title
+            )));
         };
 
         let clean_name = SafePath::validate_single_name(&file.filename)?;
         let dest_path = SafePath::resolve_child(&dest_subdir, clean_name)?;
-
-        remove_previous_project_files(db, &profile.id, content_kind, &proj.project_id, &dest_subdir, clean_name)?;
 
         let mut task = DownloadTask::new(file.url.clone(), dest_path.clone());
         task.expected_sha1 = file.sha1.clone();
@@ -371,70 +385,77 @@ where
             },
         ));
 
-        if content_kind == ContentKind::Mod && depth < 3 {
+        if matches!(content_kind, ContentKind::Mod | ContentKind::Plugin) {
             for dep in &ver.dependencies {
-                if dep.relation != DependencyRelation::Required
-                    || visited.contains(&dep.project_id)
-                {
+                if dep.relation != DependencyRelation::Required {
                     continue;
                 }
-                let dep_loader = (profile.loader != LoaderType::Vanilla).then_some(profile.loader);
-                let dep_ver_opt = if let Some(ref vid) = dep.version_id {
+                if let Some(selected) = visited.get(&dep.project_id) {
+                    if dep
+                        .version_id
+                        .as_ref()
+                        .is_some_and(|required| required != selected)
+                    {
+                        return Err(ThkError::Provider(format!(
+                            "Conflicting required version for project {}",
+                            dep.project_id
+                        )));
+                    }
+                    continue;
+                }
+                let dep_loader = (content_kind == ContentKind::Mod
+                    && profile.loader != LoaderType::Vanilla)
+                    .then_some(profile.loader);
+                let resolved_dep_ver = if let Some(ref vid) = dep.version_id {
                     let url = format!("{MODRINTH_API_BASE}/version/{}", urlencoding::encode(vid));
-                    downloader
-                        .get_json::<ModrinthVersionRaw>(&url)
-                        .await
-                        .ok()
-                        .map(map_modrinth_version)
-                        .filter(|dv| version_matches_profile(dv, &profile.game_version, dep_loader))
+                    let raw = downloader.get_json::<ModrinthVersionRaw>(&url).await?;
+                    let dependency = map_modrinth_version(raw);
+                    if dependency.project_id != dep.project_id
+                        || !version_matches_profile(&dependency, &profile.game_version, dep_loader)
+                    {
+                        return Err(ThkError::Provider(format!(
+                            "Required dependency {} is incompatible with this profile",
+                            dep.project_id
+                        )));
+                    }
+                    dependency
                 } else {
-                    None
-                };
-
-                let resolved_dep_ver = match dep_ver_opt {
-                    Some(v) => Some(v),
-                    None => get_modrinth_versions(
+                    let dep_vers = get_modrinth_versions(
                         downloader,
                         &dep.project_id,
                         Some(&profile.game_version),
                         dep_loader,
                     )
-                    .await
-                    .ok()
-                    .and_then(|mut list| list.drain(..).next()),
+                    .await?;
+                    dep_vers
+                        .iter()
+                        .find(|v| v.release_channel == "release")
+                        .cloned()
+                        .or_else(|| dep_vers.into_iter().next())
+                        .ok_or_else(|| {
+                            ThkError::Provider(format!(
+                                "No compatible version for required dependency {}",
+                                dep.project_id
+                            ))
+                        })?
                 };
-
-                if let Some(dv) = resolved_dep_ver {
-                    if let Ok(dep_proj) = get_modrinth_project(downloader, &dep.project_id).await {
-                        queue.push((dep_proj.summary, dv, depth + 1));
-                    }
-                }
+                let dep_proj = get_modrinth_project(downloader, &dep.project_id).await?;
+                queue.push((dep_proj.summary, resolved_dep_ver));
             }
         }
     }
 
-    downloader
-        .download_batch(
-            &format!("Installing {}", project_summary.title),
-            tasks,
-            8,
-            cancel,
-            on_progress,
-        )
-        .await?;
-
-    let mut installed_paths = Vec::new();
-    for (path, mut rec) in pending_records {
-        if rec.sha1.is_empty() {
-            if let Ok(h) = sha1_file(&path) {
-                rec.sha1 = h;
-            }
-        }
-        db.upsert_installed_content(&rec)?;
-        installed_paths.push(path);
-    }
-
-    Ok(installed_paths)
+    crate::install::install_content_batch(
+        downloader,
+        db,
+        &dest_subdir,
+        &format!("Installing {}", project_summary.title),
+        tasks,
+        pending_records,
+        cancel,
+        on_progress,
+    )
+    .await
 }
 
 fn version_matches_profile(
@@ -445,41 +466,11 @@ fn version_matches_profile(
     let gv_ok = v.game_versions.is_empty() || v.game_versions.iter().any(|g| g == game_version);
     let ldr_ok = match loader {
         Some(l) => {
-            v.loaders.is_empty()
-                || v.loaders
-                    .iter()
-                    .any(|s| s.eq_ignore_ascii_case(l.as_str()))
+            v.loaders.is_empty() || v.loaders.iter().any(|s| s.eq_ignore_ascii_case(l.as_str()))
         }
         None => true,
     };
     gv_ok && ldr_ok
-}
-
-pub(crate) fn remove_previous_project_files(
-    db: &Database,
-    profile_id: &str,
-    kind: ContentKind,
-    project_id: &str,
-    dest_subdir: &Path,
-    keep_filename: &str,
-) -> ThkResult<()> {
-    let existing = db.list_installed_content(profile_id, kind)?;
-    for item in existing {
-        if item.project_id == project_id && item.file_name != keep_filename {
-            for candidate_name in [
-                item.file_name.clone(),
-                format!("{}.disabled", item.file_name),
-            ] {
-                if let Ok(old_path) = SafePath::resolve_child(dest_subdir, &candidate_name) {
-                    if old_path.is_file() {
-                        let _ = std::fs::remove_file(old_path);
-                    }
-                }
-            }
-            let _ = db.remove_installed_content(profile_id, kind, &item.file_name);
-        }
-    }
-    Ok(())
 }
 
 pub async fn ensure_fabric_performance_mods<F>(
@@ -499,8 +490,11 @@ where
     let mods_dir = SafePath::resolve_child(&profile.instance_path, "mods")?;
     tokio::fs::create_dir_all(&mods_dir).await?;
     let existing = db.list_installed_content(&profile.id, ContentKind::Mod)?;
-    let installed_projects: HashSet<String> =
-        existing.into_iter().map(|r| r.project_id).collect();
+    let installed_projects: HashSet<String> = existing
+        .into_iter()
+        .filter(|r| r.provider == ProviderSource::Modrinth)
+        .map(|r| r.project_id)
+        .collect();
 
     let mut tasks = Vec::new();
     let mut records = Vec::new();
@@ -519,10 +513,20 @@ where
         else {
             continue;
         };
-        let Some(ver) = versions.drain(..).next() else {
+        let Some(ver) = versions
+            .iter()
+            .find(|v| v.release_channel == "release")
+            .cloned()
+            .or_else(|| versions.drain(..).next())
+        else {
             continue;
         };
-        let Some(file) = ver.files.iter().find(|f| f.primary).or_else(|| ver.files.first()) else {
+        let Some(file) = ver
+            .files
+            .iter()
+            .find(|f| f.primary)
+            .or_else(|| ver.files.first())
+        else {
             continue;
         };
         let Ok(clean_name) = SafePath::validate_single_name(&file.filename) else {
@@ -569,24 +573,17 @@ where
     }
 
     let count = tasks.len();
-    downloader
-        .download_batch(
-            "Installing Fabric Performance Mods",
-            tasks,
-            8,
-            cancel,
-            on_progress,
-        )
-        .await?;
-
-    for (path, mut rec) in records {
-        if rec.sha1.is_empty() {
-            if let Ok(h) = sha1_file(&path) {
-                rec.sha1 = h;
-            }
-        }
-        let _ = db.upsert_installed_content(&rec);
-    }
+    crate::install::install_content_batch(
+        downloader,
+        db,
+        &mods_dir,
+        "Installing Fabric Performance Mods",
+        tasks,
+        records,
+        cancel,
+        on_progress,
+    )
+    .await?;
 
     Ok(count)
 }
@@ -616,6 +613,27 @@ struct MrpackEnv {
     client: Option<String>,
 }
 
+pub(crate) fn parse_modrinth_cdn_ids(url: &str) -> Option<(String, String)> {
+    let (_, after_data) = url.split_once("/data/")?;
+    let mut segs = after_data.split('/');
+    let pid = segs.next()?.trim();
+    let versions_lit = segs.next()?;
+    let vid = segs.next()?.trim();
+    if versions_lit == "versions" && !pid.is_empty() && !vid.is_empty() {
+        Some((pid.to_string(), vid.to_string()))
+    } else {
+        None
+    }
+}
+
+struct TempMrpackGuard(PathBuf);
+
+impl Drop for TempMrpackGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 pub async fn import_mrpack_archive<F>(
     downloader: &DownloadManager,
     mrpack_path: &Path,
@@ -624,18 +642,25 @@ pub async fn import_mrpack_archive<F>(
     on_progress: F,
 ) -> ThkResult<ImportedPackMetadata>
 where
-    F: Fn(DownloadProgress) + Send + Sync + 'static,
+    F: Fn(DownloadProgress) + Send + Sync + Clone + 'static,
 {
+    if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+        return Err(ThkError::Cancelled);
+    }
     tokio::fs::create_dir_all(instance_dir).await?;
-    let index_raw = read_zip_entry_string(mrpack_path, "modrinth.index.json")?
-        .ok_or_else(|| ThkError::InvalidInput("Missing modrinth.index.json inside .mrpack".into()))?;
+    let index_raw =
+        read_zip_entry_string(mrpack_path, "modrinth.index.json")?.ok_or_else(|| {
+            ThkError::InvalidInput("Missing modrinth.index.json inside .mrpack".into())
+        })?;
     let index: MrpackIndex = serde_json::from_str(&index_raw)?;
 
     let game_version = index
         .dependencies
         .get("minecraft")
         .cloned()
-        .ok_or_else(|| ThkError::InvalidInput("modrinth.index.json missing minecraft version".into()))?;
+        .ok_or_else(|| {
+            ThkError::InvalidInput("modrinth.index.json missing minecraft version".into())
+        })?;
 
     let (loader, loader_version) = if let Some(v) = index.dependencies.get("fabric-loader") {
         (LoaderType::Fabric, Some(v.clone()))
@@ -650,6 +675,9 @@ where
     };
 
     let mut tasks = Vec::new();
+    let mut tracked_entries: Vec<(PathBuf, InstalledContentRecord)> = Vec::new();
+    let now = Utc::now().timestamp();
+
     for entry in index.files {
         if entry
             .env
@@ -659,10 +687,52 @@ where
         {
             continue;
         }
-        let Some(primary_url) = entry.downloads.first().cloned() else {
-            continue;
-        };
+        let primary_url = entry.downloads.first().cloned().ok_or_else(|| {
+            ThkError::InvalidInput(format!(
+                "No download URL for required pack file '{}'",
+                entry.path
+            ))
+        })?;
         let dest = SafePath::resolve_child(instance_dir, &entry.path)?;
+        let expected_sha1 = entry.hashes.as_ref().and_then(|h| h.sha1.clone());
+
+        let normalized_rel = entry.path.replace('\\', "/");
+        if let Some((subdir, fname)) = normalized_rel.split_once('/') {
+            if !fname.contains('/') {
+                let kind = match subdir {
+                    "mods" => Some(ContentKind::Mod),
+                    "shaderpacks" => Some(ContentKind::Shader),
+                    "resourcepacks" => Some(ContentKind::ResourcePack),
+                    _ => None,
+                };
+                if let Some(content_kind) = kind {
+                    let (title, version_number) = split_filename_title_and_version(fname);
+                    let (provider, project_id, version_id) =
+                        match parse_modrinth_cdn_ids(&primary_url) {
+                            Some((pid, vid)) => (ProviderSource::Modrinth, pid, vid),
+                            None => (ProviderSource::Local, String::new(), String::new()),
+                        };
+                    tracked_entries.push((
+                        dest.clone(),
+                        InstalledContentRecord {
+                            profile_id: String::new(),
+                            content_kind,
+                            file_name: fname.to_string(),
+                            sha1: expected_sha1.clone().unwrap_or_default(),
+                            provider,
+                            project_id,
+                            version_id,
+                            title,
+                            version_number,
+                            icon_url: None,
+                            enabled: true,
+                            installed_at: now,
+                        },
+                    ));
+                }
+            }
+        }
+
         let mut task = DownloadTask::new(primary_url, dest);
         if entry.downloads.len() > 1 {
             task.fallback_urls = entry.downloads[1..].to_vec();
@@ -689,21 +759,65 @@ where
         .download_batch(
             &format!("Importing {pack_name}"),
             tasks,
-            12,
-            cancel,
-            on_progress,
+            16,
+            cancel.clone(),
+            on_progress.clone(),
         )
         .await?;
 
+    on_progress(DownloadProgress {
+        phase: "Extracting Modpack Overrides".into(),
+        message: "Extracting overrides/ & scanning installed files...".into(),
+        completed_files: 0,
+        total_files: 1,
+        downloaded_bytes: 0,
+        total_bytes: 0,
+        bytes_per_sec: 0,
+        percent: 96.0,
+    });
     let mrpack_owned = mrpack_path.to_path_buf();
     let inst_owned = instance_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || -> ThkResult<()> {
-        extract_zip_prefix_safe(&mrpack_owned, "overrides", &inst_owned)?;
-        extract_zip_prefix_safe(&mrpack_owned, "client-overrides", &inst_owned)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| ThkError::Process(format!("Override extraction failed: {e}")))??;
+    let extraction_cancel = cancel.clone();
+    let installed_content =
+        tokio::task::spawn_blocking(move || -> ThkResult<Vec<InstalledContentRecord>> {
+            extract_zip_prefix_cancellable(
+                &mrpack_owned,
+                "overrides",
+                &inst_owned,
+                extraction_cancel.as_ref(),
+            )?;
+            extract_zip_prefix_cancellable(
+                &mrpack_owned,
+                "client-overrides",
+                &inst_owned,
+                extraction_cancel.as_ref(),
+            )?;
+
+            let mut known_names = HashSet::new();
+            let mut records = Vec::with_capacity(tracked_entries.len());
+            for (path, mut rec) in tracked_entries {
+                if rec.sha1.is_empty() {
+                    rec.sha1 = sha1_file(&path).unwrap_or_default();
+                }
+                known_names.insert((rec.content_kind, rec.file_name.to_ascii_lowercase()));
+                records.push(rec);
+            }
+
+            for extra in
+                crate::technic::scan_pack_content_records(&inst_owned, ProviderSource::Local)
+            {
+                if known_names.insert((extra.content_kind, extra.file_name.to_ascii_lowercase())) {
+                    records.push(extra);
+                }
+            }
+            Ok(records)
+        })
+        .await
+        .map_err(|e| ThkError::Process(format!("Override extraction failed: {e}")))??;
+
+    if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+        return Err(ThkError::Cancelled);
+    }
 
     Ok(ImportedPackMetadata {
         name: pack_name,
@@ -712,6 +826,7 @@ where
         loader_version,
         icon_url: None,
         recommended_ram_mb: Some(4096),
+        installed_content,
     })
 }
 
@@ -732,16 +847,21 @@ where
         .iter()
         .find(|f| f.primary)
         .or_else(|| version.files.first())
-        .ok_or_else(|| ThkError::Provider("Modrinth modpack version contains no .mrpack file".into()))?;
+        .ok_or_else(|| {
+            ThkError::Provider("Modrinth modpack version contains no .mrpack file".into())
+        })?;
 
     tokio::fs::create_dir_all(cache_dir).await?;
     let clean_name = SafePath::validate_single_name(&file.filename)?;
-    let mrpack_dest = SafePath::resolve_child(cache_dir, clean_name)?;
+    let mrpack_dest =
+        SafePath::resolve_child(cache_dir, format!("{}-{clean_name}", Uuid::new_v4()))?;
+    let _mrpack_guard = TempMrpackGuard(mrpack_dest.clone());
 
     let mut task = DownloadTask::new(file.url.clone(), mrpack_dest.clone());
     task.expected_sha1 = file.sha1.clone();
     task.expected_sha512 = file.sha512.clone();
     task.expected_size = (file.size > 0).then_some(file.size);
+    task.force_overwrite = true;
     task.label = clean_name.to_string();
 
     downloader
@@ -757,6 +877,5 @@ where
     let mut meta =
         import_mrpack_archive(downloader, &mrpack_dest, instance_dir, cancel, on_progress).await?;
     meta.icon_url = icon_url;
-    let _ = tokio::fs::remove_file(&mrpack_dest).await;
     Ok(meta)
 }

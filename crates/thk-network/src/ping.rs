@@ -42,6 +42,19 @@ pub struct ServerStatusPing {
 
 pub fn parse_host_and_port(address: &str) -> (String, Option<u16>) {
     let trimmed = address.trim();
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        if let Some((ipv6_host, tail)) = rest.split_once(']') {
+            let tail = tail.trim();
+            if let Some(port_str) = tail.strip_prefix(':') {
+                if let Ok(port) = port_str.trim().parse::<u16>() {
+                    return (ipv6_host.trim().to_string(), Some(port));
+                }
+            }
+            if tail.is_empty() {
+                return (ipv6_host.trim().to_string(), None);
+            }
+        }
+    }
     if let Some((host, port_str)) = trimmed.rsplit_once(':') {
         if !host.contains(':') {
             if let Ok(port) = port_str.parse::<u16>() {
@@ -61,25 +74,34 @@ pub async fn resolve_minecraft_srv(host: &str, explicit_port: Option<u16>) -> (S
     }
 
     let srv_query = format!("_minecraft._tcp.{}.", host.trim_end_matches('.'));
-    if let Ok(builder) = Resolver::builder_tokio() {
-        if let Ok(resolver) = builder.build() {
-            if let Ok(Ok(lookup)) =
-                timeout(Duration::from_secs(3), resolver.srv_lookup(srv_query)).await
+    let resolver_opt = Resolver::builder_tokio()
+        .and_then(|b| b.build())
+        .or_else(|_| {
+            Resolver::builder_with_config(
+                hickory_resolver::config::ResolverConfig::udp_and_tcp(
+                    &hickory_resolver::config::CLOUDFLARE,
+                ),
+                hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
+            )
+            .build()
+        });
+    if let Ok(resolver) = resolver_opt {
+        if let Ok(Ok(lookup)) =
+            timeout(Duration::from_secs(3), resolver.srv_lookup(srv_query)).await
+        {
+            if let Some(record) = lookup
+                .answers()
+                .iter()
+                .filter_map(|rec| match &rec.data {
+                    RData::SRV(srv) => Some(srv),
+                    _ => None,
+                })
+                .min_by_key(|r| (r.priority, u16::MAX - r.weight))
             {
-                if let Some(record) = lookup
-                    .answers()
-                    .iter()
-                    .filter_map(|rec| match &rec.data {
-                        RData::SRV(srv) => Some(srv),
-                        _ => None,
-                    })
-                    .min_by_key(|r| (r.priority, u16::MAX - r.weight))
-                {
-                    let target = record.target.to_utf8();
-                    let clean_target = target.trim_end_matches('.').to_string();
-                    if !clean_target.is_empty() {
-                        return (clean_target, record.port);
-                    }
+                let target = record.target.to_utf8();
+                let clean_target = target.trim_end_matches('.').to_string();
+                if !clean_target.is_empty() {
+                    return (clean_target, record.port);
                 }
             }
         }
@@ -94,11 +116,17 @@ pub async fn ping_minecraft_server(
 ) -> ThkResult<ServerStatusPing> {
     let (host, explicit_port) = parse_host_and_port(address);
     if host.is_empty() {
-        return Err(ThkError::InvalidInput("Server address cannot be empty".into()));
+        return Err(ThkError::InvalidInput(
+            "Server address cannot be empty".into(),
+        ));
     }
 
     let (resolved_host, resolved_port) = resolve_minecraft_srv(&host, explicit_port).await;
-    let connect_target = format!("{resolved_host}:{resolved_port}");
+    let connect_target = if resolved_host.contains(':') && !resolved_host.starts_with('[') {
+        format!("[{resolved_host}]:{resolved_port}")
+    } else {
+        format!("{resolved_host}:{resolved_port}")
+    };
 
     let connect_started = Instant::now();
     let mut stream = timeout(connect_timeout, TcpStream::connect(&connect_target))
@@ -107,7 +135,7 @@ pub async fn ping_minecraft_server(
         .map_err(ThkError::Io)?;
     let tcp_rtt_ms = connect_started.elapsed().as_millis() as u64;
 
-    let handshake_pkt = build_handshake_packet(&resolved_host, resolved_port, PING_PROTOCOL_VERSION);
+    let handshake_pkt = build_handshake_packet(&host, resolved_port, PING_PROTOCOL_VERSION);
     let status_req_pkt = build_packet(0x00, &[]);
 
     timeout(connect_timeout, async {
@@ -358,6 +386,25 @@ fn collect_component_spans(value: &Value, inherited: &StyleState, out: &mut Vec<
 
             if let Some(text) = map.get("text").and_then(Value::as_str) {
                 parse_legacy_section_text(text, &style, out);
+            } else if let Some(tpl) = map
+                .get("fallback")
+                .and_then(Value::as_str)
+                .or_else(|| map.get("translate").and_then(Value::as_str))
+            {
+                if let Some(with_arr) = map.get("with").and_then(Value::as_array) {
+                    let mut parts = tpl.split("%s");
+                    if let Some(first) = parts.next() {
+                        parse_legacy_section_text(first, &style, out);
+                    }
+                    for (idx, seg) in parts.enumerate() {
+                        if let Some(arg) = with_arr.get(idx) {
+                            collect_component_spans(arg, &style, out);
+                        }
+                        parse_legacy_section_text(seg, &style, out);
+                    }
+                } else {
+                    parse_legacy_section_text(tpl, &style, out);
+                }
             }
             if let Some(extra) = map.get("extra").and_then(Value::as_array) {
                 for child in extra {
@@ -378,27 +425,54 @@ pub fn parse_legacy_section_str(input: &str) -> Vec<MotdSpan> {
 fn parse_legacy_section_text(input: &str, initial: &StyleState, out: &mut Vec<MotdSpan>) {
     let mut style = initial.clone();
     let mut current = String::new();
-    let mut chars = input.chars().peekable();
+    let chars: Vec<char> = input.chars().collect();
+    let mut idx = 0usize;
 
-    while let Some(ch) = chars.next() {
-        if ch == '§' {
-            if let Some(&code) = chars.peek() {
-                chars.next();
-                if !current.is_empty() {
-                    out.push(MotdSpan {
-                        text: std::mem::take(&mut current),
-                        color_hex: style.color_hex.clone(),
-                        bold: style.bold,
-                        italic: style.italic,
-                        underlined: style.underlined,
-                        strikethrough: style.strikethrough,
-                    });
-                }
-                apply_section_code(code, initial, &mut style);
-                continue;
+    while idx < chars.len() {
+        let ch = chars[idx];
+        if ch == '§' && idx + 1 < chars.len() {
+            let code = chars[idx + 1];
+            if !current.is_empty() {
+                out.push(MotdSpan {
+                    text: std::mem::take(&mut current),
+                    color_hex: style.color_hex.clone(),
+                    bold: style.bold,
+                    italic: style.italic,
+                    underlined: style.underlined,
+                    strikethrough: style.strikethrough,
+                });
             }
+
+            if code.eq_ignore_ascii_case(&'x') && idx + 13 < chars.len() {
+                let mut hex_digits = String::with_capacity(6);
+                let mut valid_hex = true;
+                for step in 0..6 {
+                    let sec = chars[idx + 2 + step * 2];
+                    let dig = chars[idx + 3 + step * 2];
+                    if sec == '§' && dig.is_ascii_hexdigit() {
+                        hex_digits.push(dig.to_ascii_uppercase());
+                    } else {
+                        valid_hex = false;
+                        break;
+                    }
+                }
+                if valid_hex {
+                    style.color_hex = Some(format!("#{hex_digits}"));
+                    style.bold = false;
+                    style.italic = false;
+                    style.underlined = false;
+                    style.strikethrough = false;
+                    idx += 14;
+                    continue;
+                }
+            }
+
+            apply_section_code(code, initial, &mut style);
+            idx += 2;
+            continue;
         }
         current.push(ch);
+        idx += 1;
     }
 
     if !current.is_empty() {

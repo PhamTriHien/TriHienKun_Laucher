@@ -18,3 +18,7 @@ glam.workspace = true
 bytemuck.workspace = true
 image.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+zip.workspace = true

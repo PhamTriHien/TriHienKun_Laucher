@@ -13,5 +13,13 @@ Thumbs.db
 *.pfx
 *.p12
 *.cer
+*.jks
+*.keystore
+*.apk
 .env
 .env.local
+
+# Visual regression failure artifacts (keep reviewed baseline .png files)
+/crates/thk-app/tests/snapshots/*.new.png
+/crates/thk-app/tests/snapshots/*.diff.png
+/crates/thk-app/tests/snapshots/*.old.png

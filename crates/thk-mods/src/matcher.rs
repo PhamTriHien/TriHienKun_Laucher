@@ -1,3 +1,4 @@
+use crate::curseforge::{CfEnvelope, CfFile, CF_OFFICIAL_BASE};
 use crate::modrinth::{map_modrinth_version, ModrinthVersionRaw, MODRINTH_API_BASE};
 use crate::provider::{ProjectSummary, ProjectVersion};
 use chrono::Utc;
@@ -8,10 +9,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thk_core::hash::sha1_file;
 use thk_core::models::{
-    ContentKind, GameProfile, InstalledContentRecord, LoaderType, ProviderSource,
+    ContentKind, DownloadProgress, GameProfile, InstalledContentRecord, LoaderType, ProviderSource,
 };
 use thk_core::paths::SafePath;
 use thk_core::{Database, DownloadManager, ThkError, ThkResult};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalContentItem {
@@ -49,7 +51,7 @@ pub fn list_local_content(
     let db_records = db.list_installed_content(profile_id, kind)?;
     let by_name: HashMap<String, InstalledContentRecord> = db_records
         .into_iter()
-        .map(|r| (r.file_name.clone(), r))
+        .map(|r| (r.file_name.to_ascii_lowercase(), r))
         .collect();
 
     let mut out = Vec::new();
@@ -82,7 +84,7 @@ pub fn list_local_content(
         }
 
         let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        if let Some(rec) = by_name.get(&base_name) {
+        if let Some(rec) = by_name.get(&lower) {
             out.push(LocalContentItem {
                 file_name: raw_name,
                 base_file_name: base_name,
@@ -160,7 +162,11 @@ pub fn delete_local_content(
     let clean = SafePath::validate_single_name(file_name)?;
     let base_name = clean.strip_suffix(".disabled").unwrap_or(clean);
 
-    for cand in [clean.to_string(), base_name.to_string(), format!("{base_name}.disabled")] {
+    for cand in [
+        clean.to_string(),
+        base_name.to_string(),
+        format!("{base_name}.disabled"),
+    ] {
         let p = SafePath::resolve_child(&subdir, &cand)?;
         if p.is_file() {
             fs::remove_file(p)?;
@@ -169,6 +175,51 @@ pub fn delete_local_content(
 
     db.remove_installed_content(profile_id, kind, base_name)?;
     Ok(())
+}
+
+pub fn compute_curseforge_fingerprint(bytes: &[u8]) -> u32 {
+    const M: u32 = 0x5bd1_e995;
+    const R: u32 = 24;
+
+    let filtered_len = bytes
+        .iter()
+        .filter(|&&b| !matches!(b, 9 | 10 | 13 | 32))
+        .count() as u32;
+    let mut h: u32 = 1 ^ filtered_len;
+    let mut chunk = [0u8; 4];
+    let mut chunk_len = 0usize;
+
+    for &b in bytes {
+        if matches!(b, 9 | 10 | 13 | 32) {
+            continue;
+        }
+        chunk[chunk_len] = b;
+        chunk_len += 1;
+        if chunk_len == 4 {
+            let mut k = u32::from_le_bytes(chunk);
+            k = k.wrapping_mul(M);
+            k ^= k >> R;
+            k = k.wrapping_mul(M);
+            h = h.wrapping_mul(M) ^ k;
+            chunk_len = 0;
+        }
+    }
+
+    if chunk_len == 3 {
+        h ^= (chunk[2] as u32) << 16;
+    }
+    if chunk_len >= 2 {
+        h ^= (chunk[1] as u32) << 8;
+    }
+    if chunk_len >= 1 {
+        h ^= chunk[0] as u32;
+        h = h.wrapping_mul(M);
+    }
+
+    h ^= h >> 13;
+    h = h.wrapping_mul(M);
+    h ^= h >> 15;
+    h
 }
 
 pub async fn enrich_unmatched_via_modrinth_sha1(
@@ -186,28 +237,41 @@ pub async fn enrich_unmatched_via_modrinth_sha1(
     let existing: HashMap<String, InstalledContentRecord> = db
         .list_installed_content(profile_id, kind)?
         .into_iter()
-        .map(|r| (r.file_name.clone(), r))
+        .map(|r| (r.file_name.to_ascii_lowercase(), r))
         .collect();
 
-    let mut hash_to_file: HashMap<String, (String, bool)> = HashMap::new();
-    for entry in fs::read_dir(&subdir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let raw_name = entry.file_name().to_string_lossy().into_owned();
-        let (base_name, enabled) = match raw_name.strip_suffix(".disabled") {
-            Some(s) => (s.to_string(), false),
-            None => (raw_name, true),
-        };
-        if existing.contains_key(&base_name) {
-            continue;
-        }
-        if let Ok(digest) = sha1_file(&path) {
-            hash_to_file.insert(digest, (base_name, enabled));
-        }
-    }
+    let subdir_owned = subdir.clone();
+    let hash_to_file: HashMap<String, (String, bool)> =
+        tokio::task::spawn_blocking(move || -> ThkResult<HashMap<String, (String, bool)>> {
+            let mut map = HashMap::new();
+            for entry in fs::read_dir(&subdir_owned)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let raw_name = entry.file_name().to_string_lossy().into_owned();
+                if raw_name.starts_with('.') {
+                    continue;
+                }
+                let (base_name, enabled) = match raw_name.strip_suffix(".disabled") {
+                    Some(s) => (s.to_string(), false),
+                    None => (raw_name, true),
+                };
+                if existing
+                    .get(&base_name.to_ascii_lowercase())
+                    .is_some_and(|r| !r.project_id.is_empty())
+                {
+                    continue;
+                }
+                if let Ok(digest) = sha1_file(&path) {
+                    map.insert(digest, (base_name, enabled));
+                }
+            }
+            Ok(map)
+        })
+        .await
+        .map_err(|e| ThkError::Process(format!("Modrinth SHA-1 scan worker failed: {e}")))??;
 
     if hash_to_file.is_empty() {
         return Ok(0);
@@ -235,10 +299,11 @@ pub async fn enrich_unmatched_via_modrinth_sha1(
         let Some((base_name, enabled)) = hash_to_file.get(&sha1) else {
             continue;
         };
-        let (title, icon_url) = match crate::modrinth::get_modrinth_project(downloader, &ver.project_id).await {
-            Ok(p) => (p.summary.title, p.summary.icon_url),
-            Err(_) => (ver.name.clone(), None),
-        };
+        let (title, icon_url) =
+            match crate::modrinth::get_modrinth_project(downloader, &ver.project_id).await {
+                Ok(p) => (p.summary.title, p.summary.icon_url),
+                Err(_) => (ver.name.clone(), None),
+            };
 
         let rec = InstalledContentRecord {
             profile_id: profile_id.to_string(),
@@ -253,6 +318,142 @@ pub async fn enrich_unmatched_via_modrinth_sha1(
             icon_url,
             enabled: *enabled,
             installed_at: Utc::now().timestamp(),
+        };
+        db.upsert_installed_content(&rec)?;
+        enriched_count += 1;
+    }
+
+    Ok(enriched_count)
+}
+
+#[derive(Deserialize)]
+struct CfFingerprintData {
+    #[serde(rename = "exactMatches", default)]
+    exact_matches: Vec<CfFingerprintMatch>,
+}
+
+#[derive(Deserialize)]
+struct CfFingerprintMatch {
+    id: u64,
+    file: CfFile,
+}
+
+pub async fn enrich_unmatched_via_curseforge_fingerprint(
+    downloader: &DownloadManager,
+    db: &Database,
+    profile_id: &str,
+    instance_dir: &Path,
+    kind: ContentKind,
+    cf_api_key: Option<&str>,
+) -> ThkResult<usize> {
+    let Some(key) = cf_api_key.map(str::trim).filter(|k| !k.is_empty()) else {
+        return Ok(0);
+    };
+    let subdir = SafePath::resolve_child(instance_dir, kind.instance_subdir())?;
+    if !subdir.is_dir() {
+        return Ok(0);
+    }
+
+    let existing: HashMap<String, InstalledContentRecord> = db
+        .list_installed_content(profile_id, kind)?
+        .into_iter()
+        .map(|r| (r.file_name.to_ascii_lowercase(), r))
+        .collect();
+
+    let subdir_owned = subdir.clone();
+    let fp_to_file: HashMap<u32, (String, bool, String)> =
+        tokio::task::spawn_blocking(move || -> ThkResult<HashMap<u32, (String, bool, String)>> {
+            let mut map = HashMap::new();
+            for entry in fs::read_dir(&subdir_owned)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let raw_name = entry.file_name().to_string_lossy().into_owned();
+                if raw_name.starts_with('.') {
+                    continue;
+                }
+                let (base_name, enabled) = match raw_name.strip_suffix(".disabled") {
+                    Some(s) => (s.to_string(), false),
+                    None => (raw_name, true),
+                };
+                if existing
+                    .get(&base_name.to_ascii_lowercase())
+                    .is_some_and(|r| !r.project_id.is_empty())
+                {
+                    continue;
+                }
+                if let Ok(bytes) = fs::read(&path) {
+                    let fp = compute_curseforge_fingerprint(&bytes);
+                    let sha1 = sha1_file(&path).unwrap_or_default();
+                    map.insert(fp, (base_name, enabled, sha1));
+                }
+            }
+            Ok(map)
+        })
+        .await
+        .map_err(|e| ThkError::Process(format!("CurseForge fingerprint worker failed: {e}")))??;
+
+    if fp_to_file.is_empty() {
+        return Ok(0);
+    }
+
+    let fingerprints: Vec<u32> = fp_to_file.keys().copied().collect();
+    let resp = downloader
+        .client()
+        .post(format!("{CF_OFFICIAL_BASE}/fingerprints/432"))
+        .header("Accept", "application/json")
+        .header("x-api-key", key)
+        .json(&json!({ "fingerprints": fingerprints }))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Ok(0);
+    }
+
+    let env: CfEnvelope<CfFingerprintData> = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return Ok(0),
+    };
+
+    let mut enriched_count = 0usize;
+    let now = Utc::now().timestamp();
+    for m in env.data.exact_matches {
+        let Ok(fp) = u32::try_from(m.file.file_fingerprint) else {
+            continue;
+        };
+        let Some((base_name, enabled, sha1)) = fp_to_file.get(&fp) else {
+            continue;
+        };
+        let pid_str = m.id.to_string();
+        let (title, icon_url) = match crate::curseforge::get_curseforge_project(
+            downloader,
+            &pid_str,
+            Some(key),
+        )
+        .await
+        {
+            Ok(p) => (p.summary.title, p.summary.icon_url),
+            Err(_) => {
+                let (guessed_t, _) = split_filename_title_and_version(base_name);
+                (guessed_t, None)
+            }
+        };
+        let rec = InstalledContentRecord {
+            profile_id: profile_id.to_string(),
+            content_kind: kind,
+            file_name: base_name.clone(),
+            sha1: sha1.clone(),
+            provider: ProviderSource::CurseForge,
+            project_id: pid_str,
+            version_id: m.file.id.to_string(),
+            title,
+            version_number: m.file.display_name,
+            icon_url,
+            enabled: *enabled,
+            installed_at: now,
         };
         db.upsert_installed_content(&rec)?;
         enriched_count += 1;
@@ -324,21 +525,27 @@ fn compute_dir_size(dir: &Path) -> u64 {
 }
 
 pub fn split_filename_title_and_version(filename: &str) -> (String, String) {
-    let stem = filename
-        .strip_suffix(".disabled")
-        .unwrap_or(filename)
+    let clean = filename.strip_suffix(".disabled").unwrap_or(filename);
+    let stem = clean
         .strip_suffix(".jar")
-        .or_else(|| filename.strip_suffix(".zip"))
-        .unwrap_or(filename);
+        .or_else(|| clean.strip_suffix(".zip"))
+        .unwrap_or(clean);
 
-    let tokens: Vec<&str> = stem.split(['-', '_', '+']).filter(|t| !t.is_empty()).collect();
+    let tokens: Vec<&str> = stem
+        .split(['-', '_', '+'])
+        .filter(|t| !t.is_empty())
+        .collect();
     let mut name_parts = Vec::new();
     let mut ver_parts = Vec::new();
     let mut in_version = false;
 
     for tok in tokens {
         let lower = tok.to_ascii_lowercase();
-        if matches!(lower.as_str(), "fabric" | "forge" | "neoforge" | "quilt" | "mc") && !name_parts.is_empty() {
+        if matches!(
+            lower.as_str(),
+            "fabric" | "forge" | "neoforge" | "quilt" | "mc"
+        ) && !name_parts.is_empty()
+        {
             continue;
         }
         let looks_like_ver = tok
@@ -396,6 +603,15 @@ pub async fn check_local_content_updates(
         &profile.id,
         &profile.instance_path,
         kind,
+    )
+    .await;
+    let _ = enrich_unmatched_via_curseforge_fingerprint(
+        downloader,
+        db,
+        &profile.id,
+        &profile.instance_path,
+        kind,
+        cf_api_key,
     )
     .await;
 
@@ -474,7 +690,26 @@ pub async fn check_local_content_updates(
                     let Some(rec) = mr_by_hash.get(&old_sha1) else {
                         continue;
                     };
-                    let latest = map_modrinth_version(raw_ver);
+                    let mut latest = map_modrinth_version(raw_ver);
+                    if latest.release_channel != "release" && !rec.project_id.is_empty() {
+                        let mr_loader = (kind == ContentKind::Mod
+                            && profile.loader != LoaderType::Vanilla)
+                            .then_some(profile.loader);
+                        if let Ok(vers) = crate::modrinth::get_modrinth_versions(
+                            downloader,
+                            &rec.project_id,
+                            Some(&profile.game_version),
+                            mr_loader,
+                        )
+                        .await
+                        {
+                            if let Some(stable) =
+                                vers.into_iter().find(|v| v.release_channel == "release")
+                            {
+                                latest = stable;
+                            }
+                        }
+                    }
                     let latest_sha1 = latest
                         .files
                         .iter()
@@ -516,7 +751,7 @@ pub async fn check_local_content_updates(
         .iter()
         .filter(|r| r.provider == ProviderSource::CurseForge && !r.project_id.is_empty())
     {
-        if let Ok(mut versions) = crate::curseforge::get_curseforge_versions(
+        if let Ok(versions) = crate::curseforge::get_curseforge_versions(
             downloader,
             &rec.project_id,
             Some(&profile.game_version),
@@ -525,7 +760,12 @@ pub async fn check_local_content_updates(
         )
         .await
         {
-            if let Some(latest) = versions.drain(..).next() {
+            let preferred = versions
+                .iter()
+                .find(|v| v.release_channel == "release")
+                .cloned()
+                .or_else(|| versions.into_iter().next());
+            if let Some(latest) = preferred {
                 if latest.id != rec.version_id && latest.version_number != rec.version_number {
                     candidates.push(ContentUpdateCandidate {
                         file_name: rec.file_name.clone(),
@@ -664,11 +904,7 @@ pub fn toggle_server_addon_file(
     Ok(target_name)
 }
 
-pub fn delete_server_addon_file(
-    server_dir: &Path,
-    folder: &str,
-    file_name: &str,
-) -> ThkResult<()> {
+pub fn delete_server_addon_file(server_dir: &Path, folder: &str, file_name: &str) -> ThkResult<()> {
     let valid_folder = validate_server_addon_folder(folder)?;
     let subdir = SafePath::resolve_child(server_dir, valid_folder)?;
     let clean = SafePath::validate_single_name(file_name)?;
@@ -693,7 +929,9 @@ pub fn import_server_addon_jar(
 ) -> ThkResult<String> {
     let valid_folder = validate_server_addon_folder(folder)?;
     if !external_jar.is_file() {
-        return Err(ThkError::InvalidInput("Selected JAR file does not exist.".into()));
+        return Err(ThkError::InvalidInput(
+            "Selected JAR file does not exist.".into(),
+        ));
     }
     let raw_name = external_jar
         .file_name()
@@ -710,4 +948,97 @@ pub fn import_server_addon_jar(
     let dst = SafePath::resolve_child(&subdir, clean_name)?;
     fs::copy(external_jar, &dst)?;
     Ok(clean_name.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn install_server_provider_addon<F>(
+    downloader: &DownloadManager,
+    db: &Database,
+    server_id: &str,
+    server_dir: &Path,
+    game_version: &str,
+    server_loader: Option<LoaderType>,
+    content_kind: ContentKind,
+    project_summary: &ProjectSummary,
+    version: &ProjectVersion,
+    cf_api_key: Option<&str>,
+    cancel: Option<CancellationToken>,
+    on_progress: F,
+) -> ThkResult<Vec<PathBuf>>
+where
+    F: Fn(DownloadProgress) + Send + Sync + 'static,
+{
+    if !matches!(content_kind, ContentKind::Plugin | ContentKind::Mod) {
+        return Err(ThkError::InvalidInput(
+            "Server addons only support Plugin or Mod content kinds.".into(),
+        ));
+    }
+    let synthetic_profile = GameProfile {
+        id: format!("server:{server_id}"),
+        name: format!("Server {server_id}"),
+        game_version: game_version.to_string(),
+        loader: server_loader.unwrap_or(LoaderType::Vanilla),
+        loader_version: None,
+        instance_path: server_dir.to_path_buf(),
+        is_custom_path: true,
+        ram_mb: 2048,
+        java_path: None,
+        jvm_args: String::new(),
+        auto_perf_mods: false,
+        icon_url: None,
+        window_width: None,
+        window_height: None,
+        fullscreen: false,
+        total_play_seconds: 0,
+        session_count: 0,
+        crash_count: 0,
+        last_played_at: None,
+        created_at: 0,
+    };
+
+    match project_summary.provider {
+        ProviderSource::Modrinth => {
+            crate::modrinth::install_modrinth_content(
+                downloader,
+                db,
+                &synthetic_profile,
+                content_kind,
+                project_summary,
+                version,
+                cancel,
+                on_progress,
+            )
+            .await
+        }
+        ProviderSource::CurseForge => {
+            crate::curseforge::install_curseforge_content(
+                downloader,
+                db,
+                &synthetic_profile,
+                content_kind,
+                project_summary,
+                version,
+                cf_api_key,
+                cancel,
+                on_progress,
+            )
+            .await
+        }
+        ProviderSource::Spiget => {
+            let p = crate::spiget::install_spiget_plugin(
+                downloader,
+                &project_summary.project_id,
+                &project_summary.title,
+                server_dir,
+                cancel,
+                on_progress,
+            )
+            .await?;
+            Ok(vec![p])
+        }
+        other => Err(ThkError::InvalidInput(format!(
+            "Unsupported server addon provider: {}",
+            other.display_name()
+        ))),
+    }
 }

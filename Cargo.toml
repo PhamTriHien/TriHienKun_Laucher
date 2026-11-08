@@ -17,7 +17,7 @@ version = "1.0.0"
 edition = "2021"
 license = "MIT"
 authors = ["TriHienKun"]
-repository = "https://github.com/trihienkun/trihienkun-laucher"
+repository = "https://github.com/PhamTriHien/TriHienKun_Laucher"
 
 [workspace.lints.rust]
 unused_must_use = "deny"
@@ -35,20 +35,26 @@ thk-renderer3d = { path = "crates/thk-renderer3d" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "process", "sync", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 futures-util = "0.3"
-reqwest = { version = "0.13.5", default-features = false, features = ["default-tls", "json", "stream", "gzip", "form", "query", "multipart", "http2"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "stream", "gzip", "form", "query", "multipart", "http2"] }
 axum = { version = "0.8.9", features = ["json", "query", "tokio", "http1"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+semver = "1.0"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 keyring = { version = "3.6.3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
 zip = { version = "9.4.0", default-features = false, features = ["deflate", "bzip2", "xz", "zstd"] }
 flate2 = "1.1.10"
+lzma-rust2 = "0.24.0"
 tar = "0.4.46"
 sha1 = "0.11.0"
 sha2 = "0.11.1"
 md-5 = "0.11.0"
 hex = "0.4"
 base64 = "0.23.1"
+num-bigint = "0.4"
+num-integer = "0.1"
+num-traits = "0.2"
+socket2 = "0.6"
 rand = "0.10.3"
 uuid = { version = "1.29.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -70,12 +76,16 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 bytemuck = { version = "1.25.2", features = ["derive"] }
 glam = "0.34.2"
 wgpu = "30.0.1"
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "system_fonts", "wgpu", "links", "persistence"] }
+winit = { version = "0.30.13", default-features = false }
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "wgpu", "links", "persistence"] }
 egui = "0.37.0"
 egui-wgpu = "0.37.0"
 egui_extras = { version = "0.37.0", features = ["all_loaders", "image", "syntect"] }
 egui_commonmark = "0.26.0"
 urlencoding = "2.1"
+suppaftp = { version = "12.2.1", default-features = false, features = ["tokio-rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12", "ring"] }
+webpki-roots = "1.0"
 
 [profile.release]
 opt-level = 3
