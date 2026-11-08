@@ -20,23 +20,45 @@ if (-not (Test-Path $SdkRoot)) {
     throw "Android SDK not found. Set ANDROID_HOME or install Android SDK under $env:LOCALAPPDATA\Android\Sdk."
 }
 
-$NdkDir = Get-ChildItem -Path (Join-Path $SdkRoot "ndk") -Directory |
-    Sort-Object Name -Descending |
-    Select-Object -ExpandProperty FullName -First 1
+$NdkDir = if ($env:ANDROID_NDK_HOME -and (Test-Path $env:ANDROID_NDK_HOME)) {
+    $env:ANDROID_NDK_HOME
+} else {
+    Get-ChildItem -Path (Join-Path $SdkRoot "ndk") -Directory |
+        Sort-Object {
+            $ver = $null
+            if ([version]::TryParse($_.Name, [ref]$ver)) { $ver } else { [version]"0.0" }
+        } -Descending |
+        Select-Object -ExpandProperty FullName -First 1
+}
 if (-not $NdkDir) {
     throw "Android NDK not found under $SdkRoot\ndk."
 }
 
-$BuildToolsDir = Get-ChildItem -Path (Join-Path $SdkRoot "build-tools") -Directory |
-    Sort-Object Name -Descending |
-    Select-Object -ExpandProperty FullName -First 1
+$BuildToolsDir = if ($env:ANDROID_BUILD_TOOLS_DIR -and (Test-Path $env:ANDROID_BUILD_TOOLS_DIR)) {
+    $env:ANDROID_BUILD_TOOLS_DIR
+} else {
+    Get-ChildItem -Path (Join-Path $SdkRoot "build-tools") -Directory |
+        Sort-Object {
+            $ver = $null
+            if ([version]::TryParse($_.Name, [ref]$ver)) { $ver } else { [version]"0.0" }
+        } -Descending |
+        Select-Object -ExpandProperty FullName -First 1
+}
 if (-not $BuildToolsDir) {
     throw "Android build-tools not found under $SdkRoot\build-tools."
 }
 
-$PlatformDir = Get-ChildItem -Path (Join-Path $SdkRoot "platforms") -Directory |
-    Sort-Object { [double]($_.Name -replace '^[^\d]+', '') } -Descending |
-    Select-Object -ExpandProperty FullName -First 1
+$PlatformDir = if ($env:ANDROID_PLATFORM_DIR -and (Test-Path $env:ANDROID_PLATFORM_DIR)) {
+    $env:ANDROID_PLATFORM_DIR
+} else {
+    Get-ChildItem -Path (Join-Path $SdkRoot "platforms") -Directory |
+        Where-Object { $_.Name -match '^android-(\d+)$' } |
+        Sort-Object { [int]([regex]::Match($_.Name, '^android-(\d+)$').Groups[1].Value) } -Descending |
+        Select-Object -ExpandProperty FullName -First 1
+}
+if (-not $PlatformDir) {
+    throw "Android platform not found under $SdkRoot\platforms."
+}
 $AndroidJar = Join-Path $PlatformDir "android.jar"
 if (-not (Test-Path $AndroidJar)) {
     throw "android.jar not found at $AndroidJar."

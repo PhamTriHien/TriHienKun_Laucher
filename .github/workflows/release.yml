@@ -150,19 +150,110 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set Up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set Up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android Platform 35, Build-Tools 35.0.0 & NDK 28.2.13676358
-        shell: bash
+      - name: Provision Android SDK 35, Build-Tools 35.0.0 & NDK 28.2.13676358
+        shell: pwsh
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;28.2.13676358"
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          $SdkRoot = @(
+              $env:ANDROID_HOME,
+              $env:ANDROID_SDK_ROOT,
+              "C:\Android\android-sdk"
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if (-not $SdkRoot) {
+              $SdkRoot = Join-Path $env:RUNNER_TEMP "android-sdk"
+              New-Item -ItemType Directory -Force -Path $SdkRoot | Out-Null
+          }
+
+          function Find-SdkManager([string]$Root) {
+              $cmdRoot = Join-Path $Root "cmdline-tools"
+              if (-not (Test-Path $cmdRoot)) { return $null }
+              $latestBat = Join-Path $cmdRoot "latest\bin\sdkmanager.bat"
+              if (Test-Path $latestBat) { return $latestBat }
+              return Get-ChildItem -Path $cmdRoot -Directory |
+                  Sort-Object {
+                      $v = 0.0
+                      if ([double]::TryParse($_.Name, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { $v } else { -1.0 }
+                  } -Descending |
+                  ForEach-Object { Join-Path $_.FullName "bin\sdkmanager.bat" } |
+                  Where-Object { Test-Path $_ } |
+                  Select-Object -First 1
+          }
+
+          $SdkManager = Find-SdkManager $SdkRoot
+          if (-not $SdkManager) {
+              $ZipUrl = "https://dl.google.com/android/repository/commandlinetools-win-13114758_latest.zip"
+              $ZipPath = Join-Path $env:RUNNER_TEMP "commandlinetools-win.zip"
+              $ExtractDir = Join-Path $env:RUNNER_TEMP "cmdline-tools-extract"
+              Write-Host "Downloading Android command-line tools from $ZipUrl..."
+              Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath
+              if (Test-Path $ExtractDir) { Remove-Item -Recurse -Force $ExtractDir }
+              Expand-Archive -LiteralPath $ZipPath -DestinationPath $ExtractDir -Force
+              $TargetLatest = Join-Path $SdkRoot "cmdline-tools\latest"
+              New-Item -ItemType Directory -Force -Path (Split-Path -Parent $TargetLatest) | Out-Null
+              if (Test-Path $TargetLatest) { Remove-Item -Recurse -Force $TargetLatest }
+              Move-Item -Path (Join-Path $ExtractDir "cmdline-tools") -Destination $TargetLatest
+              $SdkManager = Join-Path $TargetLatest "bin\sdkmanager.bat"
+          }
+          if (-not (Test-Path $SdkManager)) {
+              throw "sdkmanager.bat not found at $SdkManager"
+          }
+          Write-Host "Using sdkmanager: $SdkManager (SDK root: $SdkRoot)"
+
+          $PlatformDir = Join-Path $SdkRoot "platforms\android-35"
+          $BuildToolsDir = Join-Path $SdkRoot "build-tools\35.0.0"
+          $NdkDir = Join-Path $SdkRoot "ndk\28.2.13676358"
+          $ClangCheck = Join-Path $NdkDir "toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android28-clang.cmd"
+
+          $MissingPackages = @()
+          if (-not (Test-Path (Join-Path $PlatformDir "android.jar"))) {
+              $MissingPackages += "platforms;android-35"
+          }
+          if (-not (Test-Path (Join-Path $BuildToolsDir "aapt2.exe"))) {
+              $MissingPackages += "build-tools;35.0.0"
+          }
+          if (-not (Test-Path $ClangCheck)) {
+              $MissingPackages += "ndk;28.2.13676358"
+          }
+
+          if ($MissingPackages.Count -gt 0) {
+              Write-Host "Installing missing Android SDK packages: $($MissingPackages -join ', ')"
+              $prevEap = $ErrorActionPreference
+              $ErrorActionPreference = "Continue"
+              1..60 | ForEach-Object { "y" } | & $SdkManager "--sdk_root=$SdkRoot" --licenses *> $null
+              $ErrorActionPreference = $prevEap
+              $global:LASTEXITCODE = 0
+              & $SdkManager "--sdk_root=$SdkRoot" --install @MissingPackages
+              if ($LASTEXITCODE -ne 0) {
+                  throw "sdkmanager --install failed with exit code $LASTEXITCODE"
+              }
+          } else {
+              Write-Host "All required Android SDK/NDK components are already present."
+          }
+
+          foreach ($RequiredFile in @(
+              (Join-Path $PlatformDir "android.jar"),
+              (Join-Path $BuildToolsDir "aapt2.exe"),
+              $ClangCheck
+          )) {
+              if (-not (Test-Path $RequiredFile)) {
+                  throw "Required Android toolchain file missing after provisioning: $RequiredFile"
+              }
+          }
+
+          @(
+              "ANDROID_HOME=$SdkRoot",
+              "ANDROID_SDK_ROOT=$SdkRoot",
+              "ANDROID_NDK_HOME=$NdkDir",
+              "ANDROID_BUILD_TOOLS_DIR=$BuildToolsDir",
+              "ANDROID_PLATFORM_DIR=$PlatformDir"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -177,19 +268,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $SdkRoot = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { $env:ANDROID_SDK_ROOT }
-          $NdkDir = Get-ChildItem -Path (Join-Path $SdkRoot "ndk") -Directory |
-              Sort-Object Name -Descending |
-              Select-Object -ExpandProperty FullName -First 1
-          if (-not $NdkDir) {
-              throw "Android NDK not found under $SdkRoot\ndk."
+          $NdkDir = $env:ANDROID_NDK_HOME
+          if (-not $NdkDir -or -not (Test-Path $NdkDir)) {
+              throw "ANDROID_NDK_HOME is missing or invalid: '$NdkDir'"
           }
           $NdkBin = Join-Path $NdkDir "toolchains\llvm\prebuilt\windows-x86_64\bin"
           $Clang = Join-Path $NdkBin "aarch64-linux-android28-clang.cmd"
           $ClangPP = Join-Path $NdkBin "aarch64-linux-android28-clang++.cmd"
           $LlvmAr = Join-Path $NdkBin "llvm-ar.exe"
-          $env:ANDROID_HOME = $SdkRoot
-          $env:ANDROID_NDK_HOME = $NdkDir
           $env:CC_aarch64_linux_android = $Clang
           $env:CXX_aarch64_linux_android = $ClangPP
           $env:AR_aarch64_linux_android = $LlvmAr
