@@ -14,10 +14,9 @@ use crate::views::{
     network_interface_selector_ui, primary_icon_button, render_direct_host_endpoints_ui,
     secondary_button, secondary_icon_button,
 };
-use egui::{vec2, Align, Color32, Frame, Key, Layout, Margin, Order, RichText, ScrollArea};
+use egui::{vec2, Color32, Frame, Key, Margin, Order, RichText, ScrollArea};
 use thk_core::models::{
-    AccentPreset, CloseBehavior, JavaRuntimeMode, Language, LoaderType, ProviderSource,
-    ServerEngine, ThemeMode,
+    AccentPreset, CloseBehavior, Language, LoaderType, ProviderSource, ServerEngine, ThemeMode,
 };
 use thk_core::RecoveryArtifactKind;
 use thk_java::JavaDistroKind;
@@ -65,139 +64,156 @@ pub fn render_all_modals(app: &mut LauncherAppState, ctx: &egui::Context) {
 }
 
 fn render_initial_setup_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
-    let safe_w = crate::views::safe_content_rect(ctx).width();
+    let safe_rect = crate::views::safe_content_rect(ctx);
+    let safe_w = safe_rect.width();
     let modal_w = (safe_w - 20.0)
         .clamp(150.0, 500.0)
         .min((safe_w - 8.0).max(120.0));
+    let max_modal_h = (safe_rect.height() - 36.0).max(120.0);
     egui::Modal::new(egui::Id::unique("thk_initial_setup_modal")).show(ctx, |ui| {
         ui.set_width(modal_w);
-        let dark = ui.visuals().dark_mode;
-        ui.vertical_centered(|ui| {
-            paint_icon_3d(ui, 68.0, Icon3dKind::BrandVoxelCore, true);
-            ui.add_space(4.0);
-            ui.heading(
-                RichText::new(app.i18n.tr(
-                    "Chào mừng đến với TriHienKun Laucher!",
-                    "Welcome to TriHienKun Laucher!",
-                ))
-                .size(20.5)
-                .strong()
-                .color(readable_accent_ink(ACCENT_EMERALD, dark)),
-            );
-            ui.label(
-                RichText::new(app.i18n.tr(
-                    "Trình khởi chạy Minecraft gọn nhẹ, tốc độ cao và hoạt động độc lập.",
-                    "Fast, lightweight, and standalone Minecraft Launcher.",
-                ))
-                .size(12.5)
-                .weak(),
-            );
-        });
-        ui.add_space(10.0);
-
-        let mut changed = false;
-
-        gaming_card_3d(
-            ui,
-            "welcome_setup_card",
-            true,
-            ACCENT_EMERALD,
-            Margin::same(14),
-            |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Ngôn ngữ / Language:").strong());
-                    if ui
-                        .selectable_value(&mut app.settings.language, Language::Vi, "Tiếng Việt")
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    if ui
-                        .selectable_value(&mut app.settings.language, Language::En, "English")
-                        .changed()
-                    {
-                        changed = true;
-                    }
+        ScrollArea::vertical()
+            .id_salt("initial_setup_modal_scroll")
+            .max_height(max_modal_h)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.set_max_width(modal_w);
+                let dark = ui.visuals().dark_mode;
+                ui.vertical_centered(|ui| {
+                    paint_icon_3d(ui, 68.0, Icon3dKind::BrandVoxelCore, true);
+                    ui.add_space(4.0);
+                    ui.heading(
+                        RichText::new(app.i18n.tr(
+                            "Chào mừng đến với TriHienKun Laucher!",
+                            "Welcome to TriHienKun Laucher!",
+                        ))
+                        .size(20.5)
+                        .strong()
+                        .color(readable_accent_ink(ACCENT_EMERALD, dark)),
+                    );
                 });
+                ui.add_space(10.0);
 
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(app.i18n.tr("Giao diện màu:", "Color Theme:")).strong());
-                    if ui
-                        .selectable_value(
-                            &mut app.settings.theme,
-                            ThemeMode::Light,
-                            app.i18n.tr("Sáng", "Light"),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    if ui
-                        .selectable_value(
-                            &mut app.settings.theme,
-                            ThemeMode::Dark,
-                            app.i18n.tr("Tối", "Dark"),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                });
+                let mut changed = false;
 
-                changed |= font_scale_selector(
+                gaming_card_3d(
                     ui,
-                    &app.i18n,
-                    &mut app.settings.font_scale,
-                    &mut app.font_scale_drag_dirty,
+                    "welcome_setup_card",
+                    true,
+                    ACCENT_EMERALD,
+                    Margin::same(14),
+                    |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new("Ngôn ngữ / Language:").strong());
+                            if ui
+                                .selectable_value(
+                                    &mut app.settings.language,
+                                    Language::Vi,
+                                    "Tiếng Việt",
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                            if ui
+                                .selectable_value(
+                                    &mut app.settings.language,
+                                    Language::En,
+                                    "English",
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(app.i18n.tr("Giao diện màu:", "Color Theme:"))
+                                    .strong(),
+                            );
+                            if ui
+                                .selectable_value(
+                                    &mut app.settings.theme,
+                                    ThemeMode::Light,
+                                    app.i18n.tr("Sáng", "Light"),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                            if ui
+                                .selectable_value(
+                                    &mut app.settings.theme,
+                                    ThemeMode::Dark,
+                                    app.i18n.tr("Tối", "Dark"),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
+
+                        changed |= font_scale_selector(
+                            ui,
+                            &app.i18n,
+                            &mut app.settings.font_scale,
+                            &mut app.font_scale_drag_dirty,
+                        );
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(
+                                    app.i18n.tr("RAM mặc định cho Game:", "Default Game RAM:"),
+                                )
+                                .strong(),
+                            );
+                            if ui
+                                .add(
+                                    egui::Slider::new(
+                                        &mut app.settings.default_ram_mb,
+                                        1024..=16384,
+                                    )
+                                    .step_by(512.0)
+                                    .suffix(" MB"),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
+                    },
                 );
 
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        RichText::new(app.i18n.tr("RAM mặc định cho Game:", "Default Game RAM:"))
-                            .strong(),
-                    );
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut app.settings.default_ram_mb, 1024..=16384)
-                                .step_by(512.0)
-                                .suffix(" MB"),
-                        )
-                        .changed()
+                if changed {
+                    app.persist_settings();
+                }
+
+                ui.add_space(14.0);
+                let btn_w = (ui.available_width() - 12.0)
+                    .clamp(120.0, 320.0)
+                    .min(ui.available_width().max(96.0));
+                ui.vertical_centered(|ui| {
+                    if tactile_button_3d(
+                        ui,
+                        Some(VectorIcon::Play),
+                        app.i18n.tr(
+                            "Bắt đầu sử dụng TriHienKun Laucher",
+                            "Get Started with TriHienKun Laucher",
+                        ),
+                        ButtonStyle3d::HeroLaunch,
+                        vec2(btn_w, 44.0),
+                    )
+                    .clicked()
                     {
-                        changed = true;
+                        app.click_sfx();
+                        app.settings.setup_completed = true;
+                        app.home.new_draft.ram_mb = app.settings.default_ram_mb;
+                        app.persist_settings();
                     }
                 });
-            },
-        );
-
-        if changed {
-            app.persist_settings();
-        }
-
-        ui.add_space(14.0);
-        let btn_w = (ui.available_width() - 12.0)
-            .clamp(120.0, 320.0)
-            .min(ui.available_width().max(96.0));
-        ui.vertical_centered(|ui| {
-            if tactile_button_3d(
-                ui,
-                Some(VectorIcon::Play),
-                app.i18n.tr(
-                    "Bắt đầu sử dụng TriHienKun Laucher",
-                    "Get Started with TriHienKun Laucher",
-                ),
-                ButtonStyle3d::HeroLaunch,
-                vec2(btn_w, 44.0),
-            )
-            .clicked()
-            {
-                app.click_sfx();
-                app.settings.setup_completed = true;
-                app.home.new_draft.ram_mb = app.settings.default_ram_mb;
-                app.persist_settings();
-            }
-        });
+            });
     });
 }
 
@@ -219,41 +235,39 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
         .open(&mut open)
         .show(ctx, |ui| {
             ui.set_width(ui.available_width());
+            let mut ask_create_profile = false;
+            let mut ask_close_profile = false;
 
-            ui.horizontal(|ui| {
-                paint_icon_3d(ui, 34.0, Icon3dKind::HomePortal, true);
-                ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(app.i18n.tr(
-                            "Khởi tạo Instance Độc lập",
-                            "Create Isolated Game Instance",
-                        ))
-                        .size(15.0)
-                        .strong(),
-                    );
-                    ui.label(
-                        RichText::new(app.i18n.tr(
-                            "Hỗ trợ Vanilla, Fabric, Quilt, Forge & NeoForge",
-                            "Supports Vanilla, Fabric, Quilt, Forge & NeoForge",
-                        ))
-                        .size(11.5)
-                        .weak(),
-                    );
+            egui::Panel::bottom("new_profile_modal_footer")
+                .resizable(false)
+                .frame(Frame::NONE.inner_margin(Margin {
+                    left: 0,
+                    right: 0,
+                    top: 8,
+                    bottom: 0,
+                }))
+                .show(ui, |ui| {
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if primary_icon_button(ui, VectorIcon::Plus, app.i18n.t("home.new_profile"))
+                            .clicked()
+                        {
+                            ask_create_profile = true;
+                        }
+                        if secondary_button(ui, app.i18n.t("common.cancel")).clicked() {
+                            ask_close_profile = true;
+                        }
+                    });
                 });
-            });
-            ui.add_space(6.0);
 
-            let max_body_h = (ui.available_height() - 48.0).max(150.0);
             let scroll_w = ui.available_width();
             ScrollArea::vertical()
                 .id_salt("new_profile_modal_body_scroll")
-                .max_height(max_body_h)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.set_max_width(scroll_w);
-                    ui.label(
-                        RichText::new(app.i18n.tr("Tên Profile:", "Profile Name:")).strong(),
-                    );
+                    ui.label(RichText::new(app.i18n.tr("Tên Profile:", "Profile Name:")).strong());
                     ui.add(
                         egui::TextEdit::singleline(&mut app.home.new_draft.name)
                             .hint_text("Survival 1.21.4")
@@ -312,11 +326,8 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
 
                     ui.add_space(6.0);
                     ui.label(
-                        RichText::new(
-                            app.i18n
-                                .tr("Trình nạp Mod (Mod Loader):", "Mod Loader:"),
-                        )
-                        .strong(),
+                        RichText::new(app.i18n.tr("Trình nạp Mod (Mod Loader):", "Mod Loader:"))
+                            .strong(),
                     );
                     ui.horizontal_wrapped(|ui| {
                         for ldr in LoaderType::ALL {
@@ -393,8 +404,8 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                         let perf_lbl = app
                             .i18n
                             .tr(
-                                "Tự động cài bộ Mod tối ưu FPS (Sodium, Lithium, FerriteCore, EntityCulling, ModMenu)",
-                                "Auto-install FPS Optimizer Suite (Sodium, Lithium, FerriteCore, EntityCulling, ModMenu)",
+                                "Tự động cài bộ Mod tối ưu FPS",
+                                "Auto-install FPS optimization mods",
                             )
                             .to_string();
                         crate::views::wrapped_checkbox(
@@ -429,10 +440,8 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                     ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
-                            RichText::new(
-                                app.i18n.tr("Thư mục lưu trữ:", "Instance Folder:"),
-                            )
-                            .strong(),
+                            RichText::new(app.i18n.tr("Thư mục lưu trữ:", "Instance Folder:"))
+                                .strong(),
                         );
                         let dir_label = app
                             .home
@@ -470,17 +479,11 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                     });
                 });
 
-            ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
-                if primary_icon_button(ui, VectorIcon::Plus, app.i18n.t("home.new_profile"))
-                    .clicked()
-                {
-                    app.create_profile_from_draft();
-                }
-                if secondary_button(ui, app.i18n.t("common.cancel")).clicked() {
-                    app.show_new_profile_modal = false;
-                }
-            });
+            if ask_create_profile {
+                app.create_profile_from_draft();
+            } else if ask_close_profile {
+                app.show_new_profile_modal = false;
+            }
         });
     app.show_new_profile_modal &= open;
 }
@@ -507,29 +510,6 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.set_width(ui.available_width());
 
-            ui.horizontal(|ui| {
-                paint_icon_3d(ui, 34.0, Icon3dKind::ServerBladeTower, true);
-                ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(app.i18n.tr(
-                            "Triển khai Máy chủ Cục bộ",
-                            "Deploy Local Server",
-                        ))
-                        .size(15.0)
-                        .strong(),
-                    );
-                    ui.label(
-                        RichText::new(app.i18n.tr(
-                            "Tạo từ lõi tiêu chuẩn, Modpack Cloud, tệp nén hoặc Profile có sẵn",
-                            "Create from standard engine, Cloud Modpack, archive, or profile",
-                        ))
-                        .size(11.5)
-                        .weak(),
-                    );
-                });
-            });
-            ui.add_space(6.0);
-
             let creating = app.servers.new_draft.creating;
             let create_task_prog = app
                 .active_tasks
@@ -540,13 +520,45 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
             let mut ask_select_cloud: Option<ProjectSummary> = None;
             let mut ask_create = false;
             let mut ask_cancel_create = false;
+            let mut ask_close_modal = false;
 
-            let max_body_h = (ui.available_height() - 48.0).max(160.0);
+            egui::Panel::bottom("new_server_modal_footer")
+                .resizable(false)
+                .frame(Frame::NONE.inner_margin(Margin {
+                    left: 0,
+                    right: 0,
+                    top: 8,
+                    bottom: 0,
+                }))
+                .show(ui, |ui| {
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if creating {
+                            if danger_icon_button(ui, VectorIcon::Stop, app.i18n.t("common.cancel"))
+                                .clicked()
+                            {
+                                ask_cancel_create = true;
+                            }
+                        } else {
+                            if primary_icon_button(ui, VectorIcon::Plus, app.i18n.t("server.create"))
+                                .clicked()
+                            {
+                                ask_create = true;
+                            }
+                            if secondary_button(ui, app.i18n.t("common.cancel")).clicked() {
+                                ask_close_modal = true;
+                            }
+                        }
+                    });
+                });
+
+            let scroll_w = ui.available_width();
             ScrollArea::vertical()
                 .id_salt("new_server_modal_body_scroll")
-                .max_height(max_body_h)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    ui.set_max_width(scroll_w);
                     ui.add_enabled_ui(!creating, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(app.i18n.tr("Nguồn tạo:", "Source:")).strong());
@@ -757,7 +769,6 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                             .as_ref()
                             .map(|(s, _)| s.project_id.clone());
                         let cloud_hits = app.servers.new_draft.cloud_hits.clone();
-                        let hits_scroll_h = (max_body_h * 0.42).clamp(150.0, 320.0);
                         Frame::group(ui.style())
                             .inner_margin(Margin::symmetric(8, 6))
                             .show(ui, |ui| {
@@ -765,114 +776,91 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                 let max_hit_chars =
                                     ((ui.available_width() - 180.0) / 7.2).clamp(32.0, 96.0)
                                         as usize;
-                                ScrollArea::vertical()
-                                    .id_salt("new_srv_cloud_hits_scroll")
-                                    .max_height(hits_scroll_h)
-                                    .show(ui, |ui| {
-                                        if app.servers.new_draft.cloud_searching
-                                            && cloud_hits.is_empty()
-                                        {
-                                            ui.horizontal(|ui| {
-                                                ui.spinner();
-                                                ui.label(app.i18n.tr(
-                                                    "Đang tìm kiếm Modpack...",
-                                                    "Searching modpacks...",
-                                                ));
-                                            });
-                                        } else if cloud_hits.is_empty() {
-                                            ui.label(
-                                                RichText::new(app.i18n.tr(
-                                                    "Không tìm thấy gói Modpack phù hợp.",
-                                                    "No matching modpacks found.",
-                                                ))
-                                                .size(11.8)
-                                                .weak(),
-                                            );
-                                        } else {
-                                            for hit in &cloud_hits {
-                                                let is_sel = selected_pid.as_deref()
-                                                    == Some(hit.project_id.as_str());
-                                                let hit_tex = hit
-                                                    .icon_url
-                                                    .as_deref()
-                                                    .and_then(|u| app.request_modpack_texture(u, 64));
-                                                ui.horizontal(|ui| {
-                                                    paint_pack_thumbnail(
-                                                        ui,
-                                                        hit_tex.as_ref(),
-                                                        30.0,
-                                                        if is_sel {
-                                                            ACCENT_EMERALD
-                                                        } else {
-                                                            ACCENT_CYAN
-                                                        },
-                                                        is_sel,
-                                                    );
-                                                    ui.label(
-                                                        RichText::new(truncate_chars(
-                                                            &hit.title,
-                                                            max_hit_chars,
-                                                        ))
-                                                        .size(12.2)
-                                                        .strong()
-                                                        .color(if is_sel {
-                                                            ACCENT_EMERALD
-                                                        } else {
-                                                            ui.visuals().text_color()
-                                                        }),
-                                                    );
-                                                    if !hit.author.trim().is_empty() {
-                                                        ui.label(
-                                                            RichText::new(truncate_chars(
-                                                                &hit.author,
-                                                                16,
-                                                            ))
-                                                            .size(11.0)
-                                                            .weak(),
-                                                        );
-                                                    }
-                                                    ui.with_layout(
-                                                        Layout::right_to_left(Align::Center),
-                                                        |ui| {
-                                                            let btn_lbl = if is_sel {
-                                                                app.i18n
-                                                                    .tr("Đã chọn", "Selected")
-                                                            } else {
-                                                                app.i18n.tr("Chọn", "Select")
-                                                            };
-                                                            if ui
-                                                                .selectable_label(is_sel, btn_lbl)
-                                                                .clicked()
-                                                                && !is_sel
-                                                            {
-                                                                ask_select_cloud =
-                                                                    Some(hit.clone());
-                                                            }
-                                                        },
-                                                    );
-                                                });
-                                                ui.add_space(2.0);
-                                            }
-                                            if cloud_hits.len()
-                                                < app.servers.new_draft.cloud_total_hits
-                                            {
-                                                ui.add_space(4.0);
-                                                if app.servers.new_draft.cloud_searching {
-                                                    ui.spinner();
-                                                } else if secondary_button(
-                                                    ui,
-                                                    app.i18n.tr("Tải thêm...", "Load More..."),
-                                                )
-                                                .clicked()
-                                                {
-                                                    ask_cloud_search = Some((
-                                                        app.servers.new_draft.cloud_page + 1,
-                                                        true,
-                                                    ));
-                                                }
-                                            }
-                                        }
+                                if app.servers.new_draft.cloud_searching && cloud_hits.is_empty() {
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(app.i18n.tr(
+                                            "Đang tìm kiếm Modpack...",
+                                            "Searching modpacks...",
+                                        ));
                                     });
+                                } else if cloud_hits.is_empty() {
+                                    ui.label(
+                                        RichText::new(app.i18n.tr(
+                                            "Không tìm thấy gói Modpack phù hợp.",
+                                            "No matching modpacks found.",
+                                        ))
+                                        .size(11.8)
+                                        .weak(),
+                                    );
+                                } else {
+                                    for hit in &cloud_hits {
+                                        let is_sel = selected_pid.as_deref()
+                                            == Some(hit.project_id.as_str());
+                                        let hit_tex = hit
+                                            .icon_url
+                                            .as_deref()
+                                            .and_then(|u| app.request_modpack_texture(u, 64));
+                                        ui.horizontal_wrapped(|ui| {
+                                            paint_pack_thumbnail(
+                                                ui,
+                                                hit_tex.as_ref(),
+                                                30.0,
+                                                if is_sel {
+                                                    ACCENT_EMERALD
+                                                } else {
+                                                    ACCENT_CYAN
+                                                },
+                                                is_sel,
+                                            );
+                                            ui.label(
+                                                RichText::new(truncate_chars(
+                                                    &hit.title,
+                                                    max_hit_chars,
+                                                ))
+                                                .size(12.2)
+                                                .strong()
+                                                .color(if is_sel {
+                                                    ACCENT_EMERALD
+                                                } else {
+                                                    ui.visuals().text_color()
+                                                }),
+                                            );
+                                            if !hit.author.trim().is_empty() {
+                                                ui.label(
+                                                    RichText::new(truncate_chars(&hit.author, 16))
+                                                        .size(11.0)
+                                                        .weak(),
+                                                );
+                                            }
+                                            let btn_lbl = if is_sel {
+                                                app.i18n.tr("Đã chọn", "Selected")
+                                            } else {
+                                                app.i18n.tr("Chọn", "Select")
+                                            };
+                                            if ui.selectable_label(is_sel, btn_lbl).clicked()
+                                                && !is_sel
+                                            {
+                                                ask_select_cloud = Some(hit.clone());
+                                            }
+                                        });
+                                        ui.add_space(2.0);
+                                    }
+                                    if cloud_hits.len() < app.servers.new_draft.cloud_total_hits {
+                                        ui.add_space(4.0);
+                                        if app.servers.new_draft.cloud_searching {
+                                            ui.spinner();
+                                        } else if secondary_button(
+                                            ui,
+                                            app.i18n.tr("Tải thêm...", "Load More..."),
+                                        )
+                                        .clicked()
+                                        {
+                                            ask_cloud_search =
+                                                Some((app.servers.new_draft.cloud_page + 1, true));
+                                        }
+                                    }
+                                }
                             });
 
                         ui.add_space(4.0);
@@ -1267,27 +1255,9 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
             }
             });
 
-            ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
-                if creating {
-                    if danger_icon_button(ui, VectorIcon::Stop, app.i18n.t("common.cancel"))
-                        .clicked()
-                    {
-                        ask_cancel_create = true;
-                    }
-                } else {
-                    if primary_icon_button(ui, VectorIcon::Plus, app.i18n.t("server.create"))
-                        .clicked()
-                    {
-                        ask_create = true;
-                    }
-                    if secondary_button(ui, app.i18n.t("common.cancel")).clicked() {
-                        app.show_new_server_modal = false;
-                    }
-                }
-            });
-
-            if let Some((page, append)) = ask_cloud_search {
+            if ask_close_modal {
+                app.show_new_server_modal = false;
+            } else if let Some((page, append)) = ask_cloud_search {
                 app.click_sfx();
                 app.search_new_server_cloud_modpacks(page, append);
             } else if let Some(summary) = ask_select_cloud {
@@ -1323,57 +1293,54 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
         .constrain_to(safe_rect)
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                paint_icon_3d(ui, 36.0, Icon3dKind::JavaReactor, true);
-                ui.heading(
-                    RichText::new(app.i18n.tr(
-                        "Các bản Java hiện có trên hệ thống",
-                        "Detected Java Installations",
-                    ))
-                    .size(16.0)
-                    .strong(),
-                );
-                if secondary_icon_button(
-                    ui,
-                    VectorIcon::Refresh,
-                    app.i18n.tr("Quét lại", "Rescan"),
-                )
-                .clicked()
-                {
-                    app.rescan_java_runtimes();
-                }
-            });
-            ui.add_space(6.0);
-            if java_runtime_mode_selector(ui, &app.i18n, &mut app.settings.java_runtime_mode, None)
-            {
-                app.click_sfx();
-                app.persist_settings();
-            }
-            ui.add_space(6.0);
-
-            let rem_h = ui.available_height().max(240.0);
-            let inst_h = (rem_h * 0.36).max(105.0);
-            let installed = app.java_modal.installed.clone();
+            let scroll_w = ui.available_width();
+            ui.set_width(scroll_w);
             ScrollArea::vertical()
-                .id_salt("java_installed_scroll")
-                .max_height(inst_h)
+                .id_salt("java_manager_modal_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    ui.set_max_width(scroll_w);
+                    ui.horizontal_wrapped(|ui| {
+                        paint_icon_3d(ui, 36.0, Icon3dKind::JavaReactor, true);
+                        ui.heading(
+                            RichText::new(app.i18n.tr(
+                                "Các bản Java hiện có trên hệ thống",
+                                "Detected Java Installations",
+                            ))
+                            .size(16.0)
+                            .strong(),
+                        );
+                        if secondary_icon_button(
+                            ui,
+                            VectorIcon::Refresh,
+                            app.i18n.tr("Quét lại", "Rescan"),
+                        )
+                        .clicked()
+                        {
+                            app.rescan_java_runtimes();
+                        }
+                    });
+                    ui.add_space(6.0);
+                    if java_runtime_mode_selector(
+                        ui,
+                        &app.i18n,
+                        &mut app.settings.java_runtime_mode,
+                        None,
+                    ) {
+                        app.click_sfx();
+                        app.persist_settings();
+                    }
+                    ui.add_space(6.0);
+
+                    let installed = app.java_modal.installed.clone();
                     if installed.is_empty() {
-                        let empty_msg =
-                            if app.settings.java_runtime_mode == JavaRuntimeMode::OptimalGraalVm {
-                                app.i18n.tr(
-                                    "Chưa phát hiện Java cài sẵn. Launcher sẽ tự chọn và tải GraalVM / Java tương thích khi vào game, hoặc bạn có thể cài thủ công bên dưới.",
-                                    "No system Java detected yet. The launcher will automatically provision optimal GraalVM / Java on game launch, or you can install a distribution below.",
-                                )
-                            } else {
-                                app.i18n.tr(
-                                    "Chưa phát hiện Java cài sẵn. Launcher vẫn sẽ tự động tải Mojang JRE khi vào game hoặc bạn có thể cài thủ công bên dưới.",
-                                    "No system Java detected yet. The launcher will automatically provision Mojang JRE on game launch, or you can install a distribution below.",
-                                )
-                            };
-                        ui.label(RichText::new(empty_msg).weak());
+                        ui.label(
+                            RichText::new(app.i18n.tr(
+                                "Chưa có Java cài sẵn (tự động tải khi vào game).",
+                                "No Java installed yet (auto-downloaded on launch).",
+                            ))
+                            .weak(),
+                        );
                     }
                     for (idx, j) in installed.into_iter().enumerate() {
                         gaming_card_3d(
@@ -1384,7 +1351,7 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                             Margin::symmetric(10, 6),
                             |ui| {
                                 ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     badge(ui, &format!("Java {}", j.major_version), ACCENT_EMERALD);
                                     ui.label(RichText::new(&j.vendor).strong());
                                     ui.label(RichText::new(&j.full_version).size(12.0).weak());
@@ -1395,63 +1362,54 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                             ACCENT_BLUE,
                                         );
                                     }
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            let p_str = j.path.to_string_lossy().to_string();
-                                            if secondary_icon_button(
-                                                ui,
-                                                VectorIcon::Copy,
-                                                app.i18n.tr("Chép đường dẫn", "Copy Path"),
-                                            )
-                                            .clicked()
-                                            {
-                                                app.copy_text_with_toast(ui.ctx(), p_str);
-                                            }
-                                        },
-                                    );
+                                    let p_str = j.path.to_string_lossy().to_string();
+                                    if secondary_icon_button(
+                                        ui,
+                                        VectorIcon::Copy,
+                                        app.i18n.tr("Chép đường dẫn", "Copy Path"),
+                                    )
+                                    .clicked()
+                                    {
+                                        app.copy_text_with_toast(ui.ctx(), p_str);
+                                    }
                                 });
                             },
                         );
                         ui.add_space(4.0);
                     }
-                });
 
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(6.0);
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(6.0);
 
-            ui.horizontal_wrapped(|ui| {
-                let distro_header = if cfg!(target_os = "android") {
-                    app.i18n.tr(
-                        "Tải về bản phân phối Java (8 / 17 / 21 / 25):",
-                        "Download Official Java Distributions (8 / 17 / 21 / 25):",
-                    )
-                } else {
-                    app.i18n.tr(
-                        "Tải về bản phân phối Java (8 / 11 / 17 / 21 / 25):",
-                        "Download Official Java Distributions (8 / 11 / 17 / 21 / 25):",
-                    )
-                };
-                ui.label(RichText::new(distro_header).strong());
-                for &d in JavaDistroKind::platform_distros() {
-                    if ui
-                        .selectable_label(app.java_modal.selected_distro == d, d.display_name())
-                        .clicked()
-                    {
-                        app.load_java_distro_packages(d);
-                    }
-                }
-            });
+                    ui.horizontal_wrapped(|ui| {
+                        let distro_header = if cfg!(target_os = "android") {
+                            app.i18n.tr(
+                                "Tải về bản phân phối Java (8 / 17 / 21 / 25):",
+                                "Download Official Java Distributions (8 / 17 / 21 / 25):",
+                            )
+                        } else {
+                            app.i18n.tr(
+                                "Tải về bản phân phối Java (8 / 11 / 17 / 21 / 25):",
+                                "Download Official Java Distributions (8 / 11 / 17 / 21 / 25):",
+                            )
+                        };
+                        ui.label(RichText::new(distro_header).strong());
+                        for &d in JavaDistroKind::platform_distros() {
+                            if ui
+                                .selectable_label(
+                                    app.java_modal.selected_distro == d,
+                                    d.display_name(),
+                                )
+                                .clicked()
+                            {
+                                app.load_java_distro_packages(d);
+                            }
+                        }
+                    });
 
-            ui.add_space(6.0);
-            let pkgs_h = ui.available_height().max(120.0);
-            let pkgs = app.java_modal.packages.clone();
-            ScrollArea::vertical()
-                .id_salt("java_distro_pkgs_scroll")
-                .max_height(pkgs_h)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
+                    ui.add_space(6.0);
+                    let pkgs = app.java_modal.packages.clone();
                     if pkgs.is_empty() {
                         ui.label(
                             RichText::new(app.i18n.tr(
@@ -1470,41 +1428,33 @@ fn render_java_manager_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                             Margin::symmetric(10, 6),
                             |ui| {
                                 ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     badge(
                                         ui,
                                         &format!("JDK/JRE {}", pkg.major_version),
                                         ACCENT_AMBER,
                                     );
-                                    ui.vertical(|ui| {
-                                        ui.label(RichText::new(&pkg.release_name).strong());
-                                        let sz_txt = pkg.size_bytes.map(format_bytes).unwrap_or_else(
-                                            || {
-                                                app.i18n
-                                                    .tr("Gói chính thức", "Official Archive")
-                                                    .to_string()
-                                            },
-                                        );
-                                        ui.label(
-                                            RichText::new(format!("{} • {sz_txt}", pkg.file_name))
-                                                .size(11.5)
-                                                .weak(),
-                                        );
-                                    });
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if primary_icon_button(
-                                                ui,
-                                                VectorIcon::Download,
-                                                app.i18n.tr("Cài đặt", "Install"),
-                                            )
-                                            .clicked()
-                                            {
-                                                app.install_java_package(pkg);
-                                            }
-                                        },
+                                    ui.label(RichText::new(&pkg.release_name).strong());
+                                    let sz_txt =
+                                        pkg.size_bytes.map(format_bytes).unwrap_or_else(|| {
+                                            app.i18n
+                                                .tr("Gói chính thức", "Official Archive")
+                                                .to_string()
+                                        });
+                                    ui.label(
+                                        RichText::new(format!("{} • {sz_txt}", pkg.file_name))
+                                            .size(11.5)
+                                            .weak(),
                                     );
+                                    if primary_icon_button(
+                                        ui,
+                                        VectorIcon::Download,
+                                        app.i18n.tr("Cài đặt", "Install"),
+                                    )
+                                    .clicked()
+                                    {
+                                        app.install_java_package(pkg);
+                                    }
                                 });
                             },
                         );
@@ -1603,14 +1553,6 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                 ))
                                 .strong(),
                             );
-                            ui.label(
-                                RichText::new(app.i18n.tr(
-                                    "Chỉ chấp nhận gói phát sóng xuất phát từ chính card mạng của máy bạn (chống giả mạo gói tin từ máy khác trong LAN).",
-                                    "Only accepts multicast packets originating from this machine's NICs (blocks foreign LAN spoofing).",
-                                ))
-                                .size(11.5)
-                                .weak(),
-                            );
                             ui.add_space(6.0);
                             let auto_direct_lbl = app
                                 .i18n
@@ -1683,20 +1625,6 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                 };
                                 badge(ui, &det_lbl, ACCENT_EMERALD);
                             }
-                            if app.lan_modal.ignored_foreign_packets > 0 {
-                                let blk_lbl = if app.settings.language == Language::Vi {
-                                    format!(
-                                        "Đã chặn {} gói quảng bá LAN ngoại lai không thuộc máy này.",
-                                        app.lan_modal.ignored_foreign_packets
-                                    )
-                                } else {
-                                    format!(
-                                        "Blocked {} foreign LAN announcement packet(s).",
-                                        app.lan_modal.ignored_foreign_packets
-                                    )
-                                };
-                                ui.label(RichText::new(blk_lbl).size(11.0).color(ACCENT_AMBER));
-                            }
                         },
                     );
 
@@ -1723,14 +1651,6 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                     "2. Open Port on Connected Network (LAN & Online)",
                                 ))
                                 .strong(),
-                            );
-                            ui.label(
-                                RichText::new(app.i18n.tr(
-                                    "Mở cổng cố định trực tiếp trên Wi-Fi / LAN / VPN đang kết nối kèm Online IPv6 & mở cổng Modem tự động (không vòng qua máy chủ trung gian nước ngoài).",
-                                    "Host a fixed port directly on your connected Wi-Fi / LAN / VPN with Direct Online IPv6 and automatic router port mapping (no overseas relay).",
-                                ))
-                                .size(11.5)
-                                .weak(),
                             );
                             ui.add_space(6.0);
 
@@ -2061,12 +1981,32 @@ fn render_crash_analyzer_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
         .constrain_to(safe_rect)
         .open(&mut keep_open)
         .show(ctx, |ui| {
+            ui.set_width(ui.available_width());
+            egui::Panel::bottom("crash_analyzer_modal_footer")
+                .resizable(false)
+                .frame(Frame::NONE.inner_margin(Margin {
+                    left: 0,
+                    right: 0,
+                    top: 8,
+                    bottom: 0,
+                }))
+                .show(ui, |ui| {
+                    ui.separator();
+                    ui.add_space(6.0);
+                    if danger_button(
+                        ui,
+                        app.i18n
+                            .tr("Đóng cửa sổ chẩn đoán", "Close Crash Diagnostics"),
+                    )
+                    .clicked()
+                    {
+                        close_clicked = true;
+                    }
+                });
+
             let scroll_w = ui.available_width();
-            ui.set_width(scroll_w);
-            let crash_body_h = (ui.available_height() - 48.0).max(140.0);
             ScrollArea::vertical()
                 .id_salt("crash_analyzer_body_scroll")
-                .max_height(crash_body_h)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.set_max_width(scroll_w);
@@ -2224,29 +2164,13 @@ fn render_crash_analyzer_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
                                 "Inspect Relevant Stacktrace Lines",
                             ),
                             |ui| {
-                                ScrollArea::vertical()
-                                    .id_salt("crash_relevant_lines_scroll")
-                                    .max_height(200.0)
-                                    .show(ui, |ui| {
-                                        for line in &report.relevant_lines {
-                                            ui.label(RichText::new(line).monospace().size(11.5));
-                                        }
-                                    });
+                                for line in &report.relevant_lines {
+                                    ui.label(RichText::new(line).monospace().size(11.5));
+                                }
                             },
                         );
                     }
                 });
-
-            ui.add_space(10.0);
-            if danger_button(
-                ui,
-                app.i18n
-                    .tr("Đóng cửa sổ chẩn đoán", "Close Crash Diagnostics"),
-            )
-            .clicked()
-            {
-                close_clicked = true;
-            }
         });
 
     if !keep_open || close_clicked {
@@ -2275,36 +2199,23 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
             ui.set_width(modal_w);
             let mut changed = false;
 
-            ui.horizontal(|ui| {
-                paint_icon_3d(ui, 36.0, Icon3dKind::SettingsGyro, true);
-                ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(app.i18n.tr(
-                            "Trung tâm Tuỳ chỉnh Hệ thống",
-                            "System Control Center",
-                        ))
-                        .size(15.5)
-                        .strong(),
-                    );
-                    ui.label(
-                        RichText::new(app.i18n.tr(
-                            "Giao diện, Khởi chạy, Lưu trữ & Cập nhật",
-                            "Appearance, Launch Behavior, Storage & Updates",
-                        ))
-                        .size(11.5)
-                        .weak(),
-                    );
-                });
-            });
-            ui.add_space(6.0);
-
-            let max_settings_h = ui.available_height().max(180.0);
             ScrollArea::vertical()
                 .id_salt("settings_modal_scroll")
-                .max_height(max_settings_h)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.set_max_width(modal_w);
+                    ui.horizontal(|ui| {
+                        paint_icon_3d(ui, 36.0, Icon3dKind::SettingsGyro, true);
+                        ui.label(
+                            RichText::new(app.i18n.tr(
+                                "Trung tâm Tuỳ chỉnh Hệ thống",
+                                "System Control Center",
+                            ))
+                            .size(15.5)
+                            .strong(),
+                        );
+                    });
+                    ui.add_space(6.0);
                     let narrow_slider_cap = (modal_w - 155.0).clamp(56.0, 150.0);
                     if ui.spacing().slider_width > narrow_slider_cap {
                         ui.spacing_mut().slider_width = narrow_slider_cap;
@@ -2505,8 +2416,8 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                 let overlay_lbl = app
                                     .i18n
                                     .tr(
-                                        "Hiện nút nổi mở nhanh HUB UI khi thu nhỏ ra ngoài ứng dụng khác",
-                                        "Show floating quick-return button over other apps when minimized",
+                                        "Hiện nút nổi mở nhanh khi thu nhỏ ứng dụng",
+                                        "Show floating quick-return button when minimized",
                                     )
                                     .to_string();
                                 changed |= crate::views::wrapped_checkbox(
@@ -2671,14 +2582,6 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                 RichText::new(low_ram_lbl).strong(),
                             )
                             .changed();
-                            ui.label(
-                                RichText::new(app.i18n.tr(
-                                    "Tắt hoạt ảnh nền, giới hạn bộ nhớ ảnh và giải phóng tài nguyên đồ họa khi chạy nền.",
-                                    "Disables idle animations, caps image caches, and frees graphics memory in the background.",
-                                ))
-                                .size(11.3)
-                                .weak(),
-                            );
                             ui.add_space(4.0);
 
                             let hide_lbl = app
@@ -3193,52 +3096,66 @@ fn render_settings_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
 }
 
 fn render_close_confirm_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
-    let max_mw = (crate::views::safe_content_rect(ctx).width() - 24.0).max(140.0);
+    let safe_rect = crate::views::safe_content_rect(ctx);
+    let modal_w = 420.0_f32.min((safe_rect.width() - 24.0).max(140.0));
+    let max_modal_h = (safe_rect.height() - 36.0).max(120.0);
     egui::Modal::new(egui::Id::unique("thk_close_confirm_modal")).show(ctx, |ui| {
-        ui.set_width(420.0_f32.min(max_mw));
-        ui.heading(
-            RichText::new(app.i18n.t("settings.close_ask_title"))
-                .size(17.5)
-                .strong(),
-        );
-        ui.add_space(4.0);
-        ui.label(app.i18n.t("settings.close_ask_desc"));
-        ui.add_space(8.0);
-        crate::views::wrapped_checkbox(
-            ui,
-            &mut app.remember_close_choice,
-            app.i18n.t("settings.remember_choice"),
-        );
-        ui.add_space(10.0);
+        ui.set_width(modal_w);
+        ScrollArea::vertical()
+            .id_salt("close_confirm_modal_scroll")
+            .max_height(max_modal_h)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.set_max_width(modal_w);
+                ui.heading(
+                    RichText::new(app.i18n.t("settings.close_ask_title"))
+                        .size(17.5)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.label(app.i18n.t("settings.close_ask_desc"));
+                ui.add_space(8.0);
+                crate::views::wrapped_checkbox(
+                    ui,
+                    &mut app.remember_close_choice,
+                    app.i18n.t("settings.remember_choice"),
+                );
+                ui.add_space(10.0);
 
-        ui.horizontal_wrapped(|ui| {
-            if primary_icon_button(ui, VectorIcon::Download, app.i18n.t("settings.close_tray"))
-                .clicked()
-            {
-                if app.remember_close_choice {
-                    app.settings.close_behavior = CloseBehavior::MinimizeToTray;
-                    app.persist_settings();
-                }
-                app.show_close_confirm_modal = false;
-                app.pending_memory_trim = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            }
+                ui.horizontal_wrapped(|ui| {
+                    if primary_icon_button(
+                        ui,
+                        VectorIcon::Download,
+                        app.i18n.t("settings.close_tray"),
+                    )
+                    .clicked()
+                    {
+                        if app.remember_close_choice {
+                            app.settings.close_behavior = CloseBehavior::MinimizeToTray;
+                            app.persist_settings();
+                        }
+                        app.show_close_confirm_modal = false;
+                        app.pending_memory_trim = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    }
 
-            if danger_icon_button(ui, VectorIcon::Stop, app.i18n.t("settings.close_quit")).clicked()
-            {
-                if app.remember_close_choice {
-                    app.settings.close_behavior = CloseBehavior::Quit;
-                    app.persist_settings();
-                }
-                app.show_close_confirm_modal = false;
-                app.allow_immediate_quit = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+                    if danger_icon_button(ui, VectorIcon::Stop, app.i18n.t("settings.close_quit"))
+                        .clicked()
+                    {
+                        if app.remember_close_choice {
+                            app.settings.close_behavior = CloseBehavior::Quit;
+                            app.persist_settings();
+                        }
+                        app.show_close_confirm_modal = false;
+                        app.allow_immediate_quit = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
 
-            if secondary_button(ui, app.i18n.t("common.cancel")).clicked() {
-                app.show_close_confirm_modal = false;
-            }
-        });
+                    if secondary_button(ui, app.i18n.t("common.cancel")).clicked() {
+                        app.show_close_confirm_modal = false;
+                    }
+                });
+            });
     });
 }
 
@@ -3257,56 +3174,65 @@ fn render_server_eula_confirm_modal(app: &mut LauncherAppState, ctx: &egui::Cont
         return;
     };
 
-    let max_mw = (crate::views::safe_content_rect(ctx).width() - 24.0).max(140.0);
+    let safe_rect = crate::views::safe_content_rect(ctx);
+    let modal_w = 470.0_f32.min((safe_rect.width() - 24.0).max(140.0));
+    let max_modal_h = (safe_rect.height() - 36.0).max(120.0);
     egui::Modal::new(egui::Id::unique("thk_server_eula_confirm_modal")).show(ctx, |ui| {
-        ui.set_width(470.0_f32.min(max_mw));
-        ui.horizontal(|ui| {
-            paint_icon_3d(ui, 38.0, Icon3dKind::ServerBladeTower, true);
-            ui.vertical(|ui| {
-                ui.label(
-                    RichText::new(app.i18n.tr(
-                        "Xác nhận Điều khoản Minecraft EULA",
-                        "Accept Minecraft Server EULA",
-                    ))
-                    .size(16.5)
-                    .strong(),
+        ui.set_width(modal_w);
+        ScrollArea::vertical()
+            .id_salt("server_eula_confirm_modal_scroll")
+            .max_height(max_modal_h)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.set_max_width(modal_w);
+                ui.horizontal(|ui| {
+                    paint_icon_3d(ui, 38.0, Icon3dKind::ServerBladeTower, true);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(app.i18n.tr(
+                                "Xác nhận Điều khoản Minecraft EULA",
+                                "Accept Minecraft Server EULA",
+                            ))
+                            .size(16.5)
+                            .strong(),
+                        );
+                        ui.label(
+                            RichText::new(format!("{srv_name} • {srv_dir_str}"))
+                                .size(11.5)
+                                .weak(),
+                        );
+                    });
+                });
+                ui.add_space(8.0);
+                ui.label(app.i18n.tr(
+                    "Trước khi khởi chạy Dedicated Server, Mojang yêu cầu bạn đọc và đồng ý tường minh với Thỏa thuận Người dùng Cuối của Minecraft (Minecraft EULA). Khi xác nhận, trình khởi chạy sẽ ghi eula=true vào tệp eula.txt của máy chủ này.",
+                    "Before starting a local Dedicated Server, Mojang requires explicit acceptance of the Minecraft End User License Agreement (EULA). Confirming will write eula=true into this server's eula.txt.",
+                ));
+                ui.add_space(6.0);
+                ui.hyperlink_to(
+                    "https://www.minecraft.net/eula",
+                    "https://www.minecraft.net/eula",
                 );
-                ui.label(
-                    RichText::new(format!("{srv_name} • {srv_dir_str}"))
-                        .size(11.5)
-                        .weak(),
-                );
-            });
-        });
-        ui.add_space(8.0);
-        ui.label(app.i18n.tr(
-            "Trước khi khởi chạy Dedicated Server, Mojang yêu cầu bạn đọc và đồng ý tường minh với Thỏa thuận Người dùng Cuối của Minecraft (Minecraft EULA). Khi xác nhận, trình khởi chạy sẽ ghi eula=true vào tệp eula.txt của máy chủ này.",
-            "Before starting a local Dedicated Server, Mojang requires explicit acceptance of the Minecraft End User License Agreement (EULA). Confirming will write eula=true into this server's eula.txt.",
-        ));
-        ui.add_space(6.0);
-        ui.hyperlink_to(
-            "https://www.minecraft.net/eula",
-            "https://www.minecraft.net/eula",
-        );
-        ui.add_space(12.0);
+                ui.add_space(12.0);
 
-        ui.horizontal_wrapped(|ui| {
-            if primary_icon_button(
-                ui,
-                VectorIcon::Play,
-                app.i18n
-                    .tr("Tôi đồng ý EULA & Khởi động", "Accept EULA & Start"),
-            )
-            .clicked()
-            {
-                app.click_sfx();
-                app.confirm_server_eula_and_start();
-            }
-            if secondary_button(ui, app.i18n.t("common.cancel")).clicked() {
-                app.click_sfx();
-                app.pending_eula_server_id = None;
-            }
-        });
+                ui.horizontal_wrapped(|ui| {
+                    if primary_icon_button(
+                        ui,
+                        VectorIcon::Play,
+                        app.i18n
+                            .tr("Tôi đồng ý EULA & Khởi động", "Accept EULA & Start"),
+                    )
+                    .clicked()
+                    {
+                        app.click_sfx();
+                        app.confirm_server_eula_and_start();
+                    }
+                    if secondary_button(ui, app.i18n.t("common.cancel")).clicked() {
+                        app.click_sfx();
+                        app.pending_eula_server_id = None;
+                    }
+                });
+            });
     });
 }
 
@@ -3341,108 +3267,117 @@ fn render_delete_confirm_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
     let mut do_confirm = false;
     let mut do_cancel = false;
 
-    let max_mw = (crate::views::safe_content_rect(ctx).width() - 24.0).max(140.0);
+    let safe_rect = crate::views::safe_content_rect(ctx);
+    let modal_w = 480.0_f32.min((safe_rect.width() - 24.0).max(140.0));
+    let max_modal_h = (safe_rect.height() - 36.0).max(120.0);
     egui::Modal::new(egui::Id::unique("thk_delete_confirm_modal")).show(ctx, |ui| {
-        ui.set_width(480.0_f32.min(max_mw));
-        ui.heading(RichText::new(&heading_txt).size(17.0).strong().color(ACCENT_RED));
-        ui.add_space(6.0);
+        ui.set_width(modal_w);
+        ScrollArea::vertical()
+            .id_salt("delete_confirm_modal_scroll")
+            .max_height(max_modal_h)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.set_max_width(modal_w);
+                ui.heading(RichText::new(&heading_txt).size(17.0).strong().color(ACCENT_RED));
+                ui.add_space(6.0);
 
-        match &modal_snap.target {
-            DeleteTarget::Profile {
-                name,
-                instance_path,
-                is_custom_path,
-                ..
-            } => {
-                let desc = if lang == Language::Vi {
-                    format!("Bạn sắp xóa Profile '{name}'.")
-                } else {
-                    format!("You are about to delete profile '{name}'.")
-                };
-                ui.label(RichText::new(desc).strong());
-                ui.label(
-                    RichText::new(instance_path.display().to_string())
-                        .size(11.5)
-                        .weak(),
-                );
-                ui.add_space(8.0);
-                crate::views::wrapped_checkbox(ui, &mut delete_on_disk, &disk_chk_lbl);
-                if *is_custom_path {
-                    ui.label(RichText::new(&custom_warn_lbl).size(11.5).color(ACCENT_AMBER));
+                match &modal_snap.target {
+                    DeleteTarget::Profile {
+                        name,
+                        instance_path,
+                        is_custom_path,
+                        ..
+                    } => {
+                        let desc = if lang == Language::Vi {
+                            format!("Bạn sắp xóa Profile '{name}'.")
+                        } else {
+                            format!("You are about to delete profile '{name}'.")
+                        };
+                        ui.label(RichText::new(desc).strong());
+                        ui.label(
+                            RichText::new(instance_path.display().to_string())
+                                .size(11.5)
+                                .weak(),
+                        );
+                        ui.add_space(8.0);
+                        crate::views::wrapped_checkbox(ui, &mut delete_on_disk, &disk_chk_lbl);
+                        if *is_custom_path {
+                            ui.label(RichText::new(&custom_warn_lbl).size(11.5).color(ACCENT_AMBER));
+                        }
+                    }
+                    DeleteTarget::Server {
+                        name,
+                        server_dir,
+                        is_custom_dir,
+                        ..
+                    } => {
+                        let desc = if lang == Language::Vi {
+                            format!("Bạn sắp xóa máy chủ cục bộ '{name}'.")
+                        } else {
+                            format!("You are about to delete local server '{name}'.")
+                        };
+                        ui.label(RichText::new(desc).strong());
+                        ui.label(
+                            RichText::new(server_dir.display().to_string())
+                                .size(11.5)
+                                .weak(),
+                        );
+                        ui.add_space(8.0);
+                        crate::views::wrapped_checkbox(ui, &mut delete_on_disk, &disk_chk_lbl);
+                        if *is_custom_dir {
+                            ui.label(RichText::new(&custom_warn_lbl).size(11.5).color(ACCENT_AMBER));
+                        }
+                    }
+                    DeleteTarget::World { folder_name, .. } => {
+                        let desc = if lang == Language::Vi {
+                            format!(
+                                "Xóa vĩnh viễn thế giới chơi đơn '{folder_name}'? Dữ liệu bản đồ trong saves/{folder_name} sẽ không thể khôi phục."
+                            )
+                        } else {
+                            format!(
+                                "Permanently delete singleplayer world '{folder_name}'? World data inside saves/{folder_name} cannot be recovered."
+                            )
+                        };
+                        ui.label(desc);
+                    }
+                    DeleteTarget::ProfileFiles { targets, .. }
+                    | DeleteTarget::ServerFiles { targets, .. } => {
+                        let desc = if lang == Language::Vi {
+                            format!(
+                                "Xóa vĩnh viễn {} tệp / thư mục đã chọn khỏi ổ đĩa?",
+                                targets.len()
+                            )
+                        } else {
+                            format!(
+                                "Permanently delete {} selected file(s) / folder(s) from disk?",
+                                targets.len()
+                            )
+                        };
+                        ui.label(RichText::new(desc).strong());
+                        ui.add_space(4.0);
+                        for rel in targets.iter().take(5) {
+                            ui.label(RichText::new(format!("• {rel}")).size(11.5).weak());
+                        }
+                        if targets.len() > 5 {
+                            ui.label(
+                                RichText::new(format!("… +{}", targets.len() - 5))
+                                    .size(11.5)
+                                    .weak(),
+                            );
+                        }
+                    }
                 }
-            }
-            DeleteTarget::Server {
-                name,
-                server_dir,
-                is_custom_dir,
-                ..
-            } => {
-                let desc = if lang == Language::Vi {
-                    format!("Bạn sắp xóa máy chủ cục bộ '{name}'.")
-                } else {
-                    format!("You are about to delete local server '{name}'.")
-                };
-                ui.label(RichText::new(desc).strong());
-                ui.label(
-                    RichText::new(server_dir.display().to_string())
-                        .size(11.5)
-                        .weak(),
-                );
-                ui.add_space(8.0);
-                crate::views::wrapped_checkbox(ui, &mut delete_on_disk, &disk_chk_lbl);
-                if *is_custom_dir {
-                    ui.label(RichText::new(&custom_warn_lbl).size(11.5).color(ACCENT_AMBER));
-                }
-            }
-            DeleteTarget::World { folder_name, .. } => {
-                let desc = if lang == Language::Vi {
-                    format!(
-                        "Xóa vĩnh viễn thế giới chơi đơn '{folder_name}'? Dữ liệu bản đồ trong saves/{folder_name} sẽ không thể khôi phục."
-                    )
-                } else {
-                    format!(
-                        "Permanently delete singleplayer world '{folder_name}'? World data inside saves/{folder_name} cannot be recovered."
-                    )
-                };
-                ui.label(desc);
-            }
-            DeleteTarget::ProfileFiles { targets, .. }
-            | DeleteTarget::ServerFiles { targets, .. } => {
-                let desc = if lang == Language::Vi {
-                    format!(
-                        "Xóa vĩnh viễn {} tệp / thư mục đã chọn khỏi ổ đĩa?",
-                        targets.len()
-                    )
-                } else {
-                    format!(
-                        "Permanently delete {} selected file(s) / folder(s) from disk?",
-                        targets.len()
-                    )
-                };
-                ui.label(RichText::new(desc).strong());
-                ui.add_space(4.0);
-                for rel in targets.iter().take(5) {
-                    ui.label(RichText::new(format!("• {rel}")).size(11.5).weak());
-                }
-                if targets.len() > 5 {
-                    ui.label(
-                        RichText::new(format!("… +{}", targets.len() - 5))
-                            .size(11.5)
-                            .weak(),
-                    );
-                }
-            }
-        }
 
-        ui.add_space(12.0);
-        ui.horizontal_wrapped(|ui| {
-            if danger_icon_button(ui, VectorIcon::Trash, &confirm_lbl).clicked() {
-                do_confirm = true;
-            }
-            if secondary_button(ui, &cancel_lbl).clicked() {
-                do_cancel = true;
-            }
-        });
+                ui.add_space(12.0);
+                ui.horizontal_wrapped(|ui| {
+                    if danger_icon_button(ui, VectorIcon::Trash, &confirm_lbl).clicked() {
+                        do_confirm = true;
+                    }
+                    if secondary_button(ui, &cancel_lbl).clicked() {
+                        do_cancel = true;
+                    }
+                });
+            });
     });
 
     if let Some(m) = app.pending_delete_modal.as_mut() {
@@ -3524,12 +3459,45 @@ fn render_disk_pack_import_modal(app: &mut LauncherAppState, ctx: &egui::Context
         .constrain_to(safe_rect)
         .order(Order::Foreground)
         .show(ctx, |ui| {
+            ui.set_width(ui.available_width());
+            egui::Panel::bottom("disk_pack_import_footer")
+                .resizable(false)
+                .frame(Frame::NONE.inner_margin(Margin {
+                    left: 0,
+                    right: 0,
+                    top: 8,
+                    bottom: 0,
+                }))
+                .show(ui, |ui| {
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if snap.installing {
+                            if secondary_icon_button(ui, VectorIcon::Download, &minimize_lbl)
+                                .clicked()
+                            {
+                                trigger_minimize = true;
+                            }
+                            if danger_icon_button(ui, VectorIcon::Close, &cancel_install_lbl)
+                                .clicked()
+                            {
+                                trigger_cancel = true;
+                            }
+                        } else {
+                            if primary_icon_button(ui, VectorIcon::Download, &install_lbl).clicked()
+                            {
+                                trigger_start = true;
+                            }
+                            if secondary_button(ui, &close_lbl).clicked() {
+                                trigger_close = true;
+                            }
+                        }
+                    });
+                });
+
             let scroll_w = ui.available_width();
-            ui.set_width(scroll_w);
-            let body_h = (ui.available_height() - 52.0).max(140.0);
             ScrollArea::vertical()
                 .id_salt("disk_pack_import_body_scroll")
-                .max_height(body_h)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.set_max_width(scroll_w);
@@ -3645,25 +3613,6 @@ fn render_disk_pack_import_modal(app: &mut LauncherAppState, ctx: &egui::Context
                         }
                     }
                 });
-
-            ui.add_space(12.0);
-            ui.horizontal_wrapped(|ui| {
-                if snap.installing {
-                    if secondary_icon_button(ui, VectorIcon::Download, &minimize_lbl).clicked() {
-                        trigger_minimize = true;
-                    }
-                    if danger_icon_button(ui, VectorIcon::Close, &cancel_install_lbl).clicked() {
-                        trigger_cancel = true;
-                    }
-                } else {
-                    if primary_icon_button(ui, VectorIcon::Download, &install_lbl).clicked() {
-                        trigger_start = true;
-                    }
-                    if secondary_button(ui, &close_lbl).clicked() {
-                        trigger_close = true;
-                    }
-                }
-            });
         });
 
     if let Some(m) = app.disk_pack_modal.as_mut() {

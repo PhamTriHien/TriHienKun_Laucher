@@ -361,7 +361,7 @@ fn saved_accounts_fit_and_actions_activate_without_side_effects() {
                         AccountType::Microsoft => {
                             i18n.tr("Microsoft Bản quyền", "Microsoft Official")
                         }
-                        AccountType::Offline => "Offline + Yggdrasil Skin",
+                        AccountType::Offline => "Offline + Skin",
                     };
                     for text in ["wide", "Cape", provider_label] {
                         let rect = harness.get_by_label(text).rect();
@@ -1340,10 +1340,7 @@ fn mobile_game_screen_bedrock_controls_editor_and_floating_hub_toggle() {
             app.open_mobile_game_screen(false);
             app.mobile_game.floating_menu_expanded = true;
 
-            let open_hub_lbl = app
-                .i18n
-                .tr("Hiện HUB UI App", "Open Launcher HUB UI")
-                .to_owned();
+            let open_hub_lbl = app.i18n.tr("Mở Launcher", "Open Launcher").to_owned();
             let edit_lbl = app
                 .i18n
                 .tr("Edit Phím Tùy Chỉnh", "Edit Custom Controls")
@@ -1390,10 +1387,7 @@ fn mobile_game_screen_bedrock_controls_editor_and_floating_hub_toggle() {
             assert!(app.mobile_game.hub_visible_over_game);
 
             app.mobile_game.floating_menu_expanded = true;
-            let hide_hub_lbl = app
-                .i18n
-                .tr("Ẩn HUB UI (Về Game)", "Hide HUB (Back to Game)")
-                .to_owned();
+            let hide_hub_lbl = app.i18n.tr("Về Game", "Back to Game").to_owned();
             let mut back_harness = harness(960.0, 540.0, |ui| {
                 crate::views::render_root_ui(app, ui, None);
             });
@@ -2032,10 +2026,7 @@ fn android_safe_area_insets_and_free_autorotate_keep_edge_buttons_clear() {
             app.mobile_game.floating_menu_pos = Some(pos2(fx, fy));
 
             let mut safe_game = Rect::NOTHING;
-            let hub_lbl = app
-                .i18n
-                .tr("Hiện HUB UI App", "Open Launcher HUB UI")
-                .to_owned();
+            let hub_lbl = app.i18n.tr("Mở Launcher", "Open Launcher").to_owned();
             let game_h = harness_themed(924.0, 426.0, ThemeMode::Light, |ui| {
                 crate::views::render_root_ui(app, ui, None);
                 safe_game = crate::views::safe_content_rect(ui.ctx());
@@ -2596,5 +2587,2116 @@ fn servers_landscape_and_portrait_never_drift_or_jitter_across_frames() {
                 drop(h);
             }
         }
+    });
+}
+
+#[test]
+fn home_workspace_unified_scroll_reaches_bottom_actions_across_viewports_and_font_scale() {
+    use thk_core::models::{GameProfile, LoaderType};
+
+    let _render_guard = VISUAL_RENDER_LOCK.lock().expect("visual renderer lock");
+    for language in [Language::Vi, Language::En] {
+        with_isolated_app(language, |app| {
+            app.settings.setup_completed = true;
+            app.section = crate::state::ActiveSection::Home;
+            app.home.active_tab = HomeTab::General;
+
+            let prof = GameProfile {
+                id: "unified-scroll-prof".into(),
+                name: "Unified Scroll Survival".into(),
+                game_version: "1.21.4".into(),
+                loader: LoaderType::Fabric,
+                loader_version: Some("0.16.10".into()),
+                instance_path: "visual-test-not-a-real-profile".into(),
+                is_custom_path: false,
+                ram_mb: 4096,
+                java_path: None,
+                jvm_args: String::new(),
+                auto_perf_mods: true,
+                icon_url: None,
+                window_width: Some(1280),
+                window_height: Some(720),
+                fullscreen: false,
+                total_play_seconds: 1800,
+                session_count: 3,
+                crash_count: 0,
+                last_played_at: None,
+                created_at: 0,
+            };
+            let prof_id = prof.id.clone();
+            app.home.profiles = vec![prof];
+            app.select_profile(prof_id);
+
+            let save_lbl = app.i18n.t("profile.save").to_owned();
+            let delete_lbl = app.i18n.t("profile.delete").to_owned();
+
+            for (vp_w, vp_h, font_scale) in [
+                (412.0_f32, 892.0_f32, 1.0_f32),
+                (960.0_f32, 440.0_f32, 1.0_f32),
+                (960.0_f32, 440.0_f32, 1.50_f32),
+                (412.0_f32, 892.0_f32, 1.50_f32),
+            ] {
+                app.settings.font_scale = font_scale;
+                let safe_cell = std::cell::Cell::new(Rect::NOTHING);
+                let mut h = Harness::builder()
+                    .with_size(vec2(vp_w, vp_h))
+                    .with_pixels_per_point(1.0)
+                    .with_theme(egui::Theme::Light)
+                    .with_os(egui::os::OperatingSystem::Windows)
+                    .with_context_setup(move |ctx| {
+                        crate::theme::install_unicode_fonts(ctx);
+                        crate::theme::apply_theme_with_scale(
+                            ctx,
+                            ThemeMode::Light,
+                            AccentPreset::Emerald,
+                            font_scale,
+                        );
+                    })
+                    .build_ui(|ui| {
+                        crate::views::render_root_ui(app, ui, None);
+                        safe_cell.set(crate::views::safe_content_rect(ui.ctx()));
+                    });
+                h.input_mut().time = None;
+                h.run_steps(3);
+                let safe_rect = safe_cell.get();
+
+                let wheel_pos = pos2(
+                    (safe_rect.right() - 72.0).max(safe_rect.center().x),
+                    safe_rect.center().y,
+                );
+                let mut reached_bottom = false;
+                for _ in 0..40 {
+                    let save_in = h
+                        .query_by_role_and_label(egui::Role::Button, &save_lbl)
+                        .is_some_and(|n| safe_rect.contains_rect(n.rect()));
+                    let del_in = h
+                        .query_by_role_and_label(egui::Role::Button, &delete_lbl)
+                        .is_some_and(|n| safe_rect.contains_rect(n.rect()));
+                    if save_in && del_in {
+                        reached_bottom = true;
+                        break;
+                    }
+                    h.input_mut().events.extend([
+                        egui::Event::PointerMoved(wheel_pos),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: vec2(0.0, -180.0),
+                            phase: egui::TouchPhase::Move,
+                            source: egui::MouseWheelSource::Unknown,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ]);
+                    h.run_steps(8);
+                }
+                assert!(
+                    reached_bottom,
+                    "Home workspace failed to scroll bottom actions into safe_rect at {vp_w}x{vp_h} scale={font_scale} ({language:?}); safe_rect={safe_rect:?}, save={:?}, delete={:?}",
+                    h.query_by_role_and_label(egui::Role::Button, &save_lbl).map(|n| n.rect()),
+                    h.query_by_role_and_label(egui::Role::Button, &delete_lbl).map(|n| n.rect()),
+                );
+                drop(h);
+            }
+        });
+    }
+}
+
+#[test]
+fn floating_quick_menu_orb_is_circular_48pt_without_hub_label() {
+    let _render_guard = VISUAL_RENDER_LOCK.lock().expect("visual renderer lock");
+    for language in [Language::Vi, Language::En] {
+        with_isolated_app(language, |app| {
+            app.settings.setup_completed = true;
+            app.open_mobile_game_screen(false);
+            app.mobile_game.floating_menu_expanded = false;
+            app.mobile_game.floating_menu_pos = None;
+
+            let quick_lbl = app.i18n.tr("Menu nhanh", "Quick Menu").to_owned();
+            let open_launcher_lbl = app.i18n.tr("Mở Launcher", "Open Launcher").to_owned();
+
+            for (vp_w, vp_h) in [(960.0_f32, 540.0_f32), (412.0_f32, 892.0_f32)] {
+                app.mobile_game.floating_menu_expanded = false;
+                let safe_cell = std::cell::Cell::new(Rect::NOTHING);
+                let hit_cell = std::cell::Cell::new(Rect::NOTHING);
+                let mut h = harness(vp_w, vp_h, |ui| {
+                    crate::views::render_root_ui(app, ui, None);
+                    let sr = crate::views::safe_content_rect(ui.ctx());
+                    safe_cell.set(sr);
+                    if !app.mobile_game.floating_menu_expanded {
+                        hit_cell.set(crate::views::mobile_game::floating_menu_hit_rect(
+                            &app.mobile_game,
+                            sr,
+                        ));
+                    }
+                });
+                h.input_mut().time = None;
+                let safe_rect = safe_cell.get();
+                let expected_hit = hit_cell.get();
+
+                let rect = h
+                    .get_by_role_and_label(egui::Role::Button, &quick_lbl)
+                    .rect();
+                assert!(
+                    (rect.width() - 48.0).abs() < 1.0 && (rect.height() - 48.0).abs() < 1.0,
+                    "collapsed floating quick menu must be 48x48pt circle, got {rect:?}"
+                );
+                assert!(
+                    (rect.center() - expected_hit.center()).length() < 1.0
+                        && safe_rect.contains_rect(rect.shrink(0.5)),
+                    "orb rect {rect:?} mismatched hit rect {expected_hit:?} in {safe_rect:?}"
+                );
+                assert!(
+                    h.query_by_label_contains("HUB").is_none(),
+                    "collapsed floating orb must not display any 'HUB' text label"
+                );
+
+                h.get_by_role_and_label(egui::Role::Button, &quick_lbl)
+                    .click();
+                h.run_steps(2);
+                let open_rect = h
+                    .get_by_role_and_label(egui::Role::Button, &open_launcher_lbl)
+                    .rect();
+                assert!(safe_rect.contains_rect(open_rect.shrink(0.5)));
+                drop(h);
+                assert!(app.mobile_game.floating_menu_expanded);
+            }
+        });
+    }
+}
+
+#[test]
+fn egui_modal_short_landscape_high_font_scale_stays_in_viewport_and_scrolls_to_confirm() {
+    let _render_guard = VISUAL_RENDER_LOCK.lock().expect("visual renderer lock");
+    for language in [Language::Vi, Language::En] {
+        with_isolated_app(language, |app| {
+            app.settings.setup_completed = false;
+            app.settings.font_scale = 1.6;
+
+            let confirm_lbl = app
+                .i18n
+                .tr(
+                    "Bắt đầu sử dụng TriHienKun Laucher",
+                    "Get Started with TriHienKun Laucher",
+                )
+                .to_owned();
+            let welcome_lbl = app
+                .i18n
+                .tr(
+                    "Chào mừng đến với TriHienKun Laucher!",
+                    "Welcome to TriHienKun Laucher!",
+                )
+                .to_owned();
+
+            let vp_cell = std::cell::Cell::new(Rect::NOTHING);
+            let mut h = Harness::builder()
+                .with_size(vec2(800.0, 380.0))
+                .with_pixels_per_point(1.0)
+                .with_theme(egui::Theme::Light)
+                .with_os(egui::os::OperatingSystem::Windows)
+                .with_accessibility_check(false)
+                .with_context_setup(|ctx| {
+                    crate::theme::install_unicode_fonts(ctx);
+                    crate::theme::apply_theme_with_scale(
+                        ctx,
+                        ThemeMode::Light,
+                        AccentPreset::Emerald,
+                        1.6,
+                    );
+                })
+                .build_ui(|ui| {
+                    crate::views::render_root_ui(app, ui, None);
+                    vp_cell.set(ui.ctx().content_rect());
+                });
+            h.input_mut().time = None;
+            h.run_steps(3);
+            let viewport_rect = vp_cell.get();
+
+            let heading_rect = h.get_by_label(&welcome_lbl).rect();
+            assert!(
+                viewport_rect.contains_rect(heading_rect.shrink(0.5)),
+                "initial setup modal heading overflowed short viewport {viewport_rect:?}: {heading_rect:?}"
+            );
+
+            let mut confirm_visible = false;
+            for _ in 0..30 {
+                if h.query_by_role_and_label(egui::Role::Button, &confirm_lbl)
+                    .is_some_and(|n| viewport_rect.expand(0.5).contains_rect(n.rect()))
+                {
+                    confirm_visible = true;
+                    break;
+                }
+                h.input_mut().events.extend([
+                    egui::Event::PointerMoved(viewport_rect.center()),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: vec2(0.0, -140.0),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                h.run_steps(8);
+            }
+            assert!(
+                confirm_visible,
+                "egui::Modal confirm button never scrolled into short viewport {viewport_rect:?}: {:?}",
+                h.query_by_role_and_label(egui::Role::Button, &confirm_lbl).map(|n| n.rect())
+            );
+
+            h.get_by_role_and_label(egui::Role::Button, &confirm_lbl)
+                .click();
+            h.run_steps(3);
+            drop(h);
+            assert!(app.settings.setup_completed);
+        });
+    }
+}
+
+#[test]
+fn mod_card_narrow_portrait_and_wide_desktop_responsive_no_collision() {
+    use crate::state::ActiveSection;
+    use thk_core::models::{GameProfile, LoaderType, ProviderSource};
+    use thk_mods::{
+        ContentUpdateCandidate, LocalContentItem, ProjectSummary, ProjectVersion, VersionFile,
+    };
+
+    let _render_guard = VISUAL_RENDER_LOCK.lock().expect("visual renderer lock");
+    for language in [Language::Vi, Language::En] {
+        with_isolated_app(language, |app| {
+            app.settings.setup_completed = true;
+            let prof = GameProfile {
+                id: "mod-test-prof".into(),
+                name: "Responsive Mod Layout Profile".into(),
+                game_version: "1.20.4".into(),
+                loader: LoaderType::Fabric,
+                loader_version: Some("0.15.7".into()),
+                instance_path: "visual-test-mod-profile".into(),
+                is_custom_path: false,
+                ram_mb: 4096,
+                java_path: None,
+                jvm_args: String::new(),
+                auto_perf_mods: false,
+                icon_url: None,
+                window_width: Some(1280),
+                window_height: Some(720),
+                fullscreen: false,
+                total_play_seconds: 1200,
+                session_count: 2,
+                crash_count: 0,
+                last_played_at: None,
+                created_at: 0,
+            };
+            app.home.profiles = vec![prof.clone()];
+            app.select_profile(prof.id);
+
+            let item_curse = LocalContentItem {
+                file_name: "jei-1.20.4-fabric-17.3.0.49.jar".into(),
+                base_file_name: "jei-1.20.4-fabric-17.3.0.49.jar".into(),
+                enabled: true,
+                size_bytes: 2_456_789,
+                title: "Just Enough Items (JEI) Fabric Edition".into(),
+                version_number: "17.3.0.49".into(),
+                provider: ProviderSource::CurseForge,
+                project_id: Some("jei".into()),
+                icon_url: None,
+            };
+            let item_modrinth = LocalContentItem {
+                file_name: "fabric-api-0.92.2+1.20.4.jar".into(),
+                base_file_name: "fabric-api-0.92.2+1.20.4.jar".into(),
+                enabled: true,
+                size_bytes: 1_876_543,
+                title: "Fabric API Essential Library".into(),
+                version_number: "0.92.2".into(),
+                provider: ProviderSource::Modrinth,
+                project_id: Some("fabric-api".into()),
+                icon_url: None,
+            };
+            app.home.local_items = vec![item_curse, item_modrinth];
+
+            let upd = ContentUpdateCandidate {
+                file_name: "fabric-api-0.92.2+1.20.4.jar".into(),
+                title: "Fabric API".into(),
+                current_version: "0.92.2".into(),
+                latest_version: ProjectVersion {
+                    id: "ver-latest".into(),
+                    project_id: "fabric-api".into(),
+                    provider: ProviderSource::Modrinth,
+                    name: "0.97.0+1.20.4".into(),
+                    version_number: "0.97.0".into(),
+                    release_channel: "release".into(),
+                    published_at: None,
+                    game_versions: vec!["1.20.4".into()],
+                    loaders: vec!["fabric".into()],
+                    files: vec![VersionFile {
+                        url: "https://example.com/fabric-api-0.97.0.jar".into(),
+                        filename: "fabric-api-0.97.0+1.20.4.jar".into(),
+                        size: 2_000_000,
+                        sha1: None,
+                        sha512: None,
+                        primary: true,
+                    }],
+                    dependencies: vec![],
+                    server_pack_file_id: None,
+                },
+                summary: ProjectSummary {
+                    provider: ProviderSource::Modrinth,
+                    project_id: "fabric-api".into(),
+                    slug: "fabric-api".into(),
+                    title: "Fabric API".into(),
+                    summary: "Core API for Fabric mods".into(),
+                    author: "FabricMC".into(),
+                    downloads: 10_000_000,
+                    icon_url: None,
+                    categories: vec!["library".into()],
+                    updated_at: None,
+                    content_kind: thk_core::models::ContentKind::Mod,
+                },
+            };
+            app.home.content_updates = vec![upd];
+
+            app.section = ActiveSection::Home;
+            app.home.active_tab = HomeTab::Mods;
+
+            let delete_lbl = app.i18n.tr("Xóa", "Delete").to_owned();
+            let update_word = app.i18n.t("mods.update").to_owned();
+
+            let viewports = [
+                ("mobile_portrait_360", 360.0_f32, 800.0_f32),
+                ("mobile_portrait_412", 412.0_f32, 892.0_f32),
+                ("desktop_wide", 1280.0_f32, 800.0_f32),
+            ];
+
+            for (vp_name, width, height) in viewports {
+                let harness = harness_scaled(width, height, 1.0, ThemeMode::Dark, |ui| {
+                    crate::views::render_root_ui(app, ui, None);
+                });
+
+                let delete_nodes: Vec<_> = harness
+                    .query_all_by_label(&delete_lbl)
+                    .map(|n| n.rect())
+                    .collect();
+                assert!(
+                    !delete_nodes.is_empty(),
+                    "Delete button must be visible on {vp_name}"
+                );
+
+                let badge_cf = harness.query_by_label("CurseForge").map(|n| n.rect());
+                let badge_mr = harness.query_by_label("Modrinth").map(|n| n.rect());
+                let file_jei = harness
+                    .query_by_label_contains("jei-1.20.4-fabric")
+                    .map(|n| n.rect());
+
+                let update_nodes: Vec<_> = harness
+                    .query_all_by_label_contains(&update_word)
+                    .map(|n| n.rect())
+                    .collect();
+
+                for del_rect in &delete_nodes {
+                    assert!(
+                        del_rect.right() <= width + 1.0,
+                        "Delete button overflowed {vp_name}: {del_rect:?}"
+                    );
+                    if let Some(cf) = badge_cf {
+                        assert!(
+                            !del_rect.intersects(cf),
+                            "Delete button collided with CurseForge badge on {vp_name}: delete={del_rect:?}, badge={cf:?}"
+                        );
+                    }
+                    if let Some(mr) = badge_mr {
+                        assert!(
+                            !del_rect.intersects(mr),
+                            "Delete button collided with Modrinth badge on {vp_name}: delete={del_rect:?}, badge={mr:?}"
+                        );
+                    }
+                    if let Some(fj) = file_jei {
+                        assert!(
+                            !del_rect.intersects(fj),
+                            "Delete button collided with filename on {vp_name}: delete={del_rect:?}, file={fj:?}"
+                        );
+                    }
+                }
+
+                for upd_rect in &update_nodes {
+                    assert!(
+                        upd_rect.right() <= width + 1.0,
+                        "Update button overflowed {vp_name}: {upd_rect:?}"
+                    );
+                    if let Some(cf) = badge_cf {
+                        assert!(
+                            !upd_rect.intersects(cf),
+                            "Update button collided with CurseForge badge on {vp_name}: update={upd_rect:?}, badge={cf:?}"
+                        );
+                    }
+                    if let Some(mr) = badge_mr {
+                        assert!(
+                            !upd_rect.intersects(mr),
+                            "Update button collided with Modrinth badge on {vp_name}: update={upd_rect:?}, badge={mr:?}"
+                        );
+                    }
+                }
+
+                drop(harness);
+            }
+        });
+    }
+}
+
+#[test]
+fn mod_card_interactive_toggle_delete_and_online_addons_layout() {
+    use crate::state::ActiveSection;
+    use thk_core::models::{GameProfile, LoaderType, ProviderSource};
+    use thk_mods::{
+        ContentUpdateCandidate, LocalContentItem, ProjectSummary, ProjectVersion, VersionFile,
+    };
+
+    let _render_guard = VISUAL_RENDER_LOCK.lock().expect("visual renderer lock");
+    with_isolated_app(Language::Vi, |app| {
+        app.settings.setup_completed = true;
+        let instance_dir = app.paths.instances_dir.join("interactive-mod-instance");
+        let mods_dir = instance_dir.join("mods");
+        std::fs::create_dir_all(&mods_dir).expect("create mods dir");
+        let jei_file = mods_dir.join("jei-1.20.4-fabric-17.3.0.49.jar");
+        let fapi_file = mods_dir.join("fabric-api-0.92.2+1.20.4.jar");
+        std::fs::write(&jei_file, b"PK\x03\x04jei").expect("write jei");
+        std::fs::write(&fapi_file, b"PK\x03\x04fapi").expect("write fapi");
+
+        let prof = GameProfile {
+            id: "interactive-mod-prof".into(),
+            name: "Interactive Mod Test Profile".into(),
+            game_version: "1.20.4".into(),
+            loader: LoaderType::Fabric,
+            loader_version: Some("0.15.7".into()),
+            instance_path: instance_dir,
+            is_custom_path: false,
+            ram_mb: 4096,
+            java_path: None,
+            jvm_args: String::new(),
+            auto_perf_mods: false,
+            icon_url: None,
+            window_width: Some(1280),
+            window_height: Some(720),
+            fullscreen: false,
+            total_play_seconds: 1200,
+            session_count: 2,
+            crash_count: 0,
+            last_played_at: None,
+            created_at: 0,
+        };
+        app.db.upsert_profile(&prof).expect("upsert profile");
+        app.home.profiles = vec![prof.clone()];
+        app.select_profile(prof.id.clone());
+
+        let item_curse = LocalContentItem {
+            file_name: "jei-1.20.4-fabric-17.3.0.49.jar".into(),
+            base_file_name: "jei-1.20.4-fabric-17.3.0.49.jar".into(),
+            enabled: true,
+            size_bytes: 2_456_789,
+            title: "Just Enough Items (JEI) Fabric Edition".into(),
+            version_number: "17.3.0.49".into(),
+            provider: ProviderSource::CurseForge,
+            project_id: Some("jei".into()),
+            icon_url: None,
+        };
+        let item_modrinth = LocalContentItem {
+            file_name: "fabric-api-0.92.2+1.20.4.jar".into(),
+            base_file_name: "fabric-api-0.92.2+1.20.4.jar".into(),
+            enabled: true,
+            size_bytes: 1_876_543,
+            title: "Fabric API Essential Library".into(),
+            version_number: "0.92.2".into(),
+            provider: ProviderSource::Modrinth,
+            project_id: Some("fabric-api".into()),
+            icon_url: None,
+        };
+        app.home.local_items = vec![item_curse, item_modrinth];
+
+        let upd = ContentUpdateCandidate {
+            file_name: "fabric-api-0.92.2+1.20.4.jar".into(),
+            title: "Fabric API".into(),
+            current_version: "0.92.2".into(),
+            latest_version: ProjectVersion {
+                id: "ver-latest".into(),
+                project_id: "fabric-api".into(),
+                provider: ProviderSource::Modrinth,
+                name: "0.97.0+1.20.4".into(),
+                version_number: "0.97.0".into(),
+                release_channel: "release".into(),
+                published_at: None,
+                game_versions: vec!["1.20.4".into()],
+                loaders: vec!["fabric".into()],
+                files: vec![VersionFile {
+                    url: "https://example.com/fabric-api-0.97.0.jar".into(),
+                    filename: "fabric-api-0.97.0+1.20.4.jar".into(),
+                    size: 2_000_000,
+                    sha1: None,
+                    sha512: None,
+                    primary: true,
+                }],
+                dependencies: vec![],
+                server_pack_file_id: None,
+            },
+            summary: ProjectSummary {
+                provider: ProviderSource::Modrinth,
+                project_id: "fabric-api".into(),
+                slug: "fabric-api".into(),
+                title: "Fabric API".into(),
+                summary: "Core API for Fabric mods".into(),
+                author: "FabricMC".into(),
+                downloads: 10_000_000,
+                icon_url: None,
+                categories: vec!["library".into()],
+                updated_at: None,
+                content_kind: thk_core::models::ContentKind::Mod,
+            },
+        };
+        app.home.content_updates = vec![upd];
+
+        app.section = ActiveSection::Home;
+        app.home.active_tab = HomeTab::Mods;
+
+        {
+            let jei_disabled = mods_dir.join("jei-1.20.4-fabric-17.3.0.49.jar.disabled");
+            assert!(jei_file.is_file());
+            assert!(!jei_disabled.exists());
+            assert_eq!(app.home.local_items.len(), 2);
+
+            let mut harness_visible = harness_scaled(360.0, 1400.0, 1.0, ThemeMode::Dark, |ui| {
+                crate::views::render_root_ui(app, ui, None);
+            });
+            let cb_rects: Vec<_> = harness_visible
+                .query_all_by_role(egui::Role::CheckBox)
+                .map(|n| n.rect())
+                .collect();
+            assert_eq!(cb_rects.len(), 2);
+            for rect in &cb_rects {
+                assert!(rect.width() > 0.0 && rect.height() > 0.0 && rect.right() <= 361.0);
+            }
+
+            let cb0 = harness_visible
+                .query_all_by_role(egui::Role::CheckBox)
+                .next()
+                .expect("first mod checkbox");
+            cb0.click();
+            harness_visible.run_steps(3);
+            drop(harness_visible);
+
+            assert!(!jei_file.exists());
+            assert!(jei_disabled.is_file());
+            assert!(!app.home.local_items[0].enabled);
+            assert_eq!(
+                app.home.local_items[0].file_name,
+                "jei-1.20.4-fabric-17.3.0.49.jar.disabled"
+            );
+
+            let mut harness_del = harness_scaled(360.0, 1400.0, 1.0, ThemeMode::Dark, |ui| {
+                crate::views::render_root_ui(app, ui, None);
+            });
+            let del_btn = harness_del
+                .query_all_by_label("Xóa")
+                .next()
+                .expect("first mod delete button");
+            assert!(del_btn.rect().right() <= 361.0);
+            del_btn.click();
+            harness_del.run_steps(3);
+            drop(harness_del);
+
+            assert!(!jei_file.exists());
+            assert!(!jei_disabled.exists());
+            assert!(fapi_file.is_file());
+            assert_eq!(app.home.local_items.len(), 1);
+            assert_eq!(
+                app.home.local_items[0].file_name,
+                "fabric-api-0.92.2+1.20.4.jar"
+            );
+        }
+
+        {
+            app.section = ActiveSection::Home;
+            app.home.active_tab = HomeTab::Mods;
+            app.home.show_online_browser = true;
+            app.home.online_hits = vec![ProjectSummary {
+                provider: ProviderSource::Modrinth,
+                project_id: "sodium".into(),
+                slug: "sodium".into(),
+                title: "Sodium Rendering Engine with Extended Performance Optimization Subsystems"
+                    .into(),
+                summary: "Modern rendering engine and client-side optimization mod for Minecraft that greatly improves frame rates and reduces micro-stutter.".into(),
+                author: "CaffeineMC Team".into(),
+                downloads: 25_000_000,
+                icon_url: None,
+                categories: vec!["optimization".into()],
+                updated_at: None,
+                content_kind: thk_core::models::ContentKind::Mod,
+            }];
+
+            let select_ver_label = app.i18n.tr("Chọn bản cài", "Select Version").to_owned();
+            let viewports = [
+                ("ultra_narrow_280", 280.0_f32, 700.0_f32),
+                ("small_phone_320", 320.0_f32, 700.0_f32),
+                ("standard_phone_360", 360.0_f32, 800.0_f32),
+                ("large_phone_412", 412.0_f32, 892.0_f32),
+                ("threshold_narrow_499", 499.0_f32, 800.0_f32),
+                ("threshold_wide_500", 500.0_f32, 800.0_f32),
+                ("desktop_wide_1280", 1280.0_f32, 800.0_f32),
+            ];
+
+            for (vp_name, width, height) in viewports {
+                let harness = harness_scaled(width, height, 1.0, ThemeMode::Dark, |ui| {
+                    crate::views::render_root_ui(app, ui, None);
+                });
+
+                let select_nodes: Vec<_> = harness
+                    .query_all_by_label_contains(&select_ver_label)
+                    .map(|n| n.rect())
+                    .collect();
+                assert!(
+                    !select_nodes.is_empty(),
+                    "Select Version button must be visible for online search hits on {vp_name}"
+                );
+
+                for sel_rect in &select_nodes {
+                    assert!(
+                        sel_rect.right() <= width + 1.0,
+                        "Select Version button overflowed right viewport on {vp_name}: {sel_rect:?}"
+                    );
+                    assert!(
+                        sel_rect.left() >= -1.0,
+                        "Select Version button underflowed left viewport on {vp_name}: {sel_rect:?}"
+                    );
+                    assert!(
+                        sel_rect.width() >= 24.0 && sel_rect.height() >= 24.0,
+                        "Select Version button touch target too small on {vp_name}: {:?}",
+                        sel_rect.size()
+                    );
+                }
+
+                drop(harness);
+            }
+            app.home.show_online_browser = false;
+        }
+
+        {
+            use crate::state::ServerTab;
+            use thk_mods::ServerAddonFile;
+            use thk_server::ServerRuntimeState;
+
+            let srv = server_fixture();
+            app.servers.servers = vec![srv.clone()];
+            app.servers.selected_server_id = Some(srv.id.clone());
+            app.servers
+                .server_states
+                .insert(srv.id.clone(), ServerRuntimeState::Online);
+            app.servers.active_tab = ServerTab::PluginsMods;
+            app.section = ActiveSection::Servers;
+
+            app.servers.installed_addons = vec![
+                ServerAddonFile {
+                    file_name: "EssentialsX-2.20.1.jar".into(),
+                    base_file_name: "EssentialsX-2.20.1.jar".into(),
+                    folder: "plugins".into(),
+                    enabled: true,
+                    size_bytes: 4_567_890,
+                    title: "EssentialsX Core Management Suite".into(),
+                    version_number: "2.20.1".into(),
+                },
+                ServerAddonFile {
+                    file_name: "dynmap-3.7-beta-3-spigot.jar".into(),
+                    base_file_name: "dynmap-3.7-beta-3-spigot.jar".into(),
+                    folder: "plugins".into(),
+                    enabled: false,
+                    size_bytes: 28_123_456,
+                    title: "Dynamic Web Map Renderer".into(),
+                    version_number: "3.7-beta-3".into(),
+                },
+            ];
+
+            let viewports = [
+                ("server_ultra_narrow_280", 280.0_f32, 700.0_f32),
+                ("server_small_phone_320", 320.0_f32, 700.0_f32),
+                ("server_standard_phone_360", 360.0_f32, 800.0_f32),
+                ("server_threshold_narrow_499", 499.0_f32, 800.0_f32),
+                ("server_threshold_wide_500", 500.0_f32, 800.0_f32),
+                ("server_desktop_wide_1280", 1280.0_f32, 800.0_f32),
+            ];
+
+            for (vp_name, width, height) in viewports {
+                let harness = harness_scaled(width, height, 1.0, ThemeMode::Dark, |ui| {
+                    crate::views::render_root_ui(app, ui, None);
+                });
+
+                let del_nodes: Vec<_> = harness
+                    .query_all_by_label("Xóa")
+                    .map(|n| n.rect())
+                    .collect();
+                assert_eq!(
+                    del_nodes.len(),
+                    2,
+                    "Expected 2 server addon delete buttons on {vp_name}, found {}",
+                    del_nodes.len()
+                );
+
+                for del_rect in &del_nodes {
+                    assert!(
+                        del_rect.right() <= width + 1.0,
+                        "Server delete button overflowed {vp_name}: {del_rect:?}"
+                    );
+                    assert!(
+                        del_rect.left() >= -1.0,
+                        "Server delete button underflowed {vp_name}: {del_rect:?}"
+                    );
+                    assert!(
+                        del_rect.width() >= 24.0 && del_rect.height() >= 24.0,
+                        "Server delete button touch target too small on {vp_name}: {:?}",
+                        del_rect.size()
+                    );
+                }
+
+                drop(harness);
+            }
+
+            app.servers.installed_addons = (0..240)
+                .map(|idx| ServerAddonFile {
+                    file_name: format!("server_addon_{idx:03}.jar"),
+                    base_file_name: format!("server_addon_{idx:03}.jar"),
+                    folder: "plugins".into(),
+                    enabled: idx % 2 == 0,
+                    size_bytes: 1_024_000,
+                    title: if idx == 42 {
+                        "Bộ Tối Ưu Máy Chủ Đỉnh Cao".into()
+                    } else {
+                        format!("Server Addon {idx:03}")
+                    },
+                    version_number: "1.0.0".into(),
+                })
+                .collect();
+
+            let virt_harness = harness_scaled(800.0, 640.0, 1.0, ThemeMode::Dark, |ui| {
+                crate::views::render_root_ui(app, ui, None);
+            });
+            let virt_del_count = virt_harness.query_all_by_label("Xóa").count();
+            assert!(
+                (2..=25).contains(&virt_del_count),
+                "Server addons list should virtualize 240 rows, found {virt_del_count}"
+            );
+            drop(virt_harness);
+
+            app.servers.addon_filter = "đỉnh cao".into();
+            let flt_harness = harness_scaled(800.0, 640.0, 1.0, ThemeMode::Dark, |ui| {
+                crate::views::render_root_ui(app, ui, None);
+            });
+            assert_eq!(flt_harness.query_all_by_label("Xóa").count(), 1);
+            drop(flt_harness);
+        }
+    });
+}
+
+#[test]
+fn mod_card_stress_viewport_and_extreme_content() {
+    use crate::state::ActiveSection;
+    use thk_core::models::{GameProfile, LoaderType, ProviderSource};
+    use thk_mods::{
+        ContentUpdateCandidate, LocalContentItem, ProjectSummary, ProjectVersion, VersionFile,
+    };
+
+    let _render_guard = VISUAL_RENDER_LOCK.lock().expect("visual renderer lock");
+    for language in [Language::Vi, Language::En] {
+        with_isolated_app(language, |app| {
+            app.settings.setup_completed = true;
+            let prof = GameProfile {
+                id: "stress-mod-prof".into(),
+                name: "Mod Card Stress Profile".into(),
+                game_version: "1.20.4".into(),
+                loader: LoaderType::Fabric,
+                loader_version: Some("0.15.7".into()),
+                instance_path: "visual-test-stress-profile".into(),
+                is_custom_path: false,
+                ram_mb: 4096,
+                java_path: None,
+                jvm_args: String::new(),
+                auto_perf_mods: false,
+                icon_url: None,
+                window_width: Some(1920),
+                window_height: Some(1080),
+                fullscreen: false,
+                total_play_seconds: 5000,
+                session_count: 10,
+                crash_count: 0,
+                last_played_at: None,
+                created_at: 0,
+            };
+            app.home.profiles = vec![prof.clone()];
+            app.select_profile(prof.id);
+
+            let item_update_enabled = LocalContentItem {
+                file_name: "super_ultra_extremely_long_unbreakable_filename_with_no_spaces_that_tests_break_anywhere_behavior_in_bounded_wrap_label_test_case_extension_version_number_final_release.jar".into(),
+                base_file_name: "super_ultra_extremely_long_unbreakable_filename_with_no_spaces_that_tests_break_anywhere_behavior_in_bounded_wrap_label_test_case_extension_version_number_final_release.jar".into(),
+                enabled: true,
+                size_bytes: 123_456_789,
+                title: "Extremely Long Mod Title Stretching Way Beyond Normal Limits Testing Maximum Bounding Box Wrap And Overflow Protection Under Heavy Stress 100+ Characters".into(),
+                version_number: "1.20.4-fabric-0.92.2+build.99999.alpha-extremely-long-custom-build-metadata-version-string-overflow-check".into(),
+                provider: ProviderSource::CurseForge,
+                project_id: Some("curse-stress-mod".into()),
+                icon_url: None,
+            };
+
+            let item_no_update_disabled = LocalContentItem {
+                file_name: "second_ultra_super_long_unbreakable_filename_without_spaces_testing_disabled_state_and_safe_wrap_boundary_conditions_in_mod_manager_test_suite_target_jar.jar".into(),
+                base_file_name: "second_ultra_super_long_unbreakable_filename_without_spaces_testing_disabled_state_and_safe_wrap_boundary_conditions_in_mod_manager_test_suite_target_jar.jar".into(),
+                enabled: false,
+                size_bytes: 45_678_901,
+                title: "Another Very Massive Mod Name Designed To Challenge Space Allocation Without Update Candidate And In Disabled State 100+ Chars Length".into(),
+                version_number: "v99.88.77-release-channel-candidate-extreme-version-length-string".into(),
+                provider: ProviderSource::Modrinth,
+                project_id: Some("modrinth-stress-mod".into()),
+                icon_url: None,
+            };
+
+            let item_update_disabled = LocalContentItem {
+                file_name: "third_extremely_long_unbreakable_mod_file_name_designed_to_verify_no_overlap_with_delete_buttons_on_mobile_portrait_and_desktop_screens_verified_release.jar".into(),
+                base_file_name: "third_extremely_long_unbreakable_mod_file_name_designed_to_verify_no_overlap_with_delete_buttons_on_mobile_portrait_and_desktop_screens_verified_release.jar".into(),
+                enabled: false,
+                size_bytes: 8_900_000,
+                title: "Sodium PBR Ambient Occlusion And Dynamic Lights Extra Extended Edition Version 4.0 Testing Boundary In Disabled State 100+ Chars".into(),
+                version_number: "4.0.0-preview.8.build.12345".into(),
+                provider: ProviderSource::CurseForge,
+                project_id: Some("sodium-extra-stress".into()),
+                icon_url: None,
+            };
+
+            let item_no_update_enabled = LocalContentItem {
+                file_name: "fourth_extremely_unbreakable_performance_enhancement_and_shader_compatibility_mod_file_name_stretching_over_one_hundred_and_fifty_characters_in_length.jar".into(),
+                base_file_name: "fourth_extremely_unbreakable_performance_enhancement_and_shader_compatibility_mod_file_name_stretching_over_one_hundred_and_fifty_characters_in_length.jar".into(),
+                enabled: true,
+                size_bytes: 3_500_000,
+                title: "OptiFabric Performance Enhancer And Shader Compatibility Layer For Modern High-Resolution Texture Packs And Massive Shaders 100+ Chars".into(),
+                version_number: "1.14.0-beta.2".into(),
+                provider: ProviderSource::Modrinth,
+                project_id: Some("optifabric-stress".into()),
+                icon_url: None,
+            };
+
+            app.home.local_items = vec![
+                item_update_enabled.clone(),
+                item_no_update_disabled.clone(),
+                item_update_disabled.clone(),
+                item_no_update_enabled.clone(),
+            ];
+
+            let upd1 = ContentUpdateCandidate {
+                file_name: item_update_enabled.file_name.clone(),
+                title: item_update_enabled.title.clone(),
+                current_version: item_update_enabled.version_number.clone(),
+                latest_version: ProjectVersion {
+                    id: "ver-latest-1".into(),
+                    project_id: "curse-stress-mod".into(),
+                    provider: ProviderSource::CurseForge,
+                    name: "2.0.0-massive-update-candidate-version-number-exceeding-any-standard-release-tag-string-boundary".into(),
+                    version_number: "2.0.0-massive-update-candidate-version-number-exceeding-any-standard-release-tag-string-boundary".into(),
+                    release_channel: "release".into(),
+                    published_at: None,
+                    game_versions: vec!["1.20.4".into()],
+                    loaders: vec!["fabric".into()],
+                    files: vec![VersionFile {
+                        url: "https://example.com/file1.jar".into(),
+                        filename: "file1.jar".into(),
+                        size: 5_000_000,
+                        sha1: None,
+                        sha512: None,
+                        primary: true,
+                    }],
+                    dependencies: vec![],
+                    server_pack_file_id: None,
+                },
+                summary: ProjectSummary {
+                    provider: ProviderSource::CurseForge,
+                    project_id: "curse-stress-mod".into(),
+                    slug: "curse-stress-mod".into(),
+                    title: "Curse Stress Mod".into(),
+                    summary: "Summary".into(),
+                    author: "Tester".into(),
+                    downloads: 1000,
+                    icon_url: None,
+                    categories: vec![],
+                    updated_at: None,
+                    content_kind: thk_core::models::ContentKind::Mod,
+                },
+            };
+
+            let upd3 = ContentUpdateCandidate {
+                file_name: item_update_disabled.file_name.clone(),
+                title: item_update_disabled.title.clone(),
+                current_version: item_update_disabled.version_number.clone(),
+                latest_version: ProjectVersion {
+                    id: "ver-latest-3".into(),
+                    project_id: "sodium-extra-stress".into(),
+                    provider: ProviderSource::CurseForge,
+                    name: "4.1.0-hotfix.1".into(),
+                    version_number: "4.1.0-hotfix.1".into(),
+                    release_channel: "release".into(),
+                    published_at: None,
+                    game_versions: vec!["1.20.4".into()],
+                    loaders: vec!["fabric".into()],
+                    files: vec![VersionFile {
+                        url: "https://example.com/file3.jar".into(),
+                        filename: "file3.jar".into(),
+                        size: 9_000_000,
+                        sha1: None,
+                        sha512: None,
+                        primary: true,
+                    }],
+                    dependencies: vec![],
+                    server_pack_file_id: None,
+                },
+                summary: ProjectSummary {
+                    provider: ProviderSource::CurseForge,
+                    project_id: "sodium-extra-stress".into(),
+                    slug: "sodium-extra-stress".into(),
+                    title: "Sodium Extra Stress".into(),
+                    summary: "Summary".into(),
+                    author: "Tester".into(),
+                    downloads: 2000,
+                    icon_url: None,
+                    categories: vec![],
+                    updated_at: None,
+                    content_kind: thk_core::models::ContentKind::Mod,
+                },
+            };
+
+            app.home.content_updates = vec![upd1, upd3];
+
+            app.section = ActiveSection::Home;
+            app.home.active_tab = HomeTab::Mods;
+
+            let delete_lbl = app.i18n.tr("Xóa", "Delete").to_owned();
+            let update_word = app.i18n.t("mods.update").to_owned();
+
+            let viewports = [
+                ("ultra_narrow_320", 320.0_f32, 1200.0_f32),
+                ("narrow_android_360", 360.0_f32, 1200.0_f32),
+                ("iphone_narrow_390", 390.0_f32, 1200.0_f32),
+                ("pixel_narrow_412", 412.0_f32, 1200.0_f32),
+                ("wide_mobile_480", 480.0_f32, 1200.0_f32),
+                ("threshold_narrow_499", 499.0_f32, 1200.0_f32),
+                ("threshold_wide_501", 501.0_f32, 1200.0_f32),
+                ("threshold_panel_499", 519.0_f32, 1200.0_f32),
+                ("threshold_panel_501", 521.0_f32, 1200.0_f32),
+                ("desktop_1080p", 1920.0_f32, 1080.0_f32),
+                ("desktop_1440p", 2560.0_f32, 1440.0_f32),
+                ("desktop_4k", 3840.0_f32, 2160.0_f32),
+            ];
+
+            for (vp_name, width, height) in viewports {
+                let harness = harness_scaled(width, height, 1.0, ThemeMode::Dark, |ui| {
+                    crate::views::render_root_ui(app, ui, None);
+                });
+
+                let delete_nodes: Vec<_> = harness
+                    .query_all_by_label(&delete_lbl)
+                    .map(|n| n.rect())
+                    .collect();
+                assert_eq!(
+                    delete_nodes.len(),
+                    4,
+                    "Expected 4 delete buttons for 4 mod cards on {vp_name}, found {}",
+                    delete_nodes.len()
+                );
+
+                let badge_cf_nodes: Vec<_> = harness
+                    .query_all_by_label("CurseForge")
+                    .map(|n| n.rect())
+                    .collect();
+                let badge_mr_nodes: Vec<_> = harness
+                    .query_all_by_label("Modrinth")
+                    .map(|n| n.rect())
+                    .collect();
+
+                let update_badge_nodes: Vec<_> = harness
+                    .query_all_by_label_contains(&update_word)
+                    .filter(|n| n.accesskit_node().role() != egui::accesskit::Role::Button)
+                    .map(|n| n.rect())
+                    .collect();
+                assert!(
+                    update_badge_nodes.len() >= 2,
+                    "Expected at least 2 update badges on {vp_name}, found {}",
+                    update_badge_nodes.len()
+                );
+
+                let all_badges: Vec<_> = badge_cf_nodes
+                    .iter()
+                    .chain(badge_mr_nodes.iter())
+                    .chain(update_badge_nodes.iter())
+                    .copied()
+                    .collect();
+                assert!(
+                    !all_badges.is_empty(),
+                    "Badges must be present on {vp_name}"
+                );
+
+                let file_label_nodes: Vec<_> = harness
+                    .query_all_by_label_contains(".jar")
+                    .map(|n| n.rect())
+                    .collect();
+                assert_eq!(
+                    file_label_nodes.len(),
+                    4,
+                    "Expected 4 .jar file labels on {vp_name}, found {}",
+                    file_label_nodes.len()
+                );
+
+                let update_btn_nodes: Vec<_> = harness
+                    .query_all_by_label_contains(&update_word)
+                    .filter(|n| {
+                        let a_node = n.accesskit_node();
+                        if a_node.role() != egui::accesskit::Role::Button {
+                            return false;
+                        }
+                        let a_label = a_node.label();
+                        let lbl = a_label.as_deref().unwrap_or_default();
+                        !lbl.contains('→')
+                            && !lbl.contains("->")
+                            && !lbl.contains("All")
+                            && !lbl.contains("tất cả")
+                            && !lbl.contains("Check")
+                            && !lbl.contains("Kiểm tra")
+                    })
+                    .map(|n| n.rect())
+                    .collect();
+                assert_eq!(
+                    update_btn_nodes.len(),
+                    2,
+                    "Expected 2 update buttons for 2 candidates on {vp_name}, found {}",
+                    update_btn_nodes.len()
+                );
+
+                for del_rect in &delete_nodes {
+                    assert!(
+                        del_rect.right() <= width + 1.0,
+                        "Delete button overflowed right viewport on {vp_name}: {del_rect:?}"
+                    );
+                    assert!(
+                        del_rect.left() >= -1.0,
+                        "Delete button underflowed left viewport on {vp_name}: {del_rect:?}"
+                    );
+                    for b_rect in &all_badges {
+                        assert!(
+                            !del_rect.intersects(*b_rect),
+                            "Delete button collided with badge on {vp_name}: delete={del_rect:?}, badge={b_rect:?}"
+                        );
+                    }
+                    for f_rect in &file_label_nodes {
+                        assert!(
+                            !del_rect.intersects(*f_rect),
+                            "Delete button collided with file label on {vp_name}: delete={del_rect:?}, file={f_rect:?}"
+                        );
+                    }
+                }
+
+                for upd_rect in &update_btn_nodes {
+                    assert!(
+                        upd_rect.right() <= width + 1.0,
+                        "Update button overflowed right viewport on {vp_name}: {upd_rect:?}"
+                    );
+                    assert!(
+                        upd_rect.left() >= -1.0,
+                        "Update button underflowed left viewport on {vp_name}: {upd_rect:?}"
+                    );
+                    for b_rect in &all_badges {
+                        assert!(
+                            !upd_rect.intersects(*b_rect),
+                            "Update button collided with badge on {vp_name}: update={upd_rect:?}, badge={b_rect:?}"
+                        );
+                    }
+                    for f_rect in &file_label_nodes {
+                        assert!(
+                            !upd_rect.intersects(*f_rect),
+                            "Update button collided with file label on {vp_name}: update={upd_rect:?}, file={f_rect:?}"
+                        );
+                    }
+                    for del_rect in &delete_nodes {
+                        assert!(
+                            !upd_rect.intersects(*del_rect),
+                            "Update button collided with delete button on {vp_name}: update={upd_rect:?}, delete={del_rect:?}"
+                        );
+                    }
+                }
+
+                for f_rect in &file_label_nodes {
+                    assert!(
+                        f_rect.right() <= width + 1.0,
+                        "File label overflowed right viewport on {vp_name}: {f_rect:?}"
+                    );
+                    assert!(
+                        f_rect.left() >= -1.0,
+                        "File label underflowed left viewport on {vp_name}: {f_rect:?}"
+                    );
+                }
+
+                for b_rect in &all_badges {
+                    assert!(
+                        b_rect.right() <= width + 1.0,
+                        "Badge overflowed right viewport on {vp_name}: {b_rect:?}"
+                    );
+                    assert!(
+                        b_rect.left() >= -1.0,
+                        "Badge underflowed left viewport on {vp_name}: {b_rect:?}"
+                    );
+                }
+
+                drop(harness);
+            }
+        });
+    }
+}
+
+#[test]
+fn mod_list_virtualization_renders_only_visible_slice_with_300_items() {
+    let _lock = VISUAL_RENDER_LOCK.lock().unwrap();
+    with_isolated_app(Language::Vi, |app| {
+        use crate::state::ActiveSection;
+        use thk_core::models::{GameProfile, LoaderType};
+        use thk_mods::LocalContentItem;
+
+        app.settings.setup_completed = true;
+        let prof = GameProfile {
+            id: "profile-virt-300".into(),
+            name: "Virtualization Stress 300".into(),
+            game_version: "1.20.4".into(),
+            loader: LoaderType::Fabric,
+            loader_version: Some("0.15.7".into()),
+            instance_path: "instances/virt-300".into(),
+            is_custom_path: false,
+            ram_mb: 4096,
+            java_path: None,
+            jvm_args: String::new(),
+            auto_perf_mods: false,
+            icon_url: None,
+            window_width: Some(1920),
+            window_height: Some(1080),
+            fullscreen: false,
+            total_play_seconds: 5000,
+            session_count: 10,
+            crash_count: 0,
+            last_played_at: None,
+            created_at: 0,
+        };
+        app.home.profiles = vec![prof.clone()];
+        app.select_profile(prof.id);
+
+        app.home.local_items = (0..300)
+            .map(|i| LocalContentItem {
+                file_name: format!("mod_virtual_entry_{i:03}.jar"),
+                base_file_name: format!("mod_virtual_entry_{i:03}.jar"),
+                enabled: i % 2 == 0,
+                size_bytes: 1_000_000 + (i as u64 * 10_000),
+                title: format!("Virtualized Test Mod {i:03}"),
+                version_number: format!("1.{i}.0"),
+                provider: if i % 2 == 0 {
+                    ProviderSource::CurseForge
+                } else {
+                    ProviderSource::Modrinth
+                },
+                project_id: Some(format!("proj-{i}")),
+                icon_url: None,
+            })
+            .collect();
+
+        assert_eq!(app.home.local_items.len(), 300);
+
+        app.section = ActiveSection::Home;
+        app.home.active_tab = HomeTab::Mods;
+
+        let delete_lbl = app.i18n.tr("Xóa", "Delete").to_owned();
+
+        let harness = harness_scaled(540.0, 700.0, 1.0, ThemeMode::Dark, |ui| {
+            crate::views::render_root_ui(app, ui, None);
+        });
+        let rendered_delete_buttons: Vec<_> = harness.query_all_by_label(&delete_lbl).collect();
+        assert!(
+            rendered_delete_buttons.len() <= 15,
+            "Virtualization failed: expected at most 15 rendered cards in 700pt viewport, found {}",
+            rendered_delete_buttons.len()
+        );
+        assert!(
+            rendered_delete_buttons.len() >= 2,
+            "Expected at least 2 rendered cards in 700pt viewport, found {}",
+            rendered_delete_buttons.len()
+        );
+        drop(harness);
+
+        let harness_desktop = harness_scaled(1000.0, 1200.0, 1.0, ThemeMode::Dark, |ui| {
+            crate::views::render_root_ui(app, ui, None);
+        });
+        let rendered_desktop: Vec<_> = harness_desktop.query_all_by_label(&delete_lbl).collect();
+        assert!(
+            rendered_desktop.len() <= 20,
+            "Virtualization failed on desktop 1200pt viewport: found {} cards",
+            rendered_desktop.len()
+        );
+        assert!(
+            rendered_desktop.len() >= 6,
+            "Expected at least 6 rendered cards on desktop 1200pt viewport, found {}",
+            rendered_desktop.len()
+        );
+        drop(harness_desktop);
+
+        let harness_narrow = harness_scaled(360.0, 800.0, 1.0, ThemeMode::Dark, |ui| {
+            crate::views::render_root_ui(app, ui, None);
+        });
+        let rendered_narrow: Vec<_> = harness_narrow.query_all_by_label(&delete_lbl).collect();
+        assert!(
+            rendered_narrow.len() <= 15,
+            "Virtualization failed on mobile narrow viewport: found {} cards",
+            rendered_narrow.len()
+        );
+        assert!(
+            rendered_narrow.len() >= 2,
+            "Expected at least 2 rendered cards on mobile viewport, found {}",
+            rendered_narrow.len()
+        );
+        drop(harness_narrow);
+
+        app.home.local_filter = "042".into();
+        let harness_filter = harness_scaled(540.0, 700.0, 1.0, ThemeMode::Dark, |ui| {
+            crate::views::render_root_ui(app, ui, None);
+        });
+        let filtered_delete: Vec<_> = harness_filter.query_all_by_label(&delete_lbl).collect();
+        assert_eq!(
+            filtered_delete.len(),
+            1,
+            "Expected exactly 1 card rendered for filter '042', found {}",
+            filtered_delete.len()
+        );
+        drop(harness_filter);
+    });
+}
+
+#[test]
+fn mod_list_virtualization_scales_to_1000_mods() {
+    let _lock = VISUAL_RENDER_LOCK.lock().unwrap();
+    with_isolated_app(Language::Vi, |app| {
+        use crate::state::ActiveSection;
+        use std::time::Instant;
+        use thk_core::models::{GameProfile, LoaderType};
+        use thk_mods::LocalContentItem;
+
+        app.settings.setup_completed = true;
+        let prof = GameProfile {
+            id: "profile-stress-extreme".into(),
+            name: "Mod Scale Test Profile".into(),
+            game_version: "1.20.4".into(),
+            loader: LoaderType::Fabric,
+            loader_version: Some("0.15.7".into()),
+            instance_path: "instances/stress-extreme".into(),
+            is_custom_path: false,
+            ram_mb: 4096,
+            java_path: None,
+            jvm_args: String::new(),
+            auto_perf_mods: false,
+            icon_url: None,
+            window_width: Some(1920),
+            window_height: Some(1080),
+            fullscreen: false,
+            total_play_seconds: 5000,
+            session_count: 10,
+            crash_count: 0,
+            last_played_at: None,
+            created_at: 0,
+        };
+        app.home.profiles = vec![prof.clone()];
+        app.select_profile(prof.id);
+        app.section = ActiveSection::Home;
+        app.home.active_tab = HomeTab::Mods;
+
+        let delete_lbl = app.i18n.tr("Xóa", "Delete").to_owned();
+
+        let generate_mods = |count: usize| -> Vec<LocalContentItem> {
+            (0..count)
+                .map(|i| LocalContentItem {
+                    file_name: format!("mod_virtual_extreme_{i:04}.jar"),
+                    base_file_name: format!("mod_virtual_extreme_{i:04}.jar"),
+                    enabled: i % 2 == 0,
+                    size_bytes: 1_000_000 + (i as u64 * 15_000),
+                    title: format!("Stress Mod #{i:04} Optimization Engine"),
+                    version_number: format!("3.{i}.0"),
+                    provider: if i % 2 == 0 {
+                        ProviderSource::CurseForge
+                    } else {
+                        ProviderSource::Modrinth
+                    },
+                    project_id: Some(format!("proj-extreme-{i}")),
+                    icon_url: None,
+                })
+                .collect()
+        };
+
+        for count in [100, 300, 500, 1000] {
+            app.home.local_items = generate_mods(count);
+            assert_eq!(app.home.local_items.len(), count);
+
+            {
+                let harness = harness_scaled(540.0, 700.0, 1.0, ThemeMode::Dark, |ui| {
+                    crate::views::render_root_ui(app, ui, None);
+                });
+                let rendered: Vec<_> = harness.query_all_by_label(&delete_lbl).collect();
+                assert!(
+                    rendered.len() <= 20,
+                    "Virtualization failed for {} mods on Desktop: expected <= 20, found {}",
+                    count,
+                    rendered.len()
+                );
+                assert!(
+                    rendered.len() >= 2,
+                    "Expected at least 2 cards rendered for {} mods on Desktop, found {}",
+                    count,
+                    rendered.len()
+                );
+            }
+
+            {
+                let harness = harness_scaled(360.0, 800.0, 1.0, ThemeMode::Dark, |ui| {
+                    crate::views::render_root_ui(app, ui, None);
+                });
+                let rendered: Vec<_> = harness.query_all_by_label(&delete_lbl).collect();
+                assert!(
+                    rendered.len() <= 20,
+                    "Virtualization failed for {} mods on Mobile: expected <= 20, found {}",
+                    count,
+                    rendered.len()
+                );
+                assert!(
+                    rendered.len() >= 2,
+                    "Expected at least 2 cards rendered for {} mods on Mobile, found {}",
+                    count,
+                    rendered.len()
+                );
+            }
+
+            {
+                let harness = harness_scaled(1000.0, 1200.0, 1.0, ThemeMode::Dark, |ui| {
+                    crate::views::render_root_ui(app, ui, None);
+                });
+                let rendered: Vec<_> = harness.query_all_by_label(&delete_lbl).collect();
+                assert!(
+                    rendered.len() <= 25,
+                    "Virtualization failed for {} mods on 1200pt: expected <= 25, found {}",
+                    count,
+                    rendered.len()
+                );
+                assert!(
+                    rendered.len() >= 5,
+                    "Expected at least 5 cards rendered for {} mods on 1200pt, found {}",
+                    count,
+                    rendered.len()
+                );
+            }
+        }
+
+        {
+            app.home.local_items = generate_mods(1000);
+            assert_eq!(app.home.local_items.len(), 1000);
+
+            let viewport_w = 540.0;
+            let viewport_h = 700.0;
+            let center = pos2(viewport_w / 2.0, viewport_h / 2.0);
+
+            let mut harness = harness_scaled(viewport_w, viewport_h, 1.0, ThemeMode::Dark, |ui| {
+                crate::views::render_root_ui(app, ui, None);
+            });
+            harness.input_mut().time = None;
+
+            let top_cards: Vec<_> = harness.query_all_by_label(&delete_lbl).collect();
+            assert!(top_cards.len() <= 20);
+            assert!(harness
+                .query_by_label("Stress Mod #0000 Optimization Engine")
+                .is_some());
+            assert!(harness
+                .query_by_label("Stress Mod #0500 Optimization Engine")
+                .is_none());
+            assert!(harness
+                .query_by_label("Stress Mod #0999 Optimization Engine")
+                .is_none());
+
+            for _ in 0..10 {
+                harness.input_mut().events.extend([
+                    egui::Event::PointerMoved(center),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: vec2(0.0, -3600.0),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                harness.run_steps(4);
+            }
+
+            let mid_cards: Vec<_> = harness.query_all_by_label(&delete_lbl).collect();
+            assert!(
+                mid_cards.len() <= 20,
+                "Middle scroll cards exceeded 20: found {}",
+                mid_cards.len()
+            );
+            assert!(
+                mid_cards.len() >= 2,
+                "Middle scroll cards too few: found {}",
+                mid_cards.len()
+            );
+            assert!(
+                harness
+                    .query_by_label("Stress Mod #0000 Optimization Engine")
+                    .is_none(),
+                "Mod #0000 should have scrolled off-screen"
+            );
+
+            for _ in 0..15 {
+                harness.input_mut().events.extend([
+                    egui::Event::PointerMoved(center),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: vec2(0.0, -5000.0),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                harness.run_steps(4);
+            }
+
+            let bot_cards: Vec<_> = harness.query_all_by_label(&delete_lbl).collect();
+            assert!(
+                bot_cards.len() <= 20,
+                "Bottom scroll cards exceeded 20: found {}",
+                bot_cards.len()
+            );
+            assert!(
+                bot_cards.len() >= 2,
+                "Bottom scroll cards too few: found {}",
+                bot_cards.len()
+            );
+            assert!(
+                harness
+                    .query_by_label("Stress Mod #0999 Optimization Engine")
+                    .is_some(),
+                "Last mod #0999 must be rendered when scrolled to bottom"
+            );
+            assert!(harness
+                .query_by_label("Stress Mod #0000 Optimization Engine")
+                .is_none());
+
+            for _ in 0..15 {
+                harness.input_mut().events.extend([
+                    egui::Event::PointerMoved(center),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: vec2(0.0, 10000.0),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                harness.run_steps(4);
+            }
+
+            let returned_top_cards: Vec<_> = harness.query_all_by_label(&delete_lbl).collect();
+            assert!(returned_top_cards.len() <= 20);
+            assert!(harness
+                .query_by_label("Stress Mod #0000 Optimization Engine")
+                .is_some());
+            assert!(harness
+                .query_by_label("Stress Mod #0999 Optimization Engine")
+                .is_none());
+
+            drop(harness);
+        }
+
+        {
+            app.home.local_items = generate_mods(1000);
+            assert_eq!(app.home.local_items.len(), 1000);
+
+            use std::sync::{Arc, Mutex};
+            let durations = Arc::new(Mutex::new(Vec::with_capacity(30)));
+            let dur_clone = durations.clone();
+
+            let mut frame_count = 0usize;
+            let mut harness = harness_scaled(540.0, 700.0, 1.0, ThemeMode::Dark, move |ui| {
+                frame_count += 1;
+                let t0 = Instant::now();
+                crate::views::render_root_ui(app, ui, None);
+                let elapsed = t0.elapsed();
+                if frame_count > 3 {
+                    dur_clone.lock().unwrap().push(elapsed);
+                }
+            });
+
+            harness.run_steps(20);
+            drop(harness);
+
+            let recorded = durations.lock().unwrap().clone();
+            assert!(!recorded.is_empty(), "No frame samples recorded");
+            let total_dur: std::time::Duration = recorded.iter().copied().sum();
+            let avg_dur = total_dur / recorded.len() as u32;
+            assert!(
+                avg_dur < std::time::Duration::from_millis(100),
+                "Average virtualized frame render time exceeded 100ms guard: {avg_dur:?}"
+            );
+        }
+    });
+}
+
+#[test]
+fn mods_tab_refresh_skips_disk_world_scans() {
+    let _lock = VISUAL_RENDER_LOCK.lock().unwrap();
+    with_isolated_app(Language::Vi, |app| {
+        use crate::state::ActiveSection;
+        use thk_core::models::{GameProfile, LoaderType};
+
+        app.settings.setup_completed = true;
+        let prof_id = "prof-tab-bench";
+        let inst_dir = app.paths.root.join("instances/tab-bench");
+        std::fs::create_dir_all(&inst_dir).unwrap();
+
+        let prof = GameProfile {
+            id: prof_id.into(),
+            name: "Tab Switch Bench".into(),
+            game_version: "1.20.4".into(),
+            loader: LoaderType::Fabric,
+            loader_version: Some("0.15.7".into()),
+            instance_path: inst_dir.clone(),
+            is_custom_path: false,
+            ram_mb: 4096,
+            java_path: None,
+            jvm_args: String::new(),
+            auto_perf_mods: false,
+            icon_url: None,
+            window_width: Some(1920),
+            window_height: Some(1080),
+            fullscreen: false,
+            total_play_seconds: 1000,
+            session_count: 5,
+            crash_count: 0,
+            last_played_at: None,
+            created_at: 0,
+        };
+        app.db.upsert_profile(&prof).unwrap();
+        app.home.profiles = vec![prof.clone()];
+        app.select_profile(prof.id.clone());
+
+        let saves_dir = inst_dir.join("saves");
+        for w_idx in 0..5 {
+            let world_dir = saves_dir.join(format!("World_Heavy_{w_idx}"));
+            let region_dir = world_dir.join("region");
+            let entities_dir = world_dir.join("entities");
+            std::fs::create_dir_all(&region_dir).unwrap();
+            std::fs::create_dir_all(&entities_dir).unwrap();
+            std::fs::write(world_dir.join("level.dat"), b"DUMMY_NBT_WORLD_DATA").unwrap();
+            std::fs::write(world_dir.join("icon.png"), b"DUMMY_PNG").unwrap();
+            for r_idx in 0..30 {
+                std::fs::write(
+                    region_dir.join(format!("r.0.{r_idx}.mca")),
+                    vec![0xAA; 8192],
+                )
+                .unwrap();
+            }
+            for e_idx in 0..20 {
+                std::fs::write(
+                    entities_dir.join(format!("r.0.{e_idx}.mca")),
+                    vec![0xBB; 4096],
+                )
+                .unwrap();
+            }
+        }
+
+        let mods_dir = inst_dir.join("mods");
+        std::fs::create_dir_all(&mods_dir).unwrap();
+        for m_idx in 0..50 {
+            let mod_name = format!("bench_mod_{m_idx:02}.jar");
+            std::fs::write(mods_dir.join(&mod_name), vec![0x50, 0x4B, 0x03, 0x04]).unwrap();
+            let rec = thk_core::models::InstalledContentRecord {
+                profile_id: prof_id.into(),
+                content_kind: ContentKind::Mod,
+                file_name: mod_name.clone(),
+                sha1: "da39a3ee5e6b4b0d3255bfef95601890afd80709".into(),
+                provider: ProviderSource::CurseForge,
+                project_id: format!("proj-{m_idx}"),
+                version_id: format!("ver-{m_idx}"),
+                title: format!("Bench Mod {m_idx:02}"),
+                version_number: format!("1.{m_idx}.0"),
+                icon_url: None,
+                enabled: true,
+                installed_at: 0,
+            };
+            let _ = app.db.upsert_installed_content(&rec);
+        }
+
+        app.section = ActiveSection::Home;
+
+        app.home.active_tab = HomeTab::Worlds;
+        app.refresh_selected_profile_tabs();
+        assert_eq!(
+            app.home.worlds.len(),
+            5,
+            "Worlds tab must load the 5 worlds"
+        );
+
+        app.home.worlds.clear();
+        app.home.active_tab = HomeTab::Mods;
+
+        let mut total_duration = std::time::Duration::ZERO;
+        let iterations = 20;
+
+        for _ in 0..iterations {
+            app.home.worlds.clear();
+            let t0 = std::time::Instant::now();
+            app.refresh_selected_profile_tabs();
+            total_duration += t0.elapsed();
+            assert_eq!(
+                app.home.worlds.len(),
+                0,
+                "Mods tab must not trigger disk world scanning"
+            );
+            assert_eq!(
+                app.home.local_items.len(),
+                50,
+                "Mods tab must load the 50 mod items"
+            );
+        }
+
+        let avg_duration = total_duration / iterations;
+        assert!(
+            avg_duration < std::time::Duration::from_millis(100),
+            "Average tab refresh duration {avg_duration:?} exceeded 100ms guard"
+        );
+    });
+}
+
+#[test]
+fn mod_list_rapid_toggles_and_deletion_consistency() {
+    let _lock = VISUAL_RENDER_LOCK.lock().unwrap();
+    with_isolated_app(Language::Vi, |app| {
+        use crate::state::ActiveSection;
+        use thk_core::models::{GameProfile, LoaderType};
+
+        app.settings.setup_completed = true;
+        let prof_id = "prof-toggle-stress";
+        let inst_dir = app.paths.root.join("instances/toggle-stress");
+        let mods_dir = inst_dir.join("mods");
+        std::fs::create_dir_all(&mods_dir).unwrap();
+
+        let prof = GameProfile {
+            id: prof_id.into(),
+            name: "Toggle Stress".into(),
+            game_version: "1.20.4".into(),
+            loader: LoaderType::Fabric,
+            loader_version: Some("0.15.7".into()),
+            instance_path: inst_dir.clone(),
+            is_custom_path: false,
+            ram_mb: 4096,
+            java_path: None,
+            jvm_args: String::new(),
+            auto_perf_mods: false,
+            icon_url: None,
+            window_width: Some(1920),
+            window_height: Some(1080),
+            fullscreen: false,
+            total_play_seconds: 100,
+            session_count: 1,
+            crash_count: 0,
+            last_played_at: None,
+            created_at: 0,
+        };
+        app.db.upsert_profile(&prof).unwrap();
+        app.home.profiles = vec![prof.clone()];
+        app.select_profile(prof.id.clone());
+
+        for name in &["mod_alpha.jar", "mod_beta.jar", "mod_gamma.jar"] {
+            std::fs::write(mods_dir.join(name), b"PK\x03\x04testmodcontent").unwrap();
+            let rec = thk_core::models::InstalledContentRecord {
+                profile_id: prof_id.into(),
+                content_kind: ContentKind::Mod,
+                file_name: name.to_string(),
+                sha1: "da39a3ee5e6b4b0d3255bfef95601890afd80709".into(),
+                provider: ProviderSource::CurseForge,
+                project_id: "proj-1".into(),
+                version_id: "ver-1".into(),
+                title: name.to_string(),
+                version_number: "1.0.0".into(),
+                icon_url: None,
+                enabled: true,
+                installed_at: 0,
+            };
+            let _ = app.db.upsert_installed_content(&rec);
+        }
+
+        app.section = ActiveSection::Home;
+        app.home.active_tab = HomeTab::Mods;
+        app.refresh_selected_profile_tabs();
+        assert_eq!(app.home.local_items.len(), 3);
+
+        for step in 1..=50 {
+            let target_enabled = step % 2 == 0;
+            let current_name = {
+                let item = app
+                    .home
+                    .local_items
+                    .iter()
+                    .find(|i| i.base_file_name == "mod_alpha.jar")
+                    .expect("mod_alpha must exist in local_items");
+                item.file_name.clone()
+            };
+
+            app.toggle_local_item(ContentKind::Mod, &current_name, target_enabled);
+
+            let item = app
+                .home
+                .local_items
+                .iter()
+                .find(|i| i.base_file_name == "mod_alpha.jar")
+                .unwrap();
+            assert_eq!(
+                item.enabled, target_enabled,
+                "Step {step}: In-memory enabled state mismatch!"
+            );
+            let expected_file_name = if target_enabled {
+                "mod_alpha.jar"
+            } else {
+                "mod_alpha.jar.disabled"
+            };
+            assert_eq!(
+                item.file_name, expected_file_name,
+                "Step {step}: In-memory file_name mismatch!"
+            );
+
+            let normal_path = mods_dir.join("mod_alpha.jar");
+            let disabled_path = mods_dir.join("mod_alpha.jar.disabled");
+            if target_enabled {
+                assert!(
+                    normal_path.is_file(),
+                    "Step {step}: normal jar must exist on disk"
+                );
+                assert!(
+                    !disabled_path.exists(),
+                    "Step {step}: disabled jar must not exist"
+                );
+            } else {
+                assert!(
+                    !normal_path.exists(),
+                    "Step {step}: normal jar must not exist on disk"
+                );
+                assert!(
+                    disabled_path.is_file(),
+                    "Step {step}: disabled jar must exist"
+                );
+            }
+
+            let db_record = app
+                .db
+                .list_installed_content(prof_id, ContentKind::Mod)
+                .unwrap()
+                .into_iter()
+                .find(|r| r.file_name == "mod_alpha.jar")
+                .expect("DB record must exist");
+            assert_eq!(
+                db_record.enabled, target_enabled,
+                "Step {step}: Database enabled column mismatch!"
+            );
+        }
+
+        let harness = harness_scaled(360.0, 700.0, 1.0, ThemeMode::Dark, |ui| {
+            crate::views::render_root_ui(app, ui, None);
+        });
+        let enabled_labels: Vec<_> = harness.query_all_by_label("Đã bật").collect();
+        assert!(
+            !enabled_labels.is_empty(),
+            "UI must render 'Đã bật' for enabled mod_alpha"
+        );
+        drop(harness);
+
+        for i in 0..50 {
+            let name = format!("virt_del_{i:02}.jar");
+            std::fs::write(mods_dir.join(&name), b"PK\x03\x04").unwrap();
+            let rec = thk_core::models::InstalledContentRecord {
+                profile_id: prof_id.into(),
+                content_kind: ContentKind::Mod,
+                file_name: name.clone(),
+                sha1: "da39a3ee5e6b4b0d3255bfef95601890afd80709".into(),
+                provider: ProviderSource::Modrinth,
+                project_id: format!("proj-del-{i}"),
+                version_id: format!("ver-del-{i}"),
+                title: name.clone(),
+                version_number: "1.0.0".into(),
+                icon_url: None,
+                enabled: true,
+                installed_at: 0,
+            };
+            let _ = app.db.upsert_installed_content(&rec);
+        }
+        app.refresh_selected_profile_tabs();
+        let total_before = app.home.local_items.len();
+        assert_eq!(total_before, 53);
+
+        let del_target_top = app.home.local_items[0].file_name.clone();
+        app.delete_local_item(ContentKind::Mod, &del_target_top);
+        assert_eq!(app.home.local_items.len(), total_before - 1);
+        assert!(!mods_dir.join(&del_target_top).exists());
+
+        let mid_idx = app.home.local_items.len() / 2;
+        let del_target_mid = app.home.local_items[mid_idx].file_name.clone();
+        app.delete_local_item(ContentKind::Mod, &del_target_mid);
+        assert_eq!(app.home.local_items.len(), total_before - 2);
+        assert!(!mods_dir.join(&del_target_mid).exists());
+
+        let last_idx = app.home.local_items.len() - 1;
+        let del_target_bottom = app.home.local_items[last_idx].file_name.clone();
+        app.delete_local_item(ContentKind::Mod, &del_target_bottom);
+        assert_eq!(app.home.local_items.len(), total_before - 3);
+        assert!(!mods_dir.join(&del_target_bottom).exists());
+
+        let harness_after_del = harness_scaled(540.0, 700.0, 1.0, ThemeMode::Dark, |ui| {
+            crate::views::render_root_ui(app, ui, None);
+        });
+        drop(harness_after_del);
+    });
+}
+
+#[test]
+fn mod_list_virtualized_filtering_unicode_literal_and_empty_queries() {
+    let _lock = VISUAL_RENDER_LOCK.lock().unwrap();
+    with_isolated_app(Language::Vi, |app| {
+        use crate::state::ActiveSection;
+        use thk_core::models::{GameProfile, LoaderType};
+        use thk_mods::LocalContentItem;
+
+        app.settings.setup_completed = true;
+        let prof = GameProfile {
+            id: "prof-filter-stress".into(),
+            name: "Filter Stress".into(),
+            game_version: "1.20.4".into(),
+            loader: LoaderType::Fabric,
+            loader_version: Some("0.15.7".into()),
+            instance_path: "instances/filter-stress".into(),
+            is_custom_path: false,
+            ram_mb: 4096,
+            java_path: None,
+            jvm_args: String::new(),
+            auto_perf_mods: false,
+            icon_url: None,
+            window_width: Some(1920),
+            window_height: Some(1080),
+            fullscreen: false,
+            total_play_seconds: 100,
+            session_count: 1,
+            crash_count: 0,
+            last_played_at: None,
+            created_at: 0,
+        };
+        app.home.profiles = vec![prof.clone()];
+        app.select_profile(prof.id);
+        app.section = ActiveSection::Home;
+        app.home.active_tab = HomeTab::Mods;
+
+        let mut items = vec![
+            LocalContentItem {
+                file_name: "TiengViet_Full_1.20.4.jar".into(),
+                base_file_name: "TiengViet_Full_1.20.4.jar".into(),
+                enabled: true,
+                size_bytes: 500_000,
+                title: "Bản dịch Tiếng Việt Hoàn Chỉnh".into(),
+                version_number: "1.2.0".into(),
+                provider: ProviderSource::Modrinth,
+                project_id: Some("proj-vn".into()),
+                icon_url: None,
+            },
+            LocalContentItem {
+                file_name: "Toi_Uu_FPS_Cao.jar".into(),
+                base_file_name: "Toi_Uu_FPS_Cao.jar".into(),
+                enabled: true,
+                size_bytes: 1_200_000,
+                title: "Tối ưu hóa FPS Đỉnh Cao".into(),
+                version_number: "2.0.0".into(),
+                provider: ProviderSource::CurseForge,
+                project_id: Some("proj-opti".into()),
+                icon_url: None,
+            },
+            LocalContentItem {
+                file_name: "Hoa_Am_Shader.jar".into(),
+                base_file_name: "Hoa_Am_Shader.jar".into(),
+                enabled: false,
+                size_bytes: 2_000_000,
+                title: "Hòa âm ánh sáng Shaders".into(),
+                version_number: "1.0.0".into(),
+                provider: ProviderSource::Modrinth,
+                project_id: Some("proj-shader".into()),
+                icon_url: None,
+            },
+            LocalContentItem {
+                file_name: "regex_all_.*.jar".into(),
+                base_file_name: "regex_all_.*.jar".into(),
+                enabled: true,
+                size_bytes: 800_000,
+                title: "Wildcard .* Everywhere".into(),
+                version_number: "0.1.0".into(),
+                provider: ProviderSource::CurseForge,
+                project_id: Some("proj-wildcard".into()),
+                icon_url: None,
+            },
+            LocalContentItem {
+                file_name: "regex_[test]+.jar".into(),
+                base_file_name: "regex_[test]+.jar".into(),
+                enabled: true,
+                size_bytes: 850_000,
+                title: "Regex Bracket [test]+ Matcher".into(),
+                version_number: "0.2.0".into(),
+                provider: ProviderSource::Modrinth,
+                project_id: Some("proj-brackets".into()),
+                icon_url: None,
+            },
+            LocalContentItem {
+                file_name: "regex_(a|b).jar".into(),
+                base_file_name: "regex_(a|b).jar".into(),
+                enabled: false,
+                size_bytes: 900_000,
+                title: "Regex Group (a|b)".into(),
+                version_number: "0.3.0".into(),
+                provider: ProviderSource::CurseForge,
+                project_id: Some("proj-group".into()),
+                icon_url: None,
+            },
+            LocalContentItem {
+                file_name: "regex_^start$end.jar".into(),
+                base_file_name: "regex_^start$end.jar".into(),
+                enabled: true,
+                size_bytes: 950_000,
+                title: "Anchor ^start$end Mod".into(),
+                version_number: "0.4.0".into(),
+                provider: ProviderSource::Modrinth,
+                project_id: Some("proj-anchor".into()),
+                icon_url: None,
+            },
+            LocalContentItem {
+                file_name: "regex_{1,3}_quant.jar".into(),
+                base_file_name: "regex_{1,3}_quant.jar".into(),
+                enabled: true,
+                size_bytes: 700_000,
+                title: "Quantifier {1,3} Mod".into(),
+                version_number: "0.5.0".into(),
+                provider: ProviderSource::CurseForge,
+                project_id: Some("proj-quant".into()),
+                icon_url: None,
+            },
+            LocalContentItem {
+                file_name: "regex_slash_\\\\.jar".into(),
+                base_file_name: "regex_slash_\\\\.jar".into(),
+                enabled: false,
+                size_bytes: 650_000,
+                title: "Backslash \\ Mod".into(),
+                version_number: "0.6.0".into(),
+                provider: ProviderSource::Modrinth,
+                project_id: Some("proj-slash".into()),
+                icon_url: None,
+            },
+        ];
+
+        for i in 10..51 {
+            items.push(LocalContentItem {
+                file_name: format!("mod_standard_{i:03}.jar"),
+                base_file_name: format!("mod_standard_{i:03}.jar"),
+                enabled: i % 2 == 0,
+                size_bytes: 1_000_000 + (i as u64 * 5_000),
+                title: format!("Standard Utility Mod {i:03}"),
+                version_number: format!("1.{i}.0"),
+                provider: ProviderSource::CurseForge,
+                project_id: Some(format!("proj-std-{i}")),
+                icon_url: None,
+            });
+        }
+
+        assert_eq!(items.len(), 50);
+        app.home.local_items = items;
+
+        let delete_lbl = app.i18n.tr("Xóa", "Delete").to_owned();
+
+        for empty_q in ["", "   ", "\t\t", "  \n  "] {
+            app.home.local_filter = empty_q.into();
+            let harness = harness_scaled(540.0, 700.0, 1.0, ThemeMode::Dark, |ui| {
+                crate::views::render_root_ui(app, ui, None);
+            });
+            let rendered: Vec<_> = harness.query_all_by_label(&delete_lbl).collect();
+            assert!(
+                rendered.len() >= 2 && rendered.len() <= 15,
+                "Query '{empty_q}': expected virtualized slice (2..15), found {}",
+                rendered.len()
+            );
+            drop(harness);
+        }
+
+        let regex_queries = [
+            (".*", 1),
+            ("[test]+", 1),
+            ("(a|b)", 1),
+            ("^start$end", 1),
+            ("{1,3}", 1),
+            ("\\", 1),
+            ("(?i)", 0),
+            ("([a-z]+)", 0),
+            ("+", 1),
+        ];
+        for (q, expected_matches) in regex_queries {
+            app.home.local_filter = q.into();
+            let harness = harness_scaled(540.0, 700.0, 1.0, ThemeMode::Dark, |ui| {
+                crate::views::render_root_ui(app, ui, None);
+            });
+            let rendered: Vec<_> = harness.query_all_by_label(&delete_lbl).collect();
+            assert_eq!(
+                rendered.len(),
+                expected_matches,
+                "Literal query '{q}' expected {expected_matches} rendered cards, found {}",
+                rendered.len()
+            );
+            drop(harness);
+        }
+
+        let vn_queries = [
+            ("Tiếng Việt", 1),
+            ("tiếng việt", 1),
+            ("TIẾNG VIỆT", 1),
+            ("Tối ưu", 1),
+            ("tối ưu", 1),
+            ("đỉnh cao", 1),
+            ("ĐỈNH CAO", 1),
+            ("Hòa âm", 1),
+            ("hòa âm", 1),
+            ("KhôngTồnTại", 0),
+        ];
+        for (q, expected_matches) in vn_queries {
+            app.home.local_filter = q.into();
+            let harness = harness_scaled(540.0, 700.0, 1.0, ThemeMode::Dark, |ui| {
+                crate::views::render_root_ui(app, ui, None);
+            });
+            let rendered: Vec<_> = harness.query_all_by_label(&delete_lbl).collect();
+            assert_eq!(
+                rendered.len(),
+                expected_matches,
+                "Vietnamese query '{q}' expected {expected_matches} rendered cards, found {}",
+                rendered.len()
+            );
+            drop(harness);
+        }
+
+        app.home.local_filter = "".into();
+        let harness_before = harness_scaled(540.0, 700.0, 1.0, ThemeMode::Dark, |ui| {
+            crate::views::render_root_ui(app, ui, None);
+        });
+        drop(harness_before);
+
+        app.home.local_filter = "Wildcard .* Everywhere".into();
+        let harness_after = harness_scaled(540.0, 700.0, 1.0, ThemeMode::Dark, |ui| {
+            crate::views::render_root_ui(app, ui, None);
+        });
+        let rendered_after: Vec<_> = harness_after.query_all_by_label(&delete_lbl).collect();
+        assert_eq!(
+            rendered_after.len(),
+            1,
+            "Filter transition must cleanly render 1 matching item"
+        );
+        drop(harness_after);
     });
 }

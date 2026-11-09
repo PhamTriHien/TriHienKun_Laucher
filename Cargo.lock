@@ -6026,7 +6026,7 @@ dependencies = [
 
 [[package]]
 name = "thk-app"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "eframe",
@@ -6067,7 +6067,7 @@ dependencies = [
 
 [[package]]
 name = "thk-auth"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -6096,7 +6096,7 @@ dependencies = [
 
 [[package]]
 name = "thk-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "dirs",
@@ -6123,7 +6123,7 @@ dependencies = [
 
 [[package]]
 name = "thk-java"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -6138,7 +6138,7 @@ dependencies = [
 
 [[package]]
 name = "thk-launcher"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "futures-util",
@@ -6162,7 +6162,7 @@ dependencies = [
 
 [[package]]
 name = "thk-mods"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "futures-util",
@@ -6186,7 +6186,7 @@ dependencies = [
 
 [[package]]
 name = "thk-network"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "bore-cli",
  "discord-rich-presence",
@@ -6206,7 +6206,7 @@ dependencies = [
 
 [[package]]
 name = "thk-renderer3d"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "bytemuck",
  "egui",
@@ -6223,7 +6223,7 @@ dependencies = [
 
 [[package]]
 name = "thk-server"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "keyring",

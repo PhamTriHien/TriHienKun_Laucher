@@ -22,25 +22,28 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 #[cfg(target_os = "android")]
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
-fn select_offscreen_sample_count(adapter: &wgpu::Adapter) -> u32 {
-    #[cfg(not(target_os = "android"))]
+// wgpu-hal GLES mixes GL_EXT_multisampled_render_to_texture color with core
+// glRenderbufferStorageMultisample depth, producing GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE_EXT.
+fn sample_count_for_backend(backend: wgpu::Backend, flags: wgpu::TextureFormatFeatureFlags) -> u32 {
+    if backend == wgpu::Backend::Gl {
+        return 1;
+    }
+    if flags.sample_count_supported(MSAA_SAMPLES)
+        && flags.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE)
     {
-        let _ = adapter;
         MSAA_SAMPLES
+    } else {
+        1
     }
-    #[cfg(target_os = "android")]
-    {
-        let color_flags = adapter.get_texture_format_features(COLOR_FORMAT).flags;
-        let depth_flags = adapter.get_texture_format_features(DEPTH_FORMAT).flags;
-        if color_flags.sample_count_supported(MSAA_SAMPLES)
-            && color_flags.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE)
-            && depth_flags.sample_count_supported(MSAA_SAMPLES)
-        {
-            MSAA_SAMPLES
-        } else {
-            1
-        }
+}
+
+fn select_offscreen_sample_count(adapter: &wgpu::Adapter) -> u32 {
+    let color_flags = adapter.get_texture_format_features(COLOR_FORMAT).flags;
+    let depth_flags = adapter.get_texture_format_features(DEPTH_FORMAT).flags;
+    if !depth_flags.sample_count_supported(MSAA_SAMPLES) {
+        return 1;
     }
+    sample_count_for_backend(adapter.get_info().backend, color_flags)
 }
 const MAX_VERTICES: usize = 2048;
 const MAX_INDICES: usize = 3072;
@@ -1134,4 +1137,45 @@ pub(crate) fn look_at_rh(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
         Vec4::new(s.z, u.z, -f.z, 0.0),
         Vec4::new(-s.dot(eye), -u.dot(eye), f.dot(eye), 1.0),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gl_backend_forces_single_sample_even_when_msaa_flags_present() {
+        let full = wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4
+            | wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE;
+        assert_eq!(sample_count_for_backend(wgpu::Backend::Gl, full), 1);
+        assert_eq!(
+            sample_count_for_backend(wgpu::Backend::Gl, wgpu::TextureFormatFeatureFlags::all()),
+            1
+        );
+        assert_eq!(
+            sample_count_for_backend(wgpu::Backend::Gl, wgpu::TextureFormatFeatureFlags::empty()),
+            1
+        );
+    }
+
+    #[test]
+    fn modern_backends_select_msaa_x4_only_when_x4_and_resolve_supported() {
+        let full = wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4
+            | wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE;
+        let only_x4 = wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4;
+        let only_resolve = wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE;
+        let empty = wgpu::TextureFormatFeatureFlags::empty();
+
+        for backend in [
+            wgpu::Backend::Vulkan,
+            wgpu::Backend::Dx12,
+            wgpu::Backend::Metal,
+            wgpu::Backend::BrowserWebGpu,
+        ] {
+            assert_eq!(sample_count_for_backend(backend, full), MSAA_SAMPLES);
+            assert_eq!(sample_count_for_backend(backend, only_x4), 1);
+            assert_eq!(sample_count_for_backend(backend, only_resolve), 1);
+            assert_eq!(sample_count_for_backend(backend, empty), 1);
+        }
+    }
 }

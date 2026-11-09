@@ -115,10 +115,7 @@ fn paint_addon_thumbnail(
 
 pub fn render_servers_view(app: &mut LauncherAppState, ui: &mut egui::Ui) {
     let compact = crate::views::is_compact_portrait(ui.max_rect());
-    if compact {
-        render_compact_server_bar(app, ui);
-        ui.add_space(6.0);
-    } else {
+    if !compact {
         let avail_w = ui.available_width();
         let min_side_w = 176.0_f32.min((avail_w * 0.38).max(140.0));
         let max_side_w = (avail_w - 260.0).min(avail_w * 0.55).max(min_side_w);
@@ -250,20 +247,22 @@ pub fn render_servers_view(app: &mut LauncherAppState, ui: &mut egui::Ui) {
             });
     }
 
-    let Some(srv) = app.selected_server().cloned() else {
-        let empty_w = ui.available_width();
-        let top_pad = if ui.available_height() < 460.0 {
-            16.0
-        } else {
-            56.0
-        };
-        ScrollArea::vertical()
-            .id_salt("servers_empty_state_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_max_width(empty_w);
+    let viewport_h = ui.available_height();
+    let scroll_w = ui.available_width();
+    ScrollArea::vertical()
+        .id_salt("servers_workspace_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_max_width(scroll_w);
+            if compact {
+                render_compact_server_bar(app, ui);
+                ui.add_space(6.0);
+            }
+
+            let Some(srv) = app.selected_server().cloned() else {
+                let top_pad = if viewport_h < 460.0 { 16.0 } else { 56.0 };
                 ui.vertical_centered(|ui| {
-                    ui.set_max_width(empty_w);
+                    ui.set_max_width(scroll_w);
                     ui.add_space(top_pad);
                     paint_icon_3d(ui, 76.0, Icon3dKind::ServerBladeTower, true);
                     ui.add_space(10.0);
@@ -275,13 +274,6 @@ pub fn render_servers_view(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                         .size(21.0)
                         .strong(),
                     );
-                    ui.label(
-                        RichText::new(app.i18n.tr(
-                            "Hỗ trợ 10 lõi: Paper, Purpur, Folia, Vanilla, Fabric, Forge, NeoForge, Arclight, Mohist, SpongeVanilla.",
-                            "Supports 10 engines: Paper, Purpur, Folia, Vanilla, Fabric, Forge, NeoForge, Arclight, Mohist, SpongeVanilla.",
-                        ))
-                        .weak(),
-                    );
                     ui.add_space(14.0);
                     if primary_icon_button(ui, VectorIcon::Plus, app.i18n.t("server.create"))
                         .clicked()
@@ -291,32 +283,15 @@ pub fn render_servers_view(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                         app.show_new_server_modal = true;
                     }
                 });
-            });
-        return;
-    };
+                return;
+            };
 
-    let unified_scroll =
-        (compact && app.servers.active_tab != ServerTab::Console) || ui.available_height() < 540.0;
-    if unified_scroll {
-        let scroll_w = ui.available_width();
-        ScrollArea::vertical()
-            .id_salt("servers_compact_portrait_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_max_width(scroll_w);
-                render_server_header(app, ui, &srv);
-                ui.add_space(8.0);
-                render_server_tabs_bar(app, ui);
-                ui.add_space(8.0);
-                render_active_server_tab(app, ui, &srv, true);
-            });
-    } else {
-        render_server_header(app, ui, &srv);
-        ui.add_space(8.0);
-        render_server_tabs_bar(app, ui);
-        ui.add_space(8.0);
-        render_active_server_tab(app, ui, &srv, false);
-    }
+            render_server_header(app, ui, &srv);
+            ui.add_space(8.0);
+            render_server_tabs_bar(app, ui);
+            ui.add_space(8.0);
+            render_active_server_tab(app, ui, &srv, true, viewport_h);
+        });
 }
 
 fn render_compact_server_bar(app: &mut LauncherAppState, ui: &mut egui::Ui) {
@@ -410,9 +385,10 @@ fn render_active_server_tab(
     ui: &mut egui::Ui,
     srv: &ManagedServer,
     unified_scroll: bool,
+    viewport_h: f32,
 ) {
     match app.servers.active_tab {
-        ServerTab::Console => render_tab_console(app, ui, srv, unified_scroll),
+        ServerTab::Console => render_tab_console(app, ui, srv, unified_scroll, viewport_h, true),
         ServerTab::Files => render_tab_files(app, ui, srv, unified_scroll),
         ServerTab::PluginsMods => render_tab_plugins_mods(app, ui, srv, unified_scroll),
         ServerTab::Properties => render_tab_properties(app, ui, srv, unified_scroll),
@@ -912,13 +888,9 @@ fn render_server_tabs_bar(app: &mut LauncherAppState, ui: &mut egui::Ui) {
 
 #[cfg(not(target_os = "android"))]
 pub(super) fn render_detached_server_console_panel(app: &mut LauncherAppState, ui: &mut egui::Ui) {
-    render_compact_server_bar(app, ui);
-    ui.add_space(8.0);
-    if let Some(srv) = app.selected_server().cloned() {
-        render_server_header(app, ui, &srv);
+    let Some(srv) = app.selected_server().cloned() else {
+        render_compact_server_bar(app, ui);
         ui.add_space(8.0);
-        render_tab_console(app, ui, &srv, false);
-    } else {
         ui.label(
             RichText::new(app.i18n.tr(
                 "Chưa có máy chủ cục bộ nào để hiển thị bảng điều khiển.",
@@ -926,6 +898,62 @@ pub(super) fn render_detached_server_console_panel(app: &mut LauncherAppState, u
             ))
             .weak(),
         );
+        return;
+    };
+
+    let footer_id = ui.scope_id().with("thk_detached_srv_cmd_footer");
+    egui::Panel::bottom(footer_id)
+        .resizable(false)
+        .frame(Frame::NONE.inner_margin(Margin {
+            left: 0,
+            right: 0,
+            top: 6,
+            bottom: 0,
+        }))
+        .show(ui, |ui| {
+            render_server_command_controls(app, ui, &srv.id);
+        });
+
+    render_compact_server_bar(app, ui);
+    ui.add_space(8.0);
+    render_server_header(app, ui, &srv);
+    ui.add_space(8.0);
+    let viewport_h = ui.available_height();
+    render_tab_console(app, ui, &srv, false, viewport_h, false);
+}
+
+fn render_server_command_controls(app: &mut LauncherAppState, ui: &mut egui::Ui, srv_id: &str) {
+    let input_id = if ui.ctx().viewport_id() == egui::ViewportId::ROOT {
+        egui::Id::unique("server_console_cmd_input")
+    } else {
+        ui.make_persistent_id("server_console_cmd_input")
+    };
+    let is_focused = ui.memory(|m| m.has_focus(input_id));
+
+    if is_focused {
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
+            let trimmed = app.servers.console_input.trim_start_matches('/');
+            if let Some(matched) = MC_SERVER_AUTOCOMPLETE_CMDS
+                .iter()
+                .find(|cand| cand.starts_with(trimmed) && **cand != trimmed)
+            {
+                app.servers.console_input = (*matched).to_string();
+            }
+        }
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
+            app.navigate_server_cmd_history(true);
+        }
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
+            app.navigate_server_cmd_history(false);
+        }
+    }
+
+    let (send, clear) = server_command_ui(ui, &mut app.servers.console_input, &app.i18n);
+    if send {
+        app.send_selected_server_command();
+    }
+    if clear {
+        app.servers.server_logs.remove(srv_id);
     }
 }
 
@@ -934,6 +962,8 @@ fn render_tab_console(
     ui: &mut egui::Ui,
     srv: &ManagedServer,
     unified_scroll: bool,
+    viewport_h: f32,
+    inline_command_bar: bool,
 ) {
     let lines = app
         .servers
@@ -976,19 +1006,21 @@ fn render_tab_console(
         TEXT_INK_LIGHT
     };
 
-    let console_h = if unified_scroll {
-        170.0
-    } else {
-        (ui.available_height() - 96.0).max(120.0)
-    };
     Frame::group(ui.style())
         .fill(console_bg)
         .stroke(console_stroke)
         .inner_margin(Margin::same(10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            let console_h = if unified_scroll {
+                (viewport_h - 110.0).clamp(200.0, 620.0)
+            } else if inline_command_bar {
+                (ui.available_height() - 56.0).max(96.0)
+            } else {
+                ui.available_height().max(72.0)
+            };
             let console_scroll_w = ui.available_width();
-            let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+            let row_h = ui.text_style_height(&egui::TextStyle::Monospace).max(14.0);
             ScrollArea::vertical()
                 .id_salt("server_console_scroll")
                 .max_height(console_h)
@@ -1030,40 +1062,9 @@ fn render_tab_console(
                 });
         });
 
-    ui.add_space(6.0);
-    {
-        let input_id = if ui.ctx().viewport_id() == egui::ViewportId::ROOT {
-            egui::Id::unique("server_console_cmd_input")
-        } else {
-            ui.make_persistent_id("server_console_cmd_input")
-        };
-        let is_focused = ui.memory(|m| m.has_focus(input_id));
-
-        if is_focused {
-            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
-                let trimmed = app.servers.console_input.trim_start_matches('/');
-                if let Some(matched) = MC_SERVER_AUTOCOMPLETE_CMDS
-                    .iter()
-                    .find(|cand| cand.starts_with(trimmed) && **cand != trimmed)
-                {
-                    app.servers.console_input = (*matched).to_string();
-                }
-            }
-            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
-                app.navigate_server_cmd_history(true);
-            }
-            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
-                app.navigate_server_cmd_history(false);
-            }
-        }
-
-        let (send, clear) = server_command_ui(ui, &mut app.servers.console_input, &app.i18n);
-        if send {
-            app.send_selected_server_command();
-        }
-        if clear {
-            app.servers.server_logs.remove(&srv.id);
-        }
+    if inline_command_bar {
+        ui.add_space(6.0);
+        render_server_command_controls(app, ui, &srv.id);
     }
 }
 
@@ -1505,13 +1506,44 @@ fn render_tab_plugins_mods(
             });
 
             ui.add_space(6.0);
-            let filter_low = app.servers.addon_filter.trim().to_ascii_lowercase();
-            let installed = app.servers.installed_addons.clone();
+            let filter_raw = app.servers.addon_filter.trim();
+            let has_filter = !filter_raw.is_empty();
+            let filter_low = if has_filter {
+                filter_raw.to_lowercase()
+            } else {
+                String::new()
+            };
+            let filtered_indices: Vec<usize> = if has_filter {
+                app.servers
+                    .installed_addons
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, addon)| {
+                        if addon.title.to_lowercase().contains(&filter_low)
+                            || addon.file_name.to_lowercase().contains(&filter_low)
+                        {
+                            Some(idx)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let total_items = if has_filter {
+                filtered_indices.len()
+            } else {
+                app.servers.installed_addons.len()
+            };
+
+            let mut toggle_req: Option<(String, String, bool)> = None;
+            let mut delete_req: Option<(String, String)> = None;
 
             let inst_scroll_w = ui.available_width();
             let mut render_installed_list = |ui: &mut egui::Ui| {
                 ui.set_max_width(inst_scroll_w);
-                if installed.is_empty() {
+                if app.servers.installed_addons.is_empty() {
                     ui.label(
                         RichText::new(app.i18n.tr(
                             "Chưa có tệp .jar nào trong thư mục plugins/ hoặc mods/.",
@@ -1521,37 +1553,61 @@ fn render_tab_plugins_mods(
                     );
                     return;
                 }
-                for addon in &installed {
-                    if !filter_low.is_empty()
-                        && !addon.title.to_ascii_lowercase().contains(&filter_low)
-                        && !addon.file_name.to_ascii_lowercase().contains(&filter_low)
-                    {
-                        continue;
-                    }
+                if total_items == 0 {
+                    ui.label(
+                        RichText::new(
+                            app.i18n
+                                .tr("Không tìm thấy tệp phù hợp.", "No matching files found."),
+                        )
+                        .weak(),
+                    );
+                    return;
+                }
+
+                let row_w = ui.available_width();
+                let is_narrow = row_w < 500.0;
+                let row_h =
+                    (if is_narrow { 88.0 } else { 58.0 }) * app.settings.font_scale.max(1.0);
+                let clip = ui.clip_rect();
+                let list_top = ui.cursor().top();
+
+                let (start_idx, end_idx) = if clip.is_finite() && clip.height() > 0.0 {
+                    let rel_top = (clip.min.y - list_top).max(0.0);
+                    let rel_bottom = (clip.max.y - list_top).max(0.0);
+                    let first_visible = (rel_top / row_h).floor() as usize;
+                    let last_visible = ((rel_bottom / row_h).ceil() as usize).min(total_items);
+                    let start = first_visible.saturating_sub(2).min(total_items);
+                    let end = (last_visible + 2).min(total_items);
+                    (start, end.max(start))
+                } else {
+                    (0, total_items)
+                };
+
+                if start_idx > 0 {
+                    ui.add_space(start_idx as f32 * row_h);
+                }
+
+                for idx in start_idx..end_idx {
+                    let item_idx = filtered_indices.get(idx).copied().unwrap_or(idx);
+                    let addon = &app.servers.installed_addons[item_idx];
                     let folder_col = if addon.folder == "plugins" {
                         ACCENT_VIOLET
                     } else {
                         ACCENT_CYAN
                     };
-                    let row_w = ui.available_width();
-                    ui.horizontal_wrapped(|ui| {
-                        let mut enabled = addon.enabled;
-                        if ui.checkbox(&mut enabled, "").changed() {
-                            app.toggle_server_installed_addon(
-                                &addon.folder,
-                                &addon.file_name,
-                                enabled,
-                            );
-                        }
-                        badge(ui, &format!("{}/", addon.folder), folder_col);
-                        bounded_wrap_label(
-                            ui,
-                            RichText::new(&addon.title).strong(),
-                            (row_w - 36.0).max(48.0),
-                        );
-                        if !addon.version_number.is_empty() {
-                            badge(ui, &addon.version_number, ACCENT_BLUE);
-                        }
+                    if is_narrow {
+                        ui.horizontal_wrapped(|ui| {
+                            let mut enabled = addon.enabled;
+                            if ui.checkbox(&mut enabled, "").changed() {
+                                toggle_req =
+                                    Some((addon.folder.clone(), addon.file_name.clone(), enabled));
+                            }
+                            badge(ui, &format!("{}/", addon.folder), folder_col);
+                            ui.label(RichText::new(&addon.title).strong());
+                            if !addon.version_number.is_empty() {
+                                badge(ui, &addon.version_number, ACCENT_BLUE);
+                            }
+                        });
                         bounded_wrap_label(
                             ui,
                             RichText::new(format!(
@@ -1561,14 +1617,88 @@ fn render_tab_plugins_mods(
                             ))
                             .size(11.2)
                             .weak(),
-                            (row_w - 28.0).max(48.0),
+                            row_w,
                         );
-                        if danger_icon_button(ui, VectorIcon::Trash, app.i18n.tr("Xóa", "Delete"))
-                            .clicked()
-                        {
-                            app.delete_server_installed_addon(&addon.folder, &addon.file_name);
-                        }
-                    });
+                        ui.horizontal(|ui| {
+                            let status_lbl = if addon.enabled {
+                                RichText::new(app.i18n.tr("Đã bật", "Enabled"))
+                                    .size(11.2)
+                                    .color(ACCENT_EMERALD)
+                            } else {
+                                RichText::new(app.i18n.tr("Đã tắt", "Disabled"))
+                                    .size(11.2)
+                                    .color(Color32::GRAY)
+                            };
+                            ui.label(status_lbl);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if danger_icon_button(
+                                        ui,
+                                        VectorIcon::Trash,
+                                        app.i18n.tr("Xóa", "Delete"),
+                                    )
+                                    .clicked()
+                                    {
+                                        delete_req =
+                                            Some((addon.folder.clone(), addon.file_name.clone()));
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(6.0);
+                    } else {
+                        let action_w = 88.0;
+                        let content_max_w = (row_w - action_w - 12.0).max(100.0);
+                        ui.horizontal(|ui| {
+                            let mut enabled = addon.enabled;
+                            if ui.checkbox(&mut enabled, "").changed() {
+                                toggle_req =
+                                    Some((addon.folder.clone(), addon.file_name.clone(), enabled));
+                            }
+                            badge(ui, &format!("{}/", addon.folder), folder_col);
+                            ui.vertical(|ui| {
+                                ui.set_max_width(content_max_w);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new(&addon.title).strong());
+                                    if !addon.version_number.is_empty() {
+                                        badge(ui, &addon.version_number, ACCENT_BLUE);
+                                    }
+                                });
+                                bounded_wrap_label(
+                                    ui,
+                                    RichText::new(format!(
+                                        "{} ({})",
+                                        addon.file_name,
+                                        format_bytes(addon.size_bytes)
+                                    ))
+                                    .size(11.2)
+                                    .weak(),
+                                    content_max_w,
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if danger_icon_button(
+                                        ui,
+                                        VectorIcon::Trash,
+                                        app.i18n.tr("Xóa", "Delete"),
+                                    )
+                                    .clicked()
+                                    {
+                                        delete_req =
+                                            Some((addon.folder.clone(), addon.file_name.clone()));
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(4.0);
+                    }
+                }
+
+                if end_idx < total_items {
+                    ui.add_space((total_items - end_idx) as f32 * row_h);
                 }
             };
             if unified_scroll {
@@ -1578,6 +1708,12 @@ fn render_tab_plugins_mods(
                     .id_salt("srv_installed_addons_scroll")
                     .max_height(168.0)
                     .show(ui, |ui| render_installed_list(ui));
+            }
+            if let Some((folder, file_name, enabled)) = toggle_req {
+                app.toggle_server_installed_addon(&folder, &file_name, enabled);
+            }
+            if let Some((folder, file_name)) = delete_req {
+                app.delete_server_installed_addon(&folder, &file_name);
             }
         },
     );
@@ -2920,14 +3056,6 @@ fn render_player_rules_card(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                 .size(16.0)
                 .strong(),
             );
-            ui.label(
-                RichText::new(app.i18n.tr(
-                    "Thiết lập chế độ chơi mặc định, giới hạn người tham gia, quyền hạn và luật bảo vệ trên máy chủ.",
-                    "Configure default gamemode, player slots, permissions, and protection rules for this server.",
-                ))
-                .size(12.0)
-                .weak(),
-            );
             ui.add_space(8.0);
 
             let current_gm = app
@@ -4236,14 +4364,6 @@ fn render_tab_network(
                     .size(16.0)
                     .strong(),
                 );
-                ui.label(
-                        RichText::new(app.i18n.tr(
-                            "Dùng khi cả hai bên không có IPv6 trực tiếp, không mở được cổng Modem và không dùng mạng VPN chung.",
-                            "Use when neither Direct Online IPv6, router port mapping, nor a shared VPN is available.",
-                        ))
-                        .size(12.0)
-                        .weak(),
-                    );
                 ui.add_space(8.0);
                 paint_3d_tunnel_conduit(ui, is_running, is_connecting, &local_addr, &remote_lbl);
                 ui.add_space(8.0);
@@ -4390,14 +4510,6 @@ fn render_tab_network(
                     .size(16.0)
                     .strong(),
                 );
-                ui.label(
-                        RichText::new(app.i18n.tr(
-                            "Đẩy trực tiếp dữ liệu máy chủ & Modpack (mods, plugins, config, lõi chạy) lên Hosting từ xa.",
-                            "Upload server & Modpack files (mods, plugins, configs, server runtime) directly to remote hosting.",
-                        ))
-                        .size(12.0)
-                        .weak(),
-                    );
                 ui.add_space(8.0);
 
                 ui.add_enabled_ui(!ftp_busy, |ui| {

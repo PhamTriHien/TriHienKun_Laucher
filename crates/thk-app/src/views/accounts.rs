@@ -85,14 +85,6 @@ fn render_account_preview(
                 .strong(),
         );
     });
-    ui.label(
-        RichText::new(app.i18n.tr(
-            "Kéo xoay 360° • Cuộn thu phóng • Kéo-thả tệp .png vào khung để áp Skin",
-            "Drag 360° • Scroll to zoom • Drag & drop a .png file onto viewport to apply Skin",
-        ))
-        .size(11.3)
-        .weak(),
-    );
     ui.add_space(6.0);
 
     let hovered_png = ui.ctx().input(|i| {
@@ -326,14 +318,6 @@ fn render_account_list(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                     .strong()
                     .color(ACCENT_EMERALD),
             );
-            ui.label(
-                RichText::new(app.i18n.tr(
-                    "Đăng nhập tài khoản bản quyền và tự động đồng bộ Skin, Cape.",
-                    "Sign in with your Microsoft account and automatically sync Skin & Cape.",
-                ))
-                .size(12.0)
-                .weak(),
-            );
             ui.add_space(8.0);
 
             ui.horizontal_wrapped(|ui| {
@@ -496,14 +480,6 @@ fn render_account_list(app: &mut LauncherAppState, ui: &mut egui::Ui) {
                     .strong()
                     .color(ACCENT_AMBER),
             );
-            ui.label(
-                RichText::new(app.i18n.tr(
-                    "Tạo tài khoản chơi ngoại tuyến, hỗ trợ áp Skin, Cape và Elytra vào game.",
-                    "Create an offline account with in-game custom Skin, Cape, and Elytra support.",
-                ))
-                .size(12.0)
-                .weak(),
-            );
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 let resp = ui.add(
@@ -616,7 +592,7 @@ pub(super) fn saved_account_card_ui(
                             ),
                             AccountType::Offline => badge(
                                 ui,
-                                i18n.tr("Offline + Yggdrasil Skin", "Offline + Yggdrasil Skin"),
+                                i18n.tr("Offline + Skin", "Offline + Skin"),
                                 ACCENT_AMBER,
                             ),
                         }

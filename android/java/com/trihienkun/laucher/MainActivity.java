@@ -14,10 +14,14 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.database.Cursor;
+import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Insets;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
-import android.graphics.Region;
+import android.graphics.RectF;
 import android.net.ConnectivityManager;
 import android.net.LinkAddress;
 import android.net.LinkProperties;
@@ -34,9 +38,13 @@ import android.os.PowerManager;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.system.Os;
+import android.util.DisplayMetrics;
 import android.view.DisplayCutout;
+import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.RoundedCorner;
 import android.view.Surface;
+import android.view.SurfaceControl;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
@@ -79,7 +87,9 @@ public final class MainActivity extends NativeActivity {
     private Thread bridgeThread;
     private String activePickId;
     private WifiManager.MulticastLock multicastLock;
+    private PowerManager.WakeLock screenWakeLock;
 
+    private FrameLayout gameSurfaceHost;
     private SurfaceView gameSurfaceView;
     private Surface activeSurface;
     private boolean surfaceReady = false;
@@ -93,8 +103,11 @@ public final class MainActivity extends NativeActivity {
     private Messenger gameServiceMessenger;
     private boolean gameServiceBound = false;
     private boolean gameProcessRunning = false;
+    private boolean gameSessionActive = false;
+    private boolean gameViewFront = false;
     private String pendingSpecPath;
     private String pendingSessionId;
+    private InAppSwitchIconView inAppToggleOrb;
 
     private final ServiceConnection gameServiceConn = new ServiceConnection() {
         @Override
@@ -103,6 +116,8 @@ public final class MainActivity extends NativeActivity {
             String specToStart;
             String sessionToStart;
             Surface surf;
+            int surfW;
+            int surfH;
             synchronized (gameLock) {
                 gameServiceMessenger = m;
                 gameProcessRunning = true;
@@ -111,11 +126,23 @@ public final class MainActivity extends NativeActivity {
                 pendingSpecPath = null;
                 pendingSessionId = null;
                 surf = activeSurface;
+                surfW = surfacePhysWidth;
+                surfH = surfacePhysHeight;
+            }
+            if ((surf == null || !surf.isValid()) && gameSurfaceView != null) {
+                Surface holderSurf = gameSurfaceView.getHolder().getSurface();
+                if (holderSurf != null && holderSurf.isValid()) {
+                    surf = holderSurf;
+                }
+                if (surfW <= 0 || surfH <= 0) {
+                    surfW = gameSurfaceView.getWidth();
+                    surfH = gameSurfaceView.getHeight();
+                }
             }
             if (specToStart != null && !specToStart.isEmpty()) {
-                sendStartJvmMessage(m, specToStart, sessionToStart, surf);
+                sendStartJvmMessage(m, specToStart, sessionToStart, surf, surfW, surfH);
             } else if (surf != null && surf.isValid()) {
-                sendSurfaceUpdateMessage(m, surf);
+                sendSurfaceUpdateMessage(m, surf, surfW, surfH);
             }
             writePermissionsSnapshot(bridgeDir());
         }
@@ -126,6 +153,12 @@ public final class MainActivity extends NativeActivity {
                 gameServiceMessenger = null;
                 gameProcessRunning = false;
             }
+            runOnUiThread(() -> {
+                gameServiceBound = false;
+                gameSessionActive = false;
+                setGameSurfaceFront(false);
+                removeInAppGameToggleOrb();
+            });
             writePermissionsSnapshot(bridgeDir());
         }
     };
@@ -135,10 +168,17 @@ public final class MainActivity extends NativeActivity {
         exportHardwareEnvironment();
         exportBridgeEnvironment();
         acquireMulticastLock();
+        acquireScreenWakeLock();
         writeNetworkSnapshot(bridgeDir());
         configureDisplayCutout();
-        super.onCreate(savedInstanceState);
         getWindow().setFormat(PixelFormat.TRANSLUCENT);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true);
+            setTurnScreenOn(true);
+        }
+        super.onCreate(savedInstanceState);
+        promoteOverLockScreen();
         applyImmersiveFullscreen();
         installWindowInsetsObserver();
         attachGameSurfaceView();
@@ -150,13 +190,59 @@ public final class MainActivity extends NativeActivity {
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        applyFocusIntentIfPresent(intent);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void promoteOverLockScreen() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(true);
+                setTurnScreenOn(true);
+            }
+            getWindow().addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                    | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                    | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            );
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
+        promoteOverLockScreen();
+        acquireScreenWakeLock();
         appInForeground = true;
         notifyKeepAliveForegroundState(true);
+        applyFocusIntentIfPresent(getIntent());
         applyImmersiveFullscreen();
         refreshSafeInsetsFromWindow(null, false);
+        attachGameSurfaceView();
+        if (gameSessionActive) {
+            ensureInAppGameToggleOrb();
+        }
         writePermissionsSnapshot(bridgeDir());
+    }
+
+    private void applyFocusIntentIfPresent(Intent intent) {
+        if (intent == null || !intent.hasExtra("thk_focus_mode")) {
+            return;
+        }
+        String mode = intent.getStringExtra("thk_focus_mode");
+        intent.removeExtra("thk_focus_mode");
+        if (mode == null || !gameSessionActive) {
+            return;
+        }
+        if ("hub".equalsIgnoreCase(mode)) {
+            setGameSurfaceFront(false);
+        } else if ("game".equalsIgnoreCase(mode)) {
+            setGameSurfaceFront(true);
+        }
     }
 
     @Override
@@ -191,19 +277,31 @@ public final class MainActivity extends NativeActivity {
         unpack.start();
     }
 
+    @SuppressWarnings("deprecation")
     private void attachGameSurfaceView() {
-        SurfaceView sv = new SurfaceView(this) {
-            @Override
-            public boolean gatherTransparentRegion(Region region) {
-                if (region != null) {
-                    region.setEmpty();
-                }
-                return true;
-            }
-        };
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        if (gameSurfaceHost != null && gameSurfaceView != null) {
+            syncGameSurfaceVisibility();
+            return;
+        }
+        WindowManager wm = getWindowManager();
+        if (wm == null) {
+            return;
+        }
+
+        FrameLayout host = new FrameLayout(this);
+        host.setBackgroundColor(Color.TRANSPARENT);
+        host.setFocusable(false);
+        host.setClickable(false);
+
+        SurfaceView sv = new SurfaceView(this);
         sv.setFocusable(false);
         sv.setFocusableInTouchMode(false);
         sv.setClickable(false);
+        sv.setZOrderMediaOverlay(true);
+        sv.setVisibility(View.VISIBLE);
         SurfaceHolder holder = sv.getHolder();
         holder.setFormat(PixelFormat.RGBA_8888);
         holder.addCallback(new SurfaceHolder.Callback() {
@@ -223,8 +321,9 @@ public final class MainActivity extends NativeActivity {
                     }
                     target = gameServiceMessenger;
                 }
+                applySurfaceControlVisibility(sv, gameSessionActive && gameViewFront);
                 if (target != null && s != null && s.isValid()) {
-                    sendSurfaceUpdateMessage(target, s);
+                    sendSurfaceUpdateMessage(target, s, w, ht);
                 }
                 refreshSafeInsetsFromWindow(null, false);
                 writePermissionsSnapshot(bridgeDir());
@@ -245,8 +344,9 @@ public final class MainActivity extends NativeActivity {
                     }
                     target = gameServiceMessenger;
                 }
+                applySurfaceControlVisibility(sv, gameSessionActive && gameViewFront);
                 if (target != null && s != null && s.isValid()) {
-                    sendSurfaceUpdateMessage(target, s);
+                    sendSurfaceUpdateMessage(target, s, physW, physH);
                 }
                 refreshSafeInsetsFromWindow(null, false);
                 writePermissionsSnapshot(bridgeDir());
@@ -261,27 +361,98 @@ public final class MainActivity extends NativeActivity {
                 writePermissionsSnapshot(bridgeDir());
             }
         });
-        addContentView(
+
+        host.addView(
             sv,
             new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
         );
-        gameSurfaceView = sv;
+
+        int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+            | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+            | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED;
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION,
+            flags,
+            PixelFormat.TRANSLUCENT
+        );
+        lp.gravity = Gravity.TOP | Gravity.START;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            lp.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        }
+        lp.alpha = 1.0f;
+
+        try {
+            wm.addView(host, lp);
+            gameSurfaceHost = host;
+            gameSurfaceView = sv;
+        } catch (Throwable ignored) {
+            gameSurfaceHost = null;
+            gameSurfaceView = null;
+        }
+    }
+
+    private void removeGameSurfaceWindow() {
+        if (gameSurfaceHost != null) {
+            try {
+                WindowManager wm = getWindowManager();
+                if (wm != null) {
+                    wm.removeViewImmediate(gameSurfaceHost);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        gameSurfaceHost = null;
+        gameSurfaceView = null;
+    }
+
+    private static void applySurfaceControlVisibility(SurfaceView sv, boolean visible) {
+        if (sv == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return;
+        }
+        try {
+            SurfaceControl sc = sv.getSurfaceControl();
+            if (sc != null && sc.isValid()) {
+                new SurfaceControl.Transaction()
+                    .setAlpha(sc, visible ? 1.0f : 0.0f)
+                    .setVisibility(sc, visible)
+                    .apply();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void syncGameSurfaceVisibility() {
+        boolean show = gameSessionActive && gameViewFront;
+        applySurfaceControlVisibility(gameSurfaceView, show);
     }
 
     private static void sendStartJvmMessage(
         Messenger target,
         String specPath,
         String sessionId,
-        Surface surface
+        Surface surface,
+        int width,
+        int height
     ) {
         try {
             Message msg = Message.obtain(null, GameJvmService.MSG_START_JVM);
             Bundle b = new Bundle();
             b.putString("spec_path", specPath);
             b.putString("session_id", sessionId != null ? sessionId : "");
+            if (width > 0 && height > 0) {
+                b.putInt("width", width);
+                b.putInt("height", height);
+            }
             if (surface != null && surface.isValid()) {
                 b.putParcelable("surface", surface);
             }
@@ -291,10 +462,19 @@ public final class MainActivity extends NativeActivity {
         }
     }
 
-    private static void sendSurfaceUpdateMessage(Messenger target, Surface surface) {
+    private static void sendSurfaceUpdateMessage(
+        Messenger target,
+        Surface surface,
+        int width,
+        int height
+    ) {
         try {
             Message msg = Message.obtain(null, GameJvmService.MSG_UPDATE_SURFACE);
             Bundle b = new Bundle();
+            if (width > 0 && height > 0) {
+                b.putInt("width", width);
+                b.putInt("height", height);
+            }
             if (surface != null && surface.isValid()) {
                 b.putParcelable("surface", surface);
             }
@@ -362,6 +542,33 @@ public final class MainActivity extends NativeActivity {
         try {
             if (multicastLock != null && multicastLock.isHeld()) {
                 multicastLock.release();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void acquireScreenWakeLock() {
+        try {
+            PowerManager pm = (PowerManager) getApplicationContext().getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                if (screenWakeLock == null) {
+                    screenWakeLock = pm.newWakeLock(
+                        PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE,
+                        "thk:screen-wake"
+                    );
+                    screenWakeLock.setReferenceCounted(false);
+                }
+                screenWakeLock.acquire(15 * 60 * 1000L);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void releaseScreenWakeLock() {
+        try {
+            if (screenWakeLock != null && screenWakeLock.isHeld()) {
+                screenWakeLock.release();
             }
         } catch (Throwable ignored) {
         }
@@ -491,6 +698,10 @@ public final class MainActivity extends NativeActivity {
         if (hasFocus) {
             applyImmersiveFullscreen();
             refreshSafeInsetsFromWindow(null, false);
+            attachGameSurfaceView();
+            if (gameSessionActive) {
+                ensureInAppGameToggleOrb();
+            }
             writePermissionsSnapshot(bridgeDir());
         }
     }
@@ -514,7 +725,9 @@ public final class MainActivity extends NativeActivity {
             bridgeThread.interrupt();
         }
         stopMobileGameSession();
+        removeGameSurfaceWindow();
         releaseMulticastLock();
+        releaseScreenWakeLock();
         super.onDestroy();
     }
 
@@ -764,9 +977,37 @@ public final class MainActivity extends NativeActivity {
             if (gameServiceBound) {
                 stopMobileGameSession();
             }
-            if (gameSurfaceView != null && winW >= 320 && winH >= 240) {
-                gameSurfaceView.getHolder().setFixedSize(winW, winH);
+            String savedOrient = loadSavedOrientationMode();
+            if (winW > 0 && winH > 0 && winW > winH) {
+                if ("landscape".equalsIgnoreCase(savedOrient)
+                    || "reverse_landscape".equalsIgnoreCase(savedOrient)
+                    || "sensor_landscape".equalsIgnoreCase(savedOrient)) {
+                    applyOrientationMode(savedOrient);
+                } else {
+                    applyOrientationMode("sensor_landscape");
+                }
+            } else if (winW > 0 && winH > 0 && winH > winW) {
+                if ("portrait".equalsIgnoreCase(savedOrient)) {
+                    applyOrientationMode("portrait");
+                } else {
+                    applyOrientationMode(savedOrient);
+                }
+            } else if (!"portrait".equalsIgnoreCase(savedOrient)) {
+                if ("landscape".equalsIgnoreCase(savedOrient)
+                    || "reverse_landscape".equalsIgnoreCase(savedOrient)
+                    || "sensor_landscape".equalsIgnoreCase(savedOrient)) {
+                    applyOrientationMode(savedOrient);
+                } else {
+                    applyOrientationMode("sensor_landscape");
+                }
             }
+            promoteOverLockScreen();
+            acquireScreenWakeLock();
+            applyImmersiveFullscreen();
+            gameSessionActive = true;
+            attachGameSurfaceView();
+            setGameSurfaceFront(true);
+            ensureInAppGameToggleOrb();
             synchronized (gameLock) {
                 pendingSessionId = sessionId;
                 pendingSpecPath = specPath;
@@ -784,6 +1025,9 @@ public final class MainActivity extends NativeActivity {
     }
 
     private void stopMobileGameSession() {
+        gameSessionActive = false;
+        setGameSurfaceFront(false);
+        removeInAppGameToggleOrb();
         Messenger target;
         synchronized (gameLock) {
             target = gameServiceMessenger;
@@ -809,13 +1053,211 @@ public final class MainActivity extends NativeActivity {
             stopService(new Intent(this, GameJvmService.class));
         } catch (Throwable ignored) {
         }
-        if (gameSurfaceView != null) {
+        if (!isFinishing() && !isDestroyed()) {
+            applyOrientationMode(loadSavedOrientationMode());
+            applyImmersiveFullscreen();
+        }
+        writePermissionsSnapshot(bridgeDir());
+    }
+
+    private void setGameSurfaceFront(boolean front) {
+        gameViewFront = front;
+        syncGameSurfaceVisibility();
+        if (inAppToggleOrb != null) {
+            inAppToggleOrb.setShowingGame(front);
+        }
+    }
+
+    private void writeFocusMode(String mode) {
+        try {
+            File dir = bridgeDir();
+            File tmp = new File(dir, "focus_mode.tmp");
+            File dst = new File(dir, "focus_mode.txt");
+            try (FileOutputStream out = new FileOutputStream(tmp)) {
+                out.write(mode.getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            }
+            if (dst.exists()) {
+                dst.delete();
+            }
+            tmp.renameTo(dst);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void ensureInAppGameToggleOrb() {
+        if (!gameSessionActive || isFinishing() || isDestroyed()) {
+            return;
+        }
+        if (inAppToggleOrb != null) {
+            inAppToggleOrb.setShowingGame(gameViewFront);
+            return;
+        }
+        WindowManager wm = getWindowManager();
+        if (wm == null) {
+            return;
+        }
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        float density = dm.density > 0f ? dm.density : 2.5f;
+        int orbSize = Math.max(1, Math.round(42f * density));
+
+        InAppSwitchIconView orb = new InAppSwitchIconView(this, density);
+        orb.setShowingGame(gameViewFront);
+
+        @SuppressWarnings("deprecation")
+        int orbFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+            | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+            | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON;
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+            orbSize,
+            orbSize,
+            WindowManager.LayoutParams.TYPE_APPLICATION,
+            orbFlags,
+            PixelFormat.TRANSLUCENT
+        );
+        lp.gravity = Gravity.TOP | Gravity.START;
+        boolean isLandscape = dm.widthPixels > dm.heightPixels;
+        int rightMargin = safeInsetRightPx + Math.round(12f * density);
+        int topOffset = Math.round((isLandscape ? 10f : 58f) * density);
+        lp.x = Math.max(Math.round(12f * density), dm.widthPixels - orbSize - rightMargin);
+        lp.y = Math.max(Math.round(12f * density), safeInsetTopPx + topOffset);
+
+        orb.setOnTouchListener(new View.OnTouchListener() {
+            private int startX;
+            private int startY;
+            private float downRawX;
+            private float downRawY;
+            private boolean dragged;
+
+            @Override
+            public boolean onTouch(View v, MotionEvent event) {
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        startX = lp.x;
+                        startY = lp.y;
+                        downRawX = event.getRawX();
+                        downRawY = event.getRawY();
+                        dragged = false;
+                        return true;
+                    case MotionEvent.ACTION_MOVE:
+                        float dx = event.getRawX() - downRawX;
+                        float dy = event.getRawY() - downRawY;
+                        if (Math.hypot(dx, dy) > 6f * density) {
+                            dragged = true;
+                        }
+                        if (dragged && inAppToggleOrb != null) {
+                            DisplayMetrics curDm = getResources().getDisplayMetrics();
+                            int maxW = Math.max(orbSize, curDm.widthPixels - orbSize);
+                            int maxH = Math.max(orbSize, curDm.heightPixels - orbSize);
+                            lp.x = Math.max(0, Math.min(maxW, startX + Math.round(dx)));
+                            lp.y = Math.max(0, Math.min(maxH, startY + Math.round(dy)));
+                            try {
+                                wm.updateViewLayout(inAppToggleOrb, lp);
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                        if (!dragged && gameSessionActive) {
+                            boolean nextFront = !gameViewFront;
+                            setGameSurfaceFront(nextFront);
+                            writeFocusMode(nextFront ? "game" : "hub");
+                        }
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+        });
+
+        try {
+            wm.addView(orb, lp);
+            inAppToggleOrb = orb;
+        } catch (Throwable ignored) {
+            inAppToggleOrb = null;
+        }
+    }
+
+    private void removeInAppGameToggleOrb() {
+        if (inAppToggleOrb != null) {
             try {
-                gameSurfaceView.getHolder().setSizeFromLayout();
+                WindowManager wm = getWindowManager();
+                if (wm != null) {
+                    wm.removeViewImmediate(inAppToggleOrb);
+                }
             } catch (Throwable ignored) {
             }
         }
-        writePermissionsSnapshot(bridgeDir());
+        inAppToggleOrb = null;
+    }
+
+    private static final class InAppSwitchIconView extends View {
+        private final Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint glyphPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path triPath = new Path();
+        private final RectF cellRect = new RectF();
+        private final float density;
+        private boolean showingGame = true;
+
+        InAppSwitchIconView(Context context, float density) {
+            super(context);
+            this.density = density;
+            bgPaint.setStyle(Paint.Style.FILL);
+            bgPaint.setColor(Color.argb(204, 12, 20, 26));
+
+            ringPaint.setStyle(Paint.Style.STROKE);
+            ringPaint.setStrokeWidth(Math.max(1.5f, 1.7f * density));
+            ringPaint.setColor(Color.argb(232, 52, 211, 153));
+
+            glyphPaint.setStyle(Paint.Style.FILL);
+            glyphPaint.setColor(Color.argb(245, 226, 252, 240));
+        }
+
+        void setShowingGame(boolean showingGame) {
+            if (this.showingGame != showingGame) {
+                this.showingGame = showingGame;
+                invalidate();
+            }
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float cx = getWidth() * 0.5f;
+            float cy = getHeight() * 0.5f;
+            float radius = Math.min(cx, cy) - ringPaint.getStrokeWidth() * 0.5f - 1.0f;
+            if (radius <= 0f) {
+                return;
+            }
+            canvas.drawCircle(cx, cy, radius, bgPaint);
+            canvas.drawCircle(cx, cy, radius, ringPaint);
+
+            if (showingGame) {
+                float cell = 4.4f * density;
+                float gap = 1.6f * density;
+                float r = 1.2f * density;
+                for (int row = 0; row < 2; row++) {
+                    for (int col = 0; col < 2; col++) {
+                        float left = cx + (col == 0 ? -(cell + gap) : gap);
+                        float top = cy + (row == 0 ? -(cell + gap) : gap);
+                        cellRect.set(left, top, left + cell, top + cell);
+                        canvas.drawRoundRect(cellRect, r, r, glyphPaint);
+                    }
+                }
+            } else {
+                float halfH = 6.2f * density;
+                float left = cx - 4.2f * density;
+                float right = cx + 6.4f * density;
+                triPath.reset();
+                triPath.moveTo(left, cy - halfH);
+                triPath.lineTo(right, cy);
+                triPath.lineTo(left, cy + halfH);
+                triPath.close();
+                canvas.drawPath(triPath, glyphPaint);
+            }
+        }
     }
 
     private void writePermissionsSnapshot(File dir) {
@@ -886,6 +1328,7 @@ public final class MainActivity extends NativeActivity {
         }
     }
 
+    @SuppressWarnings("deprecation")
     private void writeNetworkSnapshot(File dir) {
         try {
             Map<String, String> v4ByIp = new LinkedHashMap<>();

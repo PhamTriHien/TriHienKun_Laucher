@@ -163,7 +163,7 @@ $JavaSources = @()
 $JavaSources += Get-ChildItem -Path (Join-Path $RepoRoot "android\java") -Filter "*.java" -Recurse | Select-Object -ExpandProperty FullName
 $JavaSources += Get-ChildItem -Path $GenDir -Filter "*.java" -Recurse | Select-Object -ExpandProperty FullName
 
-& javac --release 11 -encoding UTF-8 -cp $AndroidJar -d $ClassesDir @JavaSources
+& javac --release 11 -encoding UTF-8 -Xlint:all -Werror -cp $AndroidJar -d $ClassesDir @JavaSources
 if ($LASTEXITCODE -ne 0) {
     throw "javac failed"
 }
@@ -178,7 +178,7 @@ if (-not (Test-Path $DexFile)) {
     throw "classes.dex was not generated"
 }
 
-Write-Host "[5/6] Packaging DEX and uncompressed (STORED method 0) arm64-v8a native library..."
+Write-Host "[5/6] Packaging DEX and uncompressed (STORED method 0) arm64-v8a native libraries..."
 $ApkRootStage = Join-Path $StageDir "apk_add"
 $NativeAbiStage = Join-Path $ApkRootStage "lib\arm64-v8a"
 New-Item -ItemType Directory -Force -Path $NativeAbiStage | Out-Null
@@ -186,6 +186,27 @@ $StagedSo = Join-Path $NativeAbiStage "libthk_app.so"
 Copy-Item -Path $SoPath -Destination $StagedSo -Force
 if ($Profile -eq "debug" -and (Test-Path $LlvmStrip)) {
     & $LlvmStrip --strip-debug $StagedSo
+}
+
+$ShimSrc = Join-Path $RepoRoot "crates\thk-java\native\thk_jvm_shim.c"
+$ShimSo = Join-Path $NativeAbiStage "libthk_jvm_shim.so"
+& $Clang -shared -fPIC -O2 -Wall -Wextra -Werror "-Wl,-z,max-page-size=16384" -o $ShimSo $ShimSrc -ldl
+if ($LASTEXITCODE -ne 0) {
+    throw "clang build for libthk_jvm_shim.so failed with exit code $LASTEXITCODE"
+}
+$ShimPhdr = (& $ReadObj --program-headers $ShimSo) -join "`n"
+$ShimAlignments = [regex]::Matches($ShimPhdr, "Type:\s+PT_LOAD[\s\S]*?Alignment:\s+(\d+)")
+if ($ShimAlignments.Count -eq 0) {
+    throw "Failed to inspect PT_LOAD segments in $ShimSo"
+}
+foreach ($m in $ShimAlignments) {
+    $alignVal = [int]$m.Groups[1].Value
+    if ($alignVal -lt 16384) {
+        throw "libthk_jvm_shim.so PT_LOAD segment alignment ($alignVal) is below 16384 bytes"
+    }
+}
+if ($Profile -eq "debug" -and (Test-Path $LlvmStrip)) {
+    & $LlvmStrip --strip-debug $ShimSo
 }
 
 if ($NeedsCppShared) {
@@ -260,8 +281,8 @@ Write-Host $AlignCheck
 if ($LASTEXITCODE -ne 0) {
     throw "zipalign 16 KB verification failed on $OutApk"
 }
-if ($AlignCheck -match "libthk_app\.so \(OK - compressed\)") {
-    throw "libthk_app.so must be stored uncompressed (ZIP method 0) for extractNativeLibs=false"
+if ($AlignCheck -match "libthk_(app|jvm_shim)\.so \(OK - compressed\)") {
+    throw "Native .so libraries must be stored uncompressed (ZIP method 0) for extractNativeLibs=false"
 }
 
 & $ApkSigner verify --verbose $OutApk

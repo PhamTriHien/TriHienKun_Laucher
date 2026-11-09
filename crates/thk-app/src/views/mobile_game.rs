@@ -365,14 +365,16 @@ fn paint_preview_backdrop(
     );
 
     if !app.mobile_game.edit_mode {
+        let has_progress = app.active_progress.is_some();
         let max_bw = (safe_canvas.width() - 16.0).max(116.0);
         let banner_w = (safe_canvas.width() * 0.88)
             .min(max_bw)
             .clamp(250.0_f32.min(max_bw), 520.0_f32.min(max_bw));
-        let banner_h = 88.0_f32.min((safe_canvas.height() - 48.0).max(68.0));
+        let target_bh = if has_progress { 88.0_f32 } else { 68.0_f32 };
+        let banner_h = target_bh.min((safe_canvas.height() - 48.0).max(58.0));
         let min_cy = safe_canvas.top() + banner_h * 0.5 + 40.0;
         let max_cy = (safe_canvas.bottom() - banner_h * 0.5 - 8.0).max(min_cy);
-        let banner_cy = (safe_canvas.top() + 112.0).clamp(min_cy, max_cy);
+        let banner_cy = (safe_canvas.top() + 104.0).clamp(min_cy, max_cy);
         let banner_rect = Rect::from_center_size(
             pos2(safe_canvas.center().x, banner_cy),
             vec2(banner_w, banner_h),
@@ -413,7 +415,7 @@ fn paint_preview_backdrop(
                     .to_string()
             });
         banner_painter.text(
-            pos2(banner_rect.center().x, banner_rect.top() + 20.0),
+            pos2(banner_rect.center().x, banner_rect.top() + 18.0),
             Align2::CENTER_CENTER,
             format!(
                 "{}: {prof_name}",
@@ -423,33 +425,15 @@ fn paint_preview_backdrop(
             title_col,
         );
 
-        let sub_msg = if app.active_progress.is_some() {
-            app.active_progress
-                .as_ref()
-                .map(|p| format!("{} ({:.0}%)", p.message, p.percent))
-                .unwrap_or_default()
-        } else if safe_canvas.width() < 460.0 {
-            app.i18n
-                .tr(
-                    "Thử phím Bedrock, Chuột Ảo hoặc Chạy Game.",
-                    "Test Bedrock keys, Virtual Mouse, or Launch.",
-                )
-                .to_string()
-        } else {
-            app.i18n
-                .tr(
-                    "Thử bố cục phím Bedrock, Chuột Ảo hoặc bấm Khởi chạy ngay bên dưới.",
-                    "Test custom Bedrock controls, Virtual Mouse, or launch right below.",
-                )
-                .to_string()
-        };
-        banner_painter.text(
-            pos2(banner_rect.center().x, banner_rect.top() + 41.0),
-            Align2::CENTER_CENTER,
-            sub_msg,
-            FontId::proportional(11.5),
-            sub_col,
-        );
+        if let Some(ref p) = app.active_progress {
+            banner_painter.text(
+                pos2(banner_rect.center().x, banner_rect.top() + 39.0),
+                Align2::CENTER_CENTER,
+                format!("{} ({:.0}%)", p.message, p.percent),
+                FontId::proportional(11.5),
+                sub_col,
+            );
+        }
 
         let btn_w = 168.0_f32.min((banner_w - 16.0).max(96.0));
         let btn_rect = Rect::from_center_size(
@@ -1344,195 +1328,209 @@ fn render_edit_mode_canvas(app: &mut LauncherAppState, ui: &mut egui::Ui, canvas
                 .fill(fill)
                 .stroke(Stroke::new(
                     1.4,
-                    if dark { ACCENT_AMBER } else { BORDER_DARK_CONTOUR },
+                    if dark {
+                        ACCENT_AMBER
+                    } else {
+                        BORDER_DARK_CONTOUR
+                    },
                 ))
                 .corner_radius(CornerRadius::same(10))
                 .inner_margin(Margin::symmetric(10, 8))
                 .show(ui, |ui| {
-                    let toolbar_max_w = (canvas.width() - 16.0).max(120.0);
+                    let toolbar_max_w = (canvas.width() - 36.0).max(120.0);
                     ui.set_max_width(toolbar_max_w);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            RichText::new(app.i18n.tr("Edit Phím Bedrock", "Edit Bedrock Controls"))
-                                .color(readable_accent_ink(ACCENT_AMBER, dark))
-                                .strong(),
-                        );
-
-                        if ui
-                            .button(
-                                RichText::new(app.i18n.tr("+ Thêm Phím", "+ Add Key"))
-                                    .color(readable_accent_ink(ACCENT_EMERALD, dark))
+                    ScrollArea::vertical()
+                        .id_salt("mobile_key_editor_toolbar_scroll")
+                        .max_height((canvas.height() * 0.42).max(64.0))
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.set_max_width(toolbar_max_w);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    RichText::new(
+                                        app.i18n.tr("Edit Phím Bedrock", "Edit Bedrock Controls"),
+                                    )
+                                    .color(readable_accent_ink(ACCENT_AMBER, dark))
                                     .strong(),
-                            )
-                            .clicked()
-                        {
-                            app.click_sfx();
-                            let new_btn = MobileControlButton {
-                                id: format!("custom_{}", Uuid::new_v4().simple()),
-                                label: "F3".into(),
-                                x_norm: 0.50,
-                                y_norm: 0.48,
-                                width_dp: 50.0,
-                                height_dp: 50.0,
-                                scale: 1.0,
-                                opacity: 0.80,
-                                toggle_mode: false,
-                                shape: ControlShape::Round,
-                                binding: thk_core::mobile_controls::ControlBinding::Key {
-                                    primary: thk_core::mobile_controls::GLFW_KEY_F3,
-                                    secondary: 0,
-                                },
-                            };
-                            app.mobile_controls.buttons.push(new_btn);
-                            app.mobile_game.selected_btn_idx =
-                                Some(app.mobile_controls.buttons.len() - 1);
-                        }
+                                );
 
-                        if ui
-                            .button(app.i18n.tr("Mặc định", "Reset Default"))
-                            .clicked()
-                        {
-                            app.click_sfx();
-                            app.mobile_controls = MobileControlLayout::bedrock_default();
-                            app.mobile_game.selected_btn_idx = Some(0);
-                        }
+                                if ui
+                                    .button(
+                                        RichText::new(app.i18n.tr("+ Thêm Phím", "+ Add Key"))
+                                            .color(readable_accent_ink(ACCENT_EMERALD, dark))
+                                            .strong(),
+                                    )
+                                    .clicked()
+                                {
+                                    app.click_sfx();
+                                    let new_btn = MobileControlButton {
+                                        id: format!("custom_{}", Uuid::new_v4().simple()),
+                                        label: "F3".into(),
+                                        x_norm: 0.50,
+                                        y_norm: 0.48,
+                                        width_dp: 50.0,
+                                        height_dp: 50.0,
+                                        scale: 1.0,
+                                        opacity: 0.80,
+                                        toggle_mode: false,
+                                        shape: ControlShape::Round,
+                                        binding: thk_core::mobile_controls::ControlBinding::Key {
+                                            primary: thk_core::mobile_controls::GLFW_KEY_F3,
+                                            secondary: 0,
+                                        },
+                                    };
+                                    app.mobile_controls.buttons.push(new_btn);
+                                    app.mobile_game.selected_btn_idx =
+                                        Some(app.mobile_controls.buttons.len() - 1);
+                                }
 
-                        if ui
-                            .button(
-                                RichText::new(app.i18n.tr("Lưu & Xong", "Save & Done"))
-                                    .color(ACCENT_CYAN)
-                                    .strong(),
-                            )
-                            .clicked()
-                        {
-                            app.click_sfx();
-                            app.save_mobile_controls_with_toast();
-                            app.mobile_game.edit_mode = false;
-                        }
-                    });
+                                if ui
+                                    .button(app.i18n.tr("Mặc định", "Reset Default"))
+                                    .clicked()
+                                {
+                                    app.click_sfx();
+                                    app.mobile_controls = MobileControlLayout::bedrock_default();
+                                    app.mobile_game.selected_btn_idx = Some(0);
+                                }
 
-                    if let Some(sel_idx) = app
-                        .mobile_game
-                        .selected_btn_idx
-                        .filter(|&i| i < app.mobile_controls.buttons.len())
-                    {
-                        ui.separator();
-                        let is_dpad =
-                            app.mobile_controls.buttons[sel_idx].shape == ControlShape::Dpad;
-                        let can_delete =
-                            app.mobile_controls.buttons[sel_idx].id != "bedrock_dpad";
-                        let mut delete_clicked = false;
+                                if ui
+                                    .button(
+                                        RichText::new(app.i18n.tr("Lưu & Xong", "Save & Done"))
+                                            .color(ACCENT_CYAN)
+                                            .strong(),
+                                    )
+                                    .clicked()
+                                {
+                                    app.click_sfx();
+                                    app.save_mobile_controls_with_toast();
+                                    app.mobile_game.edit_mode = false;
+                                }
+                            });
 
-                        ui.horizontal_wrapped(|ui| {
-                            let adaptive_sw = (toolbar_max_w - 64.0).clamp(48.0, 110.0);
-                            if ui.spacing().slider_width > adaptive_sw {
-                                ui.spacing_mut().slider_width = adaptive_sw;
-                            }
-                            let btn = &mut app.mobile_controls.buttons[sel_idx];
-                            if !is_dpad {
-                                let name_lbl = ui.label(app.i18n.tr("Nhãn:", "Label:"));
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut btn.label)
-                                        .desired_width(68.0_f32.min((toolbar_max_w - 48.0).max(42.0))),
-                                )
-                                .labelled_by(name_lbl.id);
+                            if let Some(sel_idx) = app
+                                .mobile_game
+                                .selected_btn_idx
+                                .filter(|&i| i < app.mobile_controls.buttons.len())
+                            {
+                                ui.separator();
+                                let is_dpad = app.mobile_controls.buttons[sel_idx].shape
+                                    == ControlShape::Dpad;
+                                let can_delete =
+                                    app.mobile_controls.buttons[sel_idx].id != "bedrock_dpad";
+                                let mut delete_clicked = false;
 
-                                egui::ComboBox::from_id_salt("mobile_ctrl_binding_combo")
-                                    .width(168.0_f32.min((toolbar_max_w - 20.0).max(84.0)))
-                                    .truncate()
-                                    .selected_text(btn.binding.display_label())
-                                    .show_ui(ui, |ui| {
-                                        for opt in bindable_catalog() {
-                                            if ui
-                                                .selectable_label(
-                                                    btn.binding == opt.binding,
-                                                    opt.label,
-                                                )
-                                                .clicked()
-                                            {
-                                                btn.binding = opt.binding;
-                                                btn.label = opt.short_name.to_string();
-                                            }
-                                        }
-                                    })
-                                    .response
-                                    .widget_info(|| {
-                                        egui::WidgetInfo::labeled(
-                                            egui::Role::ComboBox,
-                                            ui.is_enabled(),
-                                            btn.binding.display_label(),
+                                ui.horizontal_wrapped(|ui| {
+                                    let adaptive_sw = (toolbar_max_w - 64.0).clamp(48.0, 110.0);
+                                    if ui.spacing().slider_width > adaptive_sw {
+                                        ui.spacing_mut().slider_width = adaptive_sw;
+                                    }
+                                    let btn = &mut app.mobile_controls.buttons[sel_idx];
+                                    if !is_dpad {
+                                        let name_lbl = ui.label(app.i18n.tr("Nhãn:", "Label:"));
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut btn.label)
+                                                .desired_width(
+                                                    68.0_f32.min((toolbar_max_w - 48.0).max(42.0)),
+                                                ),
                                         )
-                                    });
+                                        .labelled_by(name_lbl.id);
 
-                                ui.selectable_value(
-                                    &mut btn.shape,
-                                    ControlShape::Round,
-                                    app.i18n.tr("Tròn", "Round"),
-                                );
-                                ui.selectable_value(
-                                    &mut btn.shape,
-                                    ControlShape::Rect,
-                                    app.i18n.tr("Vuông", "Rect"),
-                                );
-                                ui.checkbox(
-                                    &mut btn.toggle_mode,
-                                    app.i18n.tr("Giữ phím", "Toggle"),
-                                );
+                                        egui::ComboBox::from_id_salt("mobile_ctrl_binding_combo")
+                                            .width(168.0_f32.min((toolbar_max_w - 20.0).max(84.0)))
+                                            .truncate()
+                                            .selected_text(btn.binding.display_label())
+                                            .show_ui(ui, |ui| {
+                                                for opt in bindable_catalog() {
+                                                    if ui
+                                                        .selectable_label(
+                                                            btn.binding == opt.binding,
+                                                            opt.label,
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        btn.binding = opt.binding;
+                                                        btn.label = opt.short_name.to_string();
+                                                    }
+                                                }
+                                            })
+                                            .response
+                                            .widget_info(|| {
+                                                egui::WidgetInfo::labeled(
+                                                    egui::Role::ComboBox,
+                                                    ui.is_enabled(),
+                                                    btn.binding.display_label(),
+                                                )
+                                            });
+
+                                        ui.selectable_value(
+                                            &mut btn.shape,
+                                            ControlShape::Round,
+                                            app.i18n.tr("Tròn", "Round"),
+                                        );
+                                        ui.selectable_value(
+                                            &mut btn.shape,
+                                            ControlShape::Rect,
+                                            app.i18n.tr("Vuông", "Rect"),
+                                        );
+                                        ui.checkbox(
+                                            &mut btn.toggle_mode,
+                                            app.i18n.tr("Giữ phím", "Toggle"),
+                                        );
+                                    } else {
+                                        ui.label(
+                                            RichText::new(
+                                                app.i18n.tr("Cụm phím di chuyển", "Movement D-Pad"),
+                                            )
+                                            .strong(),
+                                        );
+                                    }
+
+                                    let size_lbl = ui.label(app.i18n.tr("Cỡ:", "Size:"));
+                                    ui.add(
+                                        egui::Slider::new(&mut btn.scale, 0.5..=2.2)
+                                            .max_decimals(2)
+                                            .suffix("x"),
+                                    )
+                                    .labelled_by(size_lbl.id);
+
+                                    let opacity_lbl = ui.label(app.i18n.tr("Độ mờ:", "Opacity:"));
+                                    let mut pct = (btn.opacity * 100.0).round();
+                                    let opacity_resp = ui
+                                        .add(egui::Slider::new(&mut pct, 15.0..=100.0).suffix("%"));
+                                    let opacity_changed = opacity_resp.changed();
+                                    opacity_resp.labelled_by(opacity_lbl.id);
+                                    if opacity_changed {
+                                        btn.opacity = (pct / 100.0).clamp(0.15, 1.0);
+                                    }
+
+                                    if can_delete
+                                        && ui
+                                            .button(
+                                                RichText::new(app.i18n.tr("Xóa", "Delete"))
+                                                    .color(ACCENT_RED),
+                                            )
+                                            .clicked()
+                                    {
+                                        delete_clicked = true;
+                                    }
+                                });
+
+                                if delete_clicked {
+                                    app.click_sfx();
+                                    app.mobile_controls.buttons.remove(sel_idx);
+                                    app.mobile_game.selected_btn_idx = None;
+                                }
                             } else {
                                 ui.label(
                                     RichText::new(app.i18n.tr(
-                                        "Cụm di chuyển Bedrock 3×3 (Kéo để đổi vị trí)",
-                                        "3×3 Bedrock Movement D-Pad (Drag to move)",
+                                        "Chạm vào phím để tuỳ chỉnh",
+                                        "Tap a key to customize",
                                     ))
-                                    .strong(),
+                                    .size(11.3)
+                                    .weak(),
                                 );
                             }
-
-                            let size_lbl = ui.label(app.i18n.tr("Cỡ:", "Size:"));
-                            ui.add(
-                                egui::Slider::new(&mut btn.scale, 0.5..=2.2)
-                                    .max_decimals(2)
-                                    .suffix("x"),
-                            )
-                            .labelled_by(size_lbl.id);
-
-                            let opacity_lbl = ui.label(app.i18n.tr("Độ mờ:", "Opacity:"));
-                            let mut pct = (btn.opacity * 100.0).round();
-                            let opacity_resp =
-                                ui.add(egui::Slider::new(&mut pct, 15.0..=100.0).suffix("%"));
-                            let opacity_changed = opacity_resp.changed();
-                            opacity_resp.labelled_by(opacity_lbl.id);
-                            if opacity_changed {
-                                btn.opacity = (pct / 100.0).clamp(0.15, 1.0);
-                            }
-
-                            if can_delete
-                                && ui
-                                    .button(
-                                        RichText::new(app.i18n.tr("Xóa", "Delete"))
-                                            .color(ACCENT_RED),
-                                    )
-                                    .clicked()
-                            {
-                                delete_clicked = true;
-                            }
                         });
-
-                        if delete_clicked {
-                            app.click_sfx();
-                            app.mobile_controls.buttons.remove(sel_idx);
-                            app.mobile_game.selected_btn_idx = None;
-                        }
-                    } else {
-                        ui.label(
-                            RichText::new(app.i18n.tr(
-                                "Chạm vào một phím bất kỳ bên dưới để kéo vị trí, chỉnh kích thước hoặc gán lại chức năng.",
-                                "Tap any button below to drag position, resize, or rebind.",
-                            ))
-                            .size(11.3)
-                            .weak(),
-                        );
-                    }
                 });
         });
 }
@@ -1692,32 +1690,33 @@ fn render_inline_log_overlay(app: &LauncherAppState, ctx: &egui::Context, canvas
         });
 }
 
+pub const FLOATING_ORB_DIAMETER: f32 = 48.0;
+
 pub(crate) fn floating_menu_hit_rect(state: &MobileGameUiState, screen: Rect) -> Rect {
     let default_pos = pos2(screen.left() + 10.0, screen.top() + 8.0);
-    let mut pill_pos = state.floating_menu_pos.unwrap_or(default_pos);
-    pill_pos.x = pill_pos.x.clamp(
+    let mut orb_pos = state.floating_menu_pos.unwrap_or(default_pos);
+    orb_pos.x = orb_pos.x.clamp(
         screen.left() + 4.0,
-        (screen.right() - 78.0).max(screen.left() + 4.0),
+        (screen.right() - FLOATING_ORB_DIAMETER - 4.0).max(screen.left() + 4.0),
     );
-    pill_pos.y = pill_pos.y.clamp(
+    orb_pos.y = orb_pos.y.clamp(
         screen.top() + 4.0,
-        (screen.bottom() - 38.0).max(screen.top() + 4.0),
+        (screen.bottom() - FLOATING_ORB_DIAMETER - 4.0).max(screen.top() + 4.0),
     );
     if state.floating_menu_expanded {
-        let popup_w = 214.0_f32.min((screen.width() - 32.0).max(120.0));
-        let full_w = (popup_w + 22.0).min((screen.width() - 8.0).max(96.0));
-        let full_h = 308.0_f32.min((screen.height() - 12.0).max(96.0));
-        let draw_x = pill_pos.x.clamp(
+        let card_outer_w = 224.0_f32.min((screen.width() - 8.0).max(112.0));
+        let full_h = 348.0_f32.min((screen.height() - 8.0).max(112.0));
+        let draw_x = orb_pos.x.clamp(
             screen.left() + 4.0,
-            (screen.right() - full_w - 4.0).max(screen.left() + 4.0),
+            (screen.right() - card_outer_w - 4.0).max(screen.left() + 4.0),
         );
-        let draw_y = pill_pos.y.clamp(
+        let draw_y = orb_pos.y.clamp(
             screen.top() + 4.0,
             (screen.bottom() - full_h - 4.0).max(screen.top() + 4.0),
         );
-        Rect::from_min_size(pos2(draw_x, draw_y), vec2(full_w, full_h))
+        Rect::from_min_size(pos2(draw_x, draw_y), vec2(card_outer_w, full_h))
     } else {
-        Rect::from_min_size(pill_pos, vec2(74.0, 34.0))
+        Rect::from_min_size(orb_pos, vec2(FLOATING_ORB_DIAMETER, FLOATING_ORB_DIAMETER))
     }
 }
 
@@ -1727,26 +1726,26 @@ pub fn render_mobile_floating_menu(app: &mut LauncherAppState, ctx: &egui::Conte
     let mut current_pos = app.mobile_game.floating_menu_pos.unwrap_or(default_pos);
     current_pos.x = current_pos.x.clamp(
         screen.left() + 4.0,
-        (screen.right() - 78.0).max(screen.left() + 4.0),
+        (screen.right() - FLOATING_ORB_DIAMETER - 4.0).max(screen.left() + 4.0),
     );
     current_pos.y = current_pos.y.clamp(
         screen.top() + 4.0,
-        (screen.bottom() - 38.0).max(screen.top() + 4.0),
+        (screen.bottom() - FLOATING_ORB_DIAMETER - 4.0).max(screen.top() + 4.0),
     );
     app.mobile_game.floating_menu_pos = Some(current_pos);
 
-    let popup_w = 214.0_f32.min((screen.width() - 32.0).max(120.0));
-    let max_popup_h = 308.0_f32.min((screen.height() - 12.0).max(96.0));
+    let card_outer_w = 224.0_f32.min((screen.width() - 8.0).max(112.0));
+    let popup_w = (card_outer_w - 20.0).max(92.0);
+    let full_h = 348.0_f32.min((screen.height() - 8.0).max(112.0));
     let draw_pos = if app.mobile_game.floating_menu_expanded {
-        let full_w = (popup_w + 22.0).min((screen.width() - 8.0).max(96.0));
         pos2(
             current_pos.x.clamp(
                 screen.left() + 4.0,
-                (screen.right() - full_w - 4.0).max(screen.left() + 4.0),
+                (screen.right() - card_outer_w - 4.0).max(screen.left() + 4.0),
             ),
             current_pos.y.clamp(
                 screen.top() + 4.0,
-                (screen.bottom() - max_popup_h - 4.0).max(screen.top() + 4.0),
+                (screen.bottom() - full_h - 4.0).max(screen.top() + 4.0),
             ),
         )
     } else {
@@ -1761,17 +1760,15 @@ pub fn render_mobile_floating_menu(app: &mut LauncherAppState, ctx: &egui::Conte
         .fixed_pos(draw_pos)
         .show(ctx, |ui| {
             let dark = ui.visuals().dark_mode;
-            let (menu_fill, menu_stroke, hub_pill_col) = if dark {
+            let (menu_fill, menu_stroke) = if dark {
                 (
-                    Color32::from_rgba_unmultiplied(12, 18, 30, 232),
-                    Stroke::new(1.4, primary_accent),
-                    Color32::WHITE,
+                    Color32::from_rgba_unmultiplied(12, 18, 30, 236),
+                    Stroke::new(1.6, primary_accent),
                 )
             } else {
                 (
-                    Color32::from_rgba_unmultiplied(245, 250, 255, 244),
-                    Stroke::new(1.6, BORDER_DARK_CONTOUR),
-                    TEXT_INK_LIGHT,
+                    Color32::from_rgba_unmultiplied(245, 250, 255, 246),
+                    Stroke::new(1.8, BORDER_DARK_CONTOUR),
                 )
             };
             let hub_btn_fg = if (primary_accent.r() as u16
@@ -1783,46 +1780,78 @@ pub fn render_mobile_floating_menu(app: &mut LauncherAppState, ctx: &egui::Conte
             } else {
                 Color32::WHITE
             };
-            Frame::NONE
-                .fill(menu_fill)
-                .stroke(menu_stroke)
-                .corner_radius(CornerRadius::same(16))
-                .inner_margin(Margin::symmetric(10, 5))
-                .show(ui, |ui| {
-                    let pill_resp = ui
-                        .horizontal(|ui| {
-                            paint_icon_3d(ui, 18.0, Icon3dKind::BrandVoxelCore, game_running);
-                            ui.label(RichText::new("HUB").size(12.2).strong().color(hub_pill_col));
-                        })
-                        .response
-                        .interact(Sense::click_and_drag());
 
-                    if pill_resp.dragged() {
-                        let next = current_pos + pill_resp.drag_delta();
-                        app.mobile_game.floating_menu_pos = Some(next);
-                    } else if pill_resp.clicked() {
-                        app.click_sfx();
-                        app.mobile_game.floating_menu_expanded =
-                            !app.mobile_game.floating_menu_expanded;
-                    }
+            ui.spacing_mut().item_spacing.y = 6.0;
+            let (orb_rect, orb_resp) = ui.allocate_exact_size(
+                vec2(FLOATING_ORB_DIAMETER, FLOATING_ORB_DIAMETER),
+                Sense::click_and_drag(),
+            );
+            let quick_menu_lbl = app.i18n.tr("Menu nhanh", "Quick Menu").to_string();
+            orb_resp.widget_info(move || {
+                egui::WidgetInfo::labeled(egui::Role::Button, true, &quick_menu_lbl)
+            });
 
-                    if app.mobile_game.floating_menu_expanded {
-                        ui.separator();
+            let orb_fill = if orb_resp.hovered() || app.mobile_game.floating_menu_expanded {
+                if dark {
+                    Color32::from_rgba_unmultiplied(20, 30, 48, 248)
+                } else {
+                    Color32::from_rgba_unmultiplied(252, 254, 255, 252)
+                }
+            } else {
+                menu_fill
+            };
+            let center = orb_rect.center();
+            let radius = FLOATING_ORB_DIAMETER * 0.5;
+            {
+                let painter = ui.painter();
+                painter.circle_filled(
+                    center + vec2(0.0, 2.5),
+                    radius + 0.5,
+                    Color32::from_black_alpha(if dark { 112 } else { 58 }),
+                );
+                painter.circle_filled(center, radius, orb_fill);
+                painter.circle_stroke(center, radius - 0.9, menu_stroke);
+            }
+            let icon_size = 26.0;
+            let icon_rect = Rect::from_center_size(center, vec2(icon_size, icon_size));
+            let mut icon_ui = ui.new_child(egui::UiBuilder::new().max_rect(icon_rect));
+            paint_icon_3d(
+                &mut icon_ui,
+                icon_size,
+                Icon3dKind::BrandVoxelCore,
+                game_running,
+            );
+
+            if orb_resp.dragged() {
+                let next = current_pos + orb_resp.drag_delta();
+                app.mobile_game.floating_menu_pos = Some(next);
+            } else if orb_resp.clicked() {
+                app.click_sfx();
+                app.mobile_game.floating_menu_expanded = !app.mobile_game.floating_menu_expanded;
+            }
+
+            if app.mobile_game.floating_menu_expanded {
+                Frame::NONE
+                    .fill(menu_fill)
+                    .stroke(menu_stroke)
+                    .corner_radius(CornerRadius::same(14))
+                    .inner_margin(Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
                         ui.set_min_width(popup_w);
                         ui.set_max_width(popup_w);
                         ScrollArea::vertical()
                             .id_salt("thk_hub_popup_scroll")
-                            .max_height((max_popup_h - 42.0).max(58.0))
+                            .max_height((full_h - FLOATING_ORB_DIAMETER - 26.0).max(52.0))
+                            .auto_shrink([false, true])
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 5.0;
 
                                     let hub_lbl = if app.mobile_game.hub_visible_over_game {
-                                        app.i18n
-                                            .tr("Ẩn HUB UI (Về Game)", "Hide HUB (Back to Game)")
+                                        app.i18n.tr("Về Game", "Back to Game")
                                     } else {
-                                        app.i18n.tr("Hiện HUB UI App", "Open Launcher HUB UI")
+                                        app.i18n.tr("Mở Launcher", "Open Launcher")
                                     };
                                     if ui
                                         .add_sized(
@@ -2028,8 +2057,8 @@ pub fn render_mobile_floating_menu(app: &mut LauncherAppState, ctx: &egui::Conte
                                     }
                                 });
                             });
-                    }
-                });
+                    });
+            }
         });
 }
 

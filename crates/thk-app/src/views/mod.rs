@@ -573,10 +573,6 @@ fn render_left_nav_rail(app: &mut LauncherAppState, ui: &mut egui::Ui, insets: S
                                 .i18n
                                 .tr("Màn hình Game & Phím", "Game Screen & Controls")
                                 .to_string();
-                            let pad_sub = app
-                                .i18n
-                                .tr("Phím Bedrock • Chuột Ảo", "Bedrock Keys • Mouse")
-                                .to_string();
                             let (_, pad_resp) = gaming_card_3d(
                                 ui,
                                 "nav_mobile_game_screen_card",
@@ -601,7 +597,6 @@ fn render_left_nav_rail(app: &mut LauncherAppState, ui: &mut egui::Ui, insets: S
                                                 RichText::new(&pad_title).size(12.4).strong(),
                                                 right_w,
                                             );
-                                            badge(ui, &pad_sub, ACCENT_CYAN);
                                         });
                                     });
                                 },
@@ -1265,16 +1260,19 @@ fn render_bottom_status_bar(
 
     egui::Panel::bottom("thk_bottom_progress_bar")
         .resizable(false)
-        .exact_size(48.0 + bottom_pad)
+        .size_range((48.0 + bottom_pad)..=220.0)
         .frame(Frame::side_top_panel(ui.style()).inner_margin(bar_margin))
         .show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
+            ui.set_min_height(32.0);
+            let full_w = ui.available_width();
+            ui.set_max_width(full_w);
+            ui.horizontal_wrapped(|ui| {
                 if let Some(ref prog) = app.active_progress {
                     let frac = (prog.percent / 100.0).clamp(0.0, 1.0);
                     let speed = format!("{}/s", format_bytes(prog.bytes_per_sec));
-                    let bar_w = (ui.available_width() * 0.28).clamp(96.0, 240.0);
+                    let bar_w = (full_w * 0.28).clamp(88.0, 240.0);
                     paint_glowing_progress_bar(ui, frac, bar_w, 18.0);
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     badge(ui, &prog.phase, ACCENT_CYAN);
                     if extra_tasks > 0 {
                         badge(ui, &format!("+{extra_tasks}"), ACCENT_AMBER);
@@ -1308,24 +1306,10 @@ fn render_bottom_status_bar(
                 }
 
                 if can_cancel || minimized_mp_title.is_some() || minimized_disk_title.is_some() {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if can_cancel
-                            && danger_icon_button(
-                                ui,
-                                VectorIcon::Close,
-                                app.i18n.tr("Hủy", "Cancel"),
-                            )
-                            .clicked()
-                        {
-                            app.click_sfx();
-                            if app.can_cancel_primary_task() {
-                                app.cancel_primary_active_task();
-                            } else if minimized_mp_title.is_some() {
-                                app.cancel_modpack_modal_install();
-                            } else if minimized_disk_title.is_some() {
-                                app.cancel_disk_pack_import();
-                            }
-                        }
+                    let has_reopen = minimized_mp_title.is_some() || minimized_disk_title.is_some();
+                    let min_right_w =
+                        (if has_reopen { 268.0 } else { 108.0 }) * app.settings.font_scale.max(1.0);
+                    let render_actions = |app: &mut LauncherAppState, ui: &mut egui::Ui| {
                         if minimized_mp_title.is_some()
                             && secondary_icon_button(
                                 ui,
@@ -1351,7 +1335,73 @@ fn render_bottom_status_bar(
                                 m.minimized = false;
                             }
                         }
-                    });
+                        if can_cancel
+                            && danger_icon_button(
+                                ui,
+                                VectorIcon::Close,
+                                app.i18n.tr("Hủy", "Cancel"),
+                            )
+                            .clicked()
+                        {
+                            app.click_sfx();
+                            if app.can_cancel_primary_task() {
+                                app.cancel_primary_active_task();
+                            } else if minimized_mp_title.is_some() {
+                                app.cancel_modpack_modal_install();
+                            } else if minimized_disk_title.is_some() {
+                                app.cancel_disk_pack_import();
+                            }
+                        }
+                    };
+
+                    if ui.available_width() >= min_right_w {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if can_cancel
+                                && danger_icon_button(
+                                    ui,
+                                    VectorIcon::Close,
+                                    app.i18n.tr("Hủy", "Cancel"),
+                                )
+                                .clicked()
+                            {
+                                app.click_sfx();
+                                if app.can_cancel_primary_task() {
+                                    app.cancel_primary_active_task();
+                                } else if minimized_mp_title.is_some() {
+                                    app.cancel_modpack_modal_install();
+                                } else if minimized_disk_title.is_some() {
+                                    app.cancel_disk_pack_import();
+                                }
+                            }
+                            if minimized_mp_title.is_some()
+                                && secondary_icon_button(
+                                    ui,
+                                    VectorIcon::Download,
+                                    app.i18n.tr("Mở cửa sổ cài đặt", "Show Installer"),
+                                )
+                                .clicked()
+                            {
+                                app.click_sfx();
+                                if let Some(m) = app.modpacks.install_modal.as_mut() {
+                                    m.minimized = false;
+                                }
+                            } else if minimized_disk_title.is_some()
+                                && secondary_icon_button(
+                                    ui,
+                                    VectorIcon::Download,
+                                    app.i18n.tr("Mở cửa sổ nhập gói", "Show Importer"),
+                                )
+                                .clicked()
+                            {
+                                app.click_sfx();
+                                if let Some(m) = app.disk_pack_modal.as_mut() {
+                                    m.minimized = false;
+                                }
+                            }
+                        });
+                    } else {
+                        render_actions(app, ui);
+                    }
                 }
             });
         });
@@ -1920,13 +1970,9 @@ pub(crate) fn render_direct_host_endpoints_ui(
         }
         UpnpPortStatus::CarrierGradeNat { wan_ip, .. } => {
             let note = if i18n.language() == Language::Vi {
-                format!(
-                    "Đường truyền đang dùng IP chung của nhà mạng ({wan_ip}) — bạn bè khác mạng hãy vào bằng địa chỉ Online IPv6 ở trên hoặc dùng mạng VPN chung."
-                )
+                format!("Mạng nhà mạng CGNAT ({wan_ip}) — kết nối khác mạng qua IPv6 hoặc VPN.")
             } else {
-                format!(
-                    "ISP uses shared address space ({wan_ip}) — friends on other networks should join via the Direct Online IPv6 address above or a shared VPN."
-                )
+                format!("ISP CGNAT ({wan_ip}) — connect across networks via IPv6 or VPN.")
             };
             ui.label(RichText::new(note).size(11.5).color(ACCENT_AMBER));
         }
@@ -1946,18 +1992,11 @@ pub(crate) fn render_direct_host_endpoints_ui(
                     }
                 });
             }
-            let guidance = if info.ipv6_endpoint.is_some() {
-                i18n.tr(
-                    "Modem đang tắt mở cổng tự động — bạn bè ở mạng khác có thể vào thẳng bằng địa chỉ Online IPv6 ở trên (độ trễ thấp), hoặc mở cổng trên Modem nếu cần IPv4.",
-                    "Router auto-mapping is off — friends on other networks can join directly via the Online IPv6 address above, or open the port on your router for IPv4.",
-                )
-            } else {
-                i18n.tr(
-                    "Modem đang tắt mở cổng tự động — để chơi khác mạng Wi-Fi hãy mở cổng trên Modem hoặc kết nối chung mạng VPN.",
-                    "Router auto-mapping is off — open the port on your router or use a shared VPN to play across different networks.",
-                )
-            };
-            ui.label(RichText::new(guidance).size(11.5).weak());
+            ui.label(
+                RichText::new(i18n.tr("UPnP đang tắt trên Modem.", "Router UPnP is disabled."))
+                    .size(11.5)
+                    .weak(),
+            );
         }
         UpnpPortStatus::Disabled => {
             if let Some(ref pub_ep) = info.public_ipv4_endpoint {

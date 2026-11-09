@@ -14,13 +14,14 @@ import java.io.InputStream;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 public final class MobileRuntimeInstaller {
     public static final String ASSET_BUNDLE_NAME = "mobile_runtime_arm64.zip";
-    public static final String EXPECTED_VERSION = "thk-mobile-runtime-1.1.7-arm64-v1";
+    public static final String EXPECTED_VERSION = "thk-mobile-runtime-1.1.8-arm64-v1";
 
     private static final Object LOCK = new Object();
 
@@ -38,8 +39,9 @@ public final class MobileRuntimeInstaller {
             File pojavExec = new File(root, "lib/libpojavexec.so");
             File gl4es = new File(root, "lib/libng_gl4es.so");
             File lwjglJar = new File(root, "lwjgl3/3.3.3/lwjgl.jar");
+            File lwjglGlfwJar = new File(root, "lwjgl3/3.3.3/lwjgl-glfw.jar");
 
-            if (verFile.isFile() && pojavExec.isFile() && gl4es.isFile() && lwjglJar.isFile()) {
+            if (verFile.isFile() && pojavExec.isFile() && gl4es.isFile() && lwjglJar.isFile() && lwjglGlfwJar.isFile()) {
                 String currentVer = readUtf8Small(verFile).trim();
                 if (EXPECTED_VERSION.equals(currentVer)) {
                     writeResolvConf(ctx, root);
@@ -94,14 +96,29 @@ public final class MobileRuntimeInstaller {
                         }
                         //noinspection ResultOfMethodCallIgnored
                         out.setReadable(true, false);
-                        if (normalized.endsWith(".so")) {
+                        String lowerName = normalized.toLowerCase(Locale.ROOT);
+                        if (lowerName.endsWith(".so")) {
                             //noinspection ResultOfMethodCallIgnored
                             out.setExecutable(true, false);
+                        }
+                        if (lowerName.endsWith(".so") || lowerName.endsWith(".jar") || lowerName.endsWith(".dex")) {
+                            //noinspection ResultOfMethodCallIgnored
+                            out.setWritable(false, false);
                         }
                     }
                     zis.closeEntry();
                 }
             }
+
+            File stagedVer = new File(stage, "version.txt");
+            //noinspection ResultOfMethodCallIgnored
+            stagedVer.setWritable(true, true);
+            try (FileOutputStream vfos = new FileOutputStream(stagedVer)) {
+                vfos.write(EXPECTED_VERSION.getBytes(StandardCharsets.UTF_8));
+                vfos.flush();
+            }
+            //noinspection ResultOfMethodCallIgnored
+            stagedVer.setReadable(true, false);
 
             deleteRecursive(root);
             if (!stage.renameTo(root)) {
@@ -160,7 +177,7 @@ public final class MobileRuntimeInstaller {
             while ((n = in.read(buf)) != -1) {
                 bos.write(buf, 0, n);
             }
-            return bos.toString(StandardCharsets.UTF_8.name());
+            return bos.toString(StandardCharsets.UTF_8.name()).replace("\uFEFF", "");
         } catch (Throwable ignored) {
             return "";
         }
@@ -170,6 +187,8 @@ public final class MobileRuntimeInstaller {
         if (target == null || !target.exists()) {
             return;
         }
+        //noinspection ResultOfMethodCallIgnored
+        target.setWritable(true, true);
         if (target.isDirectory()) {
             File[] children = target.listFiles();
             if (children != null) {
@@ -178,6 +197,8 @@ public final class MobileRuntimeInstaller {
                 }
             }
         }
+        //noinspection ResultOfMethodCallIgnored
+        target.setWritable(true, true);
         //noinspection ResultOfMethodCallIgnored
         target.delete();
     }

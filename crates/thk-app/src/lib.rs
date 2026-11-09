@@ -244,7 +244,7 @@ fn init_tracing(log_dir: Option<&Path>) {
         install_panic_log_hook(dir);
     }
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("info,wgpu_core=warn,wgpu_hal=warn")
+        tracing_subscriber::EnvFilter::new("info,wgpu_core=warn,wgpu_hal=warn,wgpu_hal::gles=error")
     });
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)

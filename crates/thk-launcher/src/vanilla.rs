@@ -579,12 +579,22 @@ pub fn android_upgraded_library_spec(
     let major = ver_nums.first().copied().unwrap_or(0);
     let minor = ver_nums.get(1).copied().unwrap_or(0);
 
-    if coord.starts_with("net.java.dev.jna:jna:") && (major < 5 || (major == 5 && minor < 13)) {
+    if coord.starts_with("net.java.dev.jna:jna:") && (major < 5 || (major == 5 && minor < 14)) {
         return Some((
-            "net.java.dev.jna:jna:5.13.0",
-            "net/java/dev/jna/jna/5.13.0/jna-5.13.0.jar",
-            "https://repo1.maven.org/maven2/net/java/dev/jna/jna/5.13.0/jna-5.13.0.jar",
-            "1200e7ebeedbe0d10062093f32925a912020e747",
+            "net.java.dev.jna:jna:5.14.0",
+            "net/java/dev/jna/jna/5.14.0/jna-5.14.0.jar",
+            "https://repo1.maven.org/maven2/net/java/dev/jna/jna/5.14.0/jna-5.14.0.jar",
+            "67bf3eaea4f0718cb376a181a629e5f88fa1c9dd",
+        ));
+    }
+    if coord.starts_with("net.java.dev.jna:jna-platform:")
+        && (major < 5 || (major == 5 && minor < 14))
+    {
+        return Some((
+            "net.java.dev.jna:jna-platform:5.14.0",
+            "net/java/dev/jna/jna-platform/5.14.0/jna-platform-5.14.0.jar",
+            "https://repo1.maven.org/maven2/net/java/dev/jna/jna-platform/5.14.0/jna-platform-5.14.0.jar",
+            "28934d48aed814f11e4c584da55c49fa7032b31b",
         ));
     }
     if coord.starts_with("com.github.oshi:oshi-core:") && major == 6 && minor == 2 {

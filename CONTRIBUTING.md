@@ -6,7 +6,7 @@ Tài liệu này quy định quy trình thiết lập môi trường phát tri�
 
 ## 1. Yêu Cầu Môi Trường Phát Triển
 
-- **Rust Toolchain**: Dùng `stable` hiện hành, cài đặt kèm `clippy` và `rustfmt`. Mốc kiểm chứng Windows ngày 08/11/2026 dùng `rustc 1.99.1`; chưa có MSRV được khai báo/kiểm thử cho toàn bộ dependency:
+- **Rust Toolchain**: Dùng `stable` hiện hành, cài đặt kèm `clippy` và `rustfmt`. Mốc kiểm chứng bản `v1.0.1` trên Windows ngày 09/11/2026 dùng `rustc 1.99.1`; chưa có MSRV được khai báo/kiểm thử cho toàn bộ dependency:
   ```bash
   rustup update stable
   rustup component add clippy rustfmt
@@ -54,7 +54,7 @@ cargo build --release -p thk-app
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android-apk.ps1 -Profile release
 ```
 
-Quy trình chi tiết, lệnh live Modrinth và phạm vi xác minh nằm trong [docs/TESTING.md](docs/TESTING.md). Tại mốc 08/11/2026, Windows đạt **160 passed, 0 failed, 1 ignored** (bao gồm 22 ảnh golden `egui_kittest` khớp `0 failed pixels`), `cargo fmt --all -- --check` đạt `0 diff` toàn workspace, doc-tests, Clippy (cả host lẫn `--target aarch64-linux-android`) và build Release Desktop / Android APK đều đạt. Test bị ignore cần mạng, chạy riêng; số lượng test không phải bằng chứng mọi tính năng đã chạy đầu-cuối.
+Quy trình chi tiết, lệnh live Modrinth và phạm vi xác minh nằm trong [docs/TESTING.md](docs/TESTING.md). Tại mốc `v1.0.1` ngày 09/11/2026, Windows đạt **175 passed, 0 failed, 1 ignored** (bao gồm 22 ảnh golden `egui_kittest` khớp `0 failed pixels`), `cargo fmt --all -- --check` đạt `0 diff` toàn workspace, doc-tests, Clippy (cả host lẫn `--target aarch64-linux-android`) và build Release Desktop / Android APK đều đạt. Test bị ignore cần mạng, chạy riêng; số lượng test không phải bằng chứng mọi tính năng đã chạy đầu-cuối.
 
 - Kiểm tra `git -c core.autocrlf=false diff --check` trước khi gửi thay đổi.
 - Chạy `cargo fmt --all -- --check` để đảm bảo toàn bộ tệp `.rs` trong workspace tuân thủ `rustfmt` chuẩn.
@@ -84,7 +84,7 @@ Quy trình chi tiết, lệnh live Modrinth và phạm vi xác minh nằm trong 
 
 Quy trình `.github/workflows/release.yml` tự động vận hành qua 4 job để kiểm định và xuất bản đầy đủ **6 nền tảng phát hành** khớp với `updater::expected_asset_name_for`:
 
-1. **`quality-gate`**: Chạy song song trên cả **`ubuntu-24.04`** và **`windows-latest`** với các cổng bắt buộc: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` và `cargo test --workspace -- --test-threads=1` (trên runner Windows Server dùng `--skip views::servers::visual_tests::visual_` để thực thi toàn bộ 156 bài kiểm thử đơn vị/giao dịch/PowerShell self-updater/`egui_kittest` bounds/AccessKit và tách riêng 4 hàm so khớp pixel `threshold(0.0)` của 22 ảnh golden vốn phụ thuộc bản sửa đổi font hệ thống/GPU driver máy trạm cục bộ theo `crates/thk-app/tests/README.md`).
+1. **`quality-gate`**: Chạy song song trên cả **`ubuntu-24.04`** và **`windows-latest`** với các cổng bắt buộc: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` và `cargo test --workspace -- --test-threads=1` (trên runner Windows Server dùng `--skip views::servers::visual_tests::visual_` để thực thi toàn bộ 171 bài kiểm thử đơn vị/giao dịch/PowerShell self-updater/`egui_kittest` bounds/AccessKit và tách riêng 4 hàm so khớp pixel `threshold(0.0)` của 22 ảnh golden vốn phụ thuộc bản sửa đổi font hệ thống/GPU driver máy trạm cục bộ theo `crates/thk-app/tests/README.md`).
 2. **`build-matrix`** *(5 nền tảng Desktop)*: Sau khi vượt qua `quality-gate`, biên dịch song song các tệp thực thi tối ưu hóa Release:
    - `trihienkun-laucher-windows-x64.exe` (`x86_64-pc-windows-msvc` trên `windows-latest`)
    - `trihienkun-laucher-linux-x64` (`x86_64-unknown-linux-gnu` trên `ubuntu-24.04`)

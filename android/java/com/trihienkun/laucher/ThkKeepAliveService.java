@@ -8,22 +8,20 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.PixelFormat;
-import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
-import android.widget.TextView;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -88,12 +86,12 @@ public final class ThkKeepAliveService extends Service {
             }
             if (ACTION_OPEN_HUB.equals(action)) {
                 writeFocusMode("hub");
-                bringLauncherToFront();
+                bringLauncherToFront("hub");
                 return START_STICKY;
             }
             if (ACTION_RESUME_GAME.equals(action)) {
                 writeFocusMode("game");
-                bringLauncherToFront();
+                bringLauncherToFront("game");
                 return START_STICKY;
             }
 
@@ -217,6 +215,7 @@ public final class ThkKeepAliveService extends Service {
         }
     }
 
+    @SuppressWarnings("deprecation")
     private void promoteForeground(String statusText) {
         int piFlags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
 
@@ -238,11 +237,11 @@ public final class ThkKeepAliveService extends Service {
             : new Notification.Builder(this);
 
         builder.setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("TriHienKun Laucher — Chạy ngầm giữ mạng")
+            .setContentTitle("TriHienKun Laucher - Chạy ngầm giữ mạng")
             .setContentText(statusText)
             .setOngoing(true)
             .setContentIntent(contentPending)
-            .addAction(new Notification.Action.Builder(null, "Mở HUB UI", hubPending).build())
+            .addAction(new Notification.Action.Builder(null, "Mở Launcher", hubPending).build())
             .addAction(new Notification.Action.Builder(null, "Màn hình Game", gamePending).build())
             .addAction(new Notification.Action.Builder(null, "Tắt chạy ngầm", stopPending).build());
 
@@ -261,26 +260,16 @@ public final class ThkKeepAliveService extends Service {
         }
     }
 
+    @SuppressWarnings("deprecation")
     private void ensureOverlayOrb() {
         if (overlayOrb != null || windowManager == null || !Settings.canDrawOverlays(this)) {
             return;
         }
         DisplayMetrics dm = getResources().getDisplayMetrics();
         float density = dm.density;
-        int orbSize = dp(40, density);
+        int orbSize = dp(48, density);
 
-        TextView orb = new TextView(this);
-        orb.setText("THK");
-        orb.setTextColor(Color.WHITE);
-        orb.setTypeface(Typeface.DEFAULT_BOLD);
-        orb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        orb.setGravity(Gravity.CENTER);
-
-        GradientDrawable orbBg = new GradientDrawable();
-        orbBg.setShape(GradientDrawable.OVAL);
-        orbBg.setColor(Color.argb(230, 16, 185, 129));
-        orbBg.setStroke(dp(2, density), Color.argb(235, 110, 231, 183));
-        orb.setBackground(orbBg);
+        View orb = new OrbIconView(this, density);
 
         int overlayType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -331,7 +320,7 @@ public final class ThkKeepAliveService extends Service {
                         return true;
                     case MotionEvent.ACTION_UP:
                         if (!dragged) {
-                            bringLauncherToFront();
+                            bringLauncherToFront(null);
                         }
                         return true;
                     default:
@@ -381,10 +370,13 @@ public final class ThkKeepAliveService extends Service {
         }
     }
 
-    private void bringLauncherToFront() {
+    private void bringLauncherToFront(String focusMode) {
         try {
             Intent intent = new Intent(this, MainActivity.class);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            if (focusMode != null && !focusMode.isEmpty()) {
+                intent.putExtra("thk_focus_mode", focusMode);
+            }
             startActivity(intent);
         } catch (Throwable ignored) {
         }
@@ -392,5 +384,51 @@ public final class ThkKeepAliveService extends Service {
 
     private static int dp(int value, float density) {
         return Math.max(1, Math.round(value * density));
+    }
+
+    private static final class OrbIconView extends View {
+        private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint outerRingPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint innerRingPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint corePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float outerStrokePx;
+        private final float innerRadiusPx;
+        private final float coreRadiusPx;
+
+        OrbIconView(Context context, float density) {
+            super(context);
+            outerStrokePx = Math.max(1.5f, 1.8f * density);
+            innerRadiusPx = 11.0f * density;
+            coreRadiusPx = 4.6f * density;
+
+            fillPaint.setStyle(Paint.Style.FILL);
+            fillPaint.setColor(Color.argb(228, 12, 24, 21));
+
+            outerRingPaint.setStyle(Paint.Style.STROKE);
+            outerRingPaint.setStrokeWidth(outerStrokePx);
+            outerRingPaint.setColor(Color.argb(238, 52, 211, 153));
+
+            innerRingPaint.setStyle(Paint.Style.STROKE);
+            innerRingPaint.setStrokeWidth(Math.max(1.2f, 1.4f * density));
+            innerRingPaint.setColor(Color.argb(165, 110, 231, 183));
+
+            corePaint.setStyle(Paint.Style.FILL);
+            corePaint.setColor(Color.argb(245, 167, 243, 208));
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float cx = getWidth() * 0.5f;
+            float cy = getHeight() * 0.5f;
+            float outerRadius = Math.min(cx, cy) - outerStrokePx * 0.5f - 1.0f;
+            if (outerRadius <= 0f) {
+                return;
+            }
+            canvas.drawCircle(cx, cy, outerRadius, fillPaint);
+            canvas.drawCircle(cx, cy, outerRadius, outerRingPaint);
+            canvas.drawCircle(cx, cy, Math.min(innerRadiusPx, outerRadius * 0.55f), innerRingPaint);
+            canvas.drawCircle(cx, cy, Math.min(coreRadiusPx, outerRadius * 0.24f), corePaint);
+        }
     }
 }

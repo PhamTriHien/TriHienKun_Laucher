@@ -76,20 +76,9 @@ fn content_kind_label(app: &LauncherAppState, kind: ContentKind) -> &'static str
 }
 
 pub fn render_modpacks_view(app: &mut LauncherAppState, ui: &mut egui::Ui) {
-    render_top_command_bar(app, ui);
-    ui.add_space(6.0);
-
     if app.modpacks.detail_loading || app.modpacks.selected.is_some() {
         render_project_detail_view(app, ui);
         return;
-    }
-
-    if matches!(
-        app.modpacks.provider,
-        ProviderSource::Modrinth | ProviderSource::CurseForge
-    ) {
-        render_content_subtabs(app, ui);
-        ui.add_space(6.0);
     }
 
     let is_wide_filters = ui.available_width() >= 680.0;
@@ -116,21 +105,37 @@ pub fn render_modpacks_view(app: &mut LauncherAppState, ui: &mut egui::Ui) {
             }))
             .show(ui, |ui| {
                 crate::views::locked_panel_body(ui, |ui| {
-                    render_filter_sidebar(app, ui);
+                    render_filter_sidebar(app, ui, true);
                 });
             });
-    } else if !is_wide_filters && app.detached.compact_modpack_filters_open {
-        ScrollArea::vertical()
-            .id_salt("thk_compact_modpack_filters_drawer")
-            .max_height(210.0)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                render_filter_sidebar(app, ui);
-            });
-        ui.add_space(6.0);
     }
 
-    render_results_workspace(app, ui);
+    let scroll_w = ui.available_width();
+    ScrollArea::vertical()
+        .id_salt("modpacks_workspace_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_max_width(scroll_w);
+            render_top_command_bar(app, ui);
+            ui.add_space(6.0);
+
+            if matches!(
+                app.modpacks.provider,
+                ProviderSource::Modrinth | ProviderSource::CurseForge
+            ) {
+                render_content_subtabs(app, ui);
+                ui.add_space(6.0);
+            }
+
+            if !is_wide_filters && app.detached.compact_modpack_filters_open {
+                ui.push_id("thk_compact_modpack_filters_drawer", |ui| {
+                    render_filter_sidebar(app, ui, false);
+                });
+                ui.add_space(6.0);
+            }
+
+            render_results_workspace(app, ui);
+        });
 }
 
 fn render_top_command_bar(app: &mut LauncherAppState, ui: &mut egui::Ui) {
@@ -343,7 +348,7 @@ fn render_content_subtabs(app: &mut LauncherAppState, ui: &mut egui::Ui) {
     });
 }
 
-fn render_filter_sidebar(app: &mut LauncherAppState, ui: &mut egui::Ui) {
+fn render_filter_sidebar(app: &mut LauncherAppState, ui: &mut egui::Ui, scrollable: bool) {
     let p_col = provider_accent(app.modpacks.provider);
     let supports_loader = matches!(
         app.modpacks.content_kind,
@@ -360,261 +365,255 @@ fn render_filter_sidebar(app: &mut LauncherAppState, ui: &mut egui::Ui) {
         p_col,
         Margin::symmetric(12, 10),
         |ui| {
-            ui.set_width(ui.available_width());
-            ScrollArea::vertical()
-                .id_salt("modpacks_sidebar_scroll")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let (ic_r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                        paint_vector_icon(ui.painter(), ic_r, VectorIcon::Sliders, p_col);
-                        ui.label(
-                            RichText::new(app.i18n.tr("Bộ lọc thông minh", "Smart Filters"))
-                                .size(13.5)
-                                .strong(),
-                        );
-                    });
+            let inner_w = ui.available_width();
+            ui.set_width(inner_w);
+            let mut render_body = |ui: &mut egui::Ui| {
+                ui.set_max_width(inner_w);
+                ui.horizontal(|ui| {
+                    let (ic_r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                    paint_vector_icon(ui.painter(), ic_r, VectorIcon::Sliders, p_col);
+                    ui.label(
+                        RichText::new(app.i18n.tr("Bộ lọc thông minh", "Smart Filters"))
+                            .size(13.5)
+                            .strong(),
+                    );
+                });
 
-                    let has_any = !app.modpacks.query.trim().is_empty()
-                        || !app.modpacks.mc_version_filter.trim().is_empty()
-                        || app.modpacks.loader_filter.is_some()
-                        || app.modpacks.sort != SearchSort::Downloads;
+                let has_any = !app.modpacks.query.trim().is_empty()
+                    || !app.modpacks.mc_version_filter.trim().is_empty()
+                    || app.modpacks.loader_filter.is_some()
+                    || app.modpacks.sort != SearchSort::Downloads;
 
-                    if has_any {
-                        ui.add_space(4.0);
-                        let w = ui.available_width();
-                        if tactile_button_3d(
-                            ui,
-                            Some(VectorIcon::Refresh),
-                            app.i18n.tr("Đặt lại bộ lọc", "Reset filters"),
-                            ButtonStyle3d::SecondaryGlass,
-                            vec2(w, 28.0),
-                        )
-                        .clicked()
-                        {
-                            app.click_sfx();
-                            app.reset_modpack_filters();
-                        }
+                if has_any {
+                    ui.add_space(4.0);
+                    let w = ui.available_width();
+                    if tactile_button_3d(
+                        ui,
+                        Some(VectorIcon::Refresh),
+                        app.i18n.tr("Đặt lại bộ lọc", "Reset filters"),
+                        ButtonStyle3d::SecondaryGlass,
+                        vec2(w, 28.0),
+                    )
+                    .clicked()
+                    {
+                        app.click_sfx();
+                        app.reset_modpack_filters();
                     }
+                }
 
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                ui.label(
+                    RichText::new(app.i18n.tr("Sắp xếp theo", "Sort by"))
+                        .size(11.8)
+                        .weak()
+                        .strong(),
+                );
+                ui.add_space(4.0);
+
+                let sorts = [
+                    (
+                        SearchSort::Downloads,
+                        app.i18n.tr("Lượt tải cao nhất", "Most Downloads"),
+                    ),
+                    (
+                        SearchSort::Relevance,
+                        app.i18n.tr("Độ liên quan", "Relevance"),
+                    ),
+                    (
+                        SearchSort::Updated,
+                        app.i18n.tr("Mới cập nhật", "Recently Updated"),
+                    ),
+                    (SearchSort::Newest, app.i18n.tr("Mới phát hành", "Newest")),
+                ];
+
+                for (srt, label) in sorts {
+                    let active = app.modpacks.sort == srt;
+                    let style = if active {
+                        ButtonStyle3d::PrimaryEmerald
+                    } else {
+                        ButtonStyle3d::SecondaryGlass
+                    };
+                    if tactile_button_3d(ui, None, label, style, vec2(ui.available_width(), 27.0))
+                        .clicked()
+                        && !active
+                    {
+                        app.click_sfx();
+                        app.modpacks.sort = srt;
+                        app.search_modpacks();
+                    }
+                    ui.add_space(2.0);
+                }
+
+                if supports_loader {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(6.0);
-
                     ui.label(
-                        RichText::new(app.i18n.tr("Sắp xếp theo", "Sort by"))
+                        RichText::new(app.i18n.tr("Trình nạp Mod (Loader)", "Mod Loader"))
                             .size(11.8)
                             .weak()
                             .strong(),
                     );
                     ui.add_space(4.0);
 
-                    let sorts = [
-                        (
-                            SearchSort::Downloads,
-                            app.i18n.tr("Lượt tải cao nhất", "Most Downloads"),
-                        ),
-                        (
-                            SearchSort::Relevance,
-                            app.i18n.tr("Độ liên quan", "Relevance"),
-                        ),
-                        (
-                            SearchSort::Updated,
-                            app.i18n.tr("Mới cập nhật", "Recently Updated"),
-                        ),
-                        (SearchSort::Newest, app.i18n.tr("Mới phát hành", "Newest")),
+                    let loaders: [(Option<LoaderType>, &str); 5] = [
+                        (None, app.i18n.tr("Tất cả Loader", "All Loaders")),
+                        (Some(LoaderType::Fabric), "Fabric"),
+                        (Some(LoaderType::Forge), "Forge"),
+                        (Some(LoaderType::NeoForge), "NeoForge"),
+                        (Some(LoaderType::Quilt), "Quilt"),
                     ];
 
-                    for (srt, label) in sorts {
-                        let active = app.modpacks.sort == srt;
+                    for (ldr_opt, lbl) in loaders {
+                        let active = app.modpacks.loader_filter == ldr_opt;
                         let style = if active {
-                            ButtonStyle3d::PrimaryEmerald
+                            ButtonStyle3d::AccentViolet
                         } else {
                             ButtonStyle3d::SecondaryGlass
                         };
-                        if tactile_button_3d(
-                            ui,
-                            None,
-                            label,
-                            style,
-                            vec2(ui.available_width(), 27.0),
-                        )
-                        .clicked()
+                        if tactile_button_3d(ui, None, lbl, style, vec2(ui.available_width(), 27.0))
+                            .clicked()
                             && !active
                         {
                             app.click_sfx();
-                            app.modpacks.sort = srt;
+                            app.modpacks.loader_filter = ldr_opt;
                             app.search_modpacks();
                         }
                         ui.add_space(2.0);
                     }
+                }
 
-                    if supports_loader {
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new(app.i18n.tr("Trình nạp Mod (Loader)", "Mod Loader"))
-                                .size(11.8)
-                                .weak()
-                                .strong(),
-                        );
-                        ui.add_space(4.0);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+                let mc_ver_lbl = ui.label(
+                    RichText::new(app.i18n.tr("Phiên bản Minecraft", "Minecraft Version"))
+                        .size(11.8)
+                        .weak()
+                        .strong(),
+                );
+                ui.add_space(4.0);
 
-                        let loaders: [(Option<LoaderType>, &str); 5] = [
-                            (None, app.i18n.tr("Tất cả Loader", "All Loaders")),
-                            (Some(LoaderType::Fabric), "Fabric"),
-                            (Some(LoaderType::Forge), "Forge"),
-                            (Some(LoaderType::NeoForge), "NeoForge"),
-                            (Some(LoaderType::Quilt), "Quilt"),
-                        ];
-
-                        for (ldr_opt, lbl) in loaders {
-                            let active = app.modpacks.loader_filter == ldr_opt;
-                            let style = if active {
-                                ButtonStyle3d::AccentViolet
-                            } else {
-                                ButtonStyle3d::SecondaryGlass
-                            };
-                            if tactile_button_3d(
-                                ui,
-                                None,
-                                lbl,
-                                style,
-                                vec2(ui.available_width(), 27.0),
-                            )
-                            .clicked()
-                                && !active
-                            {
-                                app.click_sfx();
-                                app.modpacks.loader_filter = ldr_opt;
-                                app.search_modpacks();
-                            }
-                            ui.add_space(2.0);
-                        }
-                    }
-
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-                    let mc_ver_lbl = ui.label(
-                        RichText::new(app.i18n.tr("Phiên bản Minecraft", "Minecraft Version"))
-                            .size(11.8)
-                            .weak()
-                            .strong(),
-                    );
-                    ui.add_space(4.0);
-
-                    let current_group_lbl = MC_MAJOR_FAMILIES
-                        .iter()
-                        .find(|(k, _)| *k == app.modpacks.mc_group_filter)
-                        .map(|(k, vi_lbl)| {
-                            if *k == "all" {
-                                app.i18n.tr(vi_lbl, "All branches")
-                            } else {
-                                vi_lbl
-                            }
-                        })
-                        .unwrap_or("All");
-
-                    let fam_combo = egui::ComboBox::from_id_salt("modpacks_mc_family_combo")
-                        .width(ui.available_width())
-                        .truncate()
-                        .selected_text(current_group_lbl)
-                        .show_ui(ui, |ui| {
-                            for &(fam_key, fam_vi) in MC_MAJOR_FAMILIES {
-                                let txt = if fam_key == "all" {
-                                    app.i18n.tr(fam_vi, "All branches")
-                                } else {
-                                    fam_vi
-                                };
-                                ui.selectable_value(
-                                    &mut app.modpacks.mc_group_filter,
-                                    fam_key.to_string(),
-                                    txt,
-                                );
-                            }
-                        });
-                    fam_combo.response.labelled_by(mc_ver_lbl.id);
-
-                    ui.add_space(4.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut app.modpacks.mc_version_search)
-                            .hint_text(
-                                app.i18n
-                                    .tr("Lọc nhanh (VD: 1.20.1)...", "Filter (e.g. 1.20.1)..."),
-                            )
-                            .desired_width(ui.available_width()),
-                    );
-                    ui.add_space(4.0);
-
-                    let all_ver_active = app.modpacks.mc_version_filter.trim().is_empty();
-                    if tactile_button_3d(
-                        ui,
-                        None,
-                        app.i18n.tr("Mọi phiên bản MC", "Any MC Version"),
-                        if all_ver_active {
-                            ButtonStyle3d::PrimaryEmerald
+                let current_group_lbl = MC_MAJOR_FAMILIES
+                    .iter()
+                    .find(|(k, _)| *k == app.modpacks.mc_group_filter)
+                    .map(|(k, vi_lbl)| {
+                        if *k == "all" {
+                            app.i18n.tr(vi_lbl, "All branches")
                         } else {
-                            ButtonStyle3d::SecondaryGlass
-                        },
-                        vec2(ui.available_width(), 26.0),
-                    )
-                    .clicked()
-                        && !all_ver_active
+                            vi_lbl
+                        }
+                    })
+                    .unwrap_or("All");
+
+                let fam_combo = egui::ComboBox::from_id_salt("modpacks_mc_family_combo")
+                    .width(ui.available_width())
+                    .truncate()
+                    .selected_text(current_group_lbl)
+                    .show_ui(ui, |ui| {
+                        for &(fam_key, fam_vi) in MC_MAJOR_FAMILIES {
+                            let txt = if fam_key == "all" {
+                                app.i18n.tr(fam_vi, "All branches")
+                            } else {
+                                fam_vi
+                            };
+                            ui.selectable_value(
+                                &mut app.modpacks.mc_group_filter,
+                                fam_key.to_string(),
+                                txt,
+                            );
+                        }
+                    });
+                fam_combo.response.labelled_by(mc_ver_lbl.id);
+
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.modpacks.mc_version_search)
+                        .hint_text(
+                            app.i18n
+                                .tr("Lọc nhanh (VD: 1.20.1)...", "Filter (e.g. 1.20.1)..."),
+                        )
+                        .desired_width(ui.available_width()),
+                );
+                ui.add_space(4.0);
+
+                let all_ver_active = app.modpacks.mc_version_filter.trim().is_empty();
+                if tactile_button_3d(
+                    ui,
+                    None,
+                    app.i18n.tr("Mọi phiên bản MC", "Any MC Version"),
+                    if all_ver_active {
+                        ButtonStyle3d::PrimaryEmerald
+                    } else {
+                        ButtonStyle3d::SecondaryGlass
+                    },
+                    vec2(ui.available_width(), 26.0),
+                )
+                .clicked()
+                    && !all_ver_active
+                {
+                    app.click_sfx();
+                    app.modpacks.mc_version_filter.clear();
+                    app.search_modpacks();
+                }
+                ui.add_space(3.0);
+
+                let release_list: Vec<String> = if app.home.mojang_versions.is_empty() {
+                    FALLBACK_MC_RELEASES
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect()
+                } else {
+                    app.home
+                        .mojang_versions
+                        .iter()
+                        .filter(|v| v.release_type == "release")
+                        .map(|v| v.id.clone())
+                        .collect()
+                };
+
+                let fam = app.modpacks.mc_group_filter.clone();
+                let needle = app.modpacks.mc_version_search.trim().to_ascii_lowercase();
+
+                for ver_id in release_list
+                    .into_iter()
+                    .filter(|v| {
+                        let fam_ok = fam == "all" || v == &fam || v.starts_with(&format!("{fam}."));
+                        let search_ok =
+                            needle.is_empty() || v.to_ascii_lowercase().contains(&needle);
+                        fam_ok && search_ok
+                    })
+                    .take(28)
+                {
+                    let active = app.modpacks.mc_version_filter.trim() == ver_id;
+                    if ui
+                        .selectable_label(
+                            active,
+                            RichText::new(format!("Minecraft {ver_id}")).size(12.0),
+                        )
+                        .clicked()
                     {
                         app.click_sfx();
-                        app.modpacks.mc_version_filter.clear();
+                        if active {
+                            app.modpacks.mc_version_filter.clear();
+                        } else {
+                            app.modpacks.mc_version_filter = ver_id;
+                        }
                         app.search_modpacks();
                     }
-                    ui.add_space(3.0);
-
-                    let release_list: Vec<String> = if app.home.mojang_versions.is_empty() {
-                        FALLBACK_MC_RELEASES
-                            .iter()
-                            .map(|s| (*s).to_string())
-                            .collect()
-                    } else {
-                        app.home
-                            .mojang_versions
-                            .iter()
-                            .filter(|v| v.release_type == "release")
-                            .map(|v| v.id.clone())
-                            .collect()
-                    };
-
-                    let fam = app.modpacks.mc_group_filter.clone();
-                    let needle = app.modpacks.mc_version_search.trim().to_ascii_lowercase();
-
-                    for ver_id in release_list
-                        .into_iter()
-                        .filter(|v| {
-                            let fam_ok =
-                                fam == "all" || v == &fam || v.starts_with(&format!("{fam}."));
-                            let search_ok =
-                                needle.is_empty() || v.to_ascii_lowercase().contains(&needle);
-                            fam_ok && search_ok
-                        })
-                        .take(28)
-                    {
-                        let active = app.modpacks.mc_version_filter.trim() == ver_id;
-                        if ui
-                            .selectable_label(
-                                active,
-                                RichText::new(format!("Minecraft {ver_id}")).size(12.0),
-                            )
-                            .clicked()
-                        {
-                            app.click_sfx();
-                            if active {
-                                app.modpacks.mc_version_filter.clear();
-                            } else {
-                                app.modpacks.mc_version_filter = ver_id;
-                            }
-                            app.search_modpacks();
-                        }
-                    }
-                });
+                }
+            };
+            if scrollable {
+                ScrollArea::vertical()
+                    .id_salt("modpacks_sidebar_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, render_body);
+            } else {
+                render_body(ui);
+            }
         },
     );
 }
@@ -826,70 +825,66 @@ fn render_results_workspace(app: &mut LauncherAppState, ui: &mut egui::Ui) {
     let total_hits = app.modpacks.total_hits.max(hits.len());
     let total_pages = pagination_total_pages(total_hits, MODPACKS_PER_PAGE);
 
-    ScrollArea::vertical()
-        .id_salt("modpacks_showcase_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let start_idx = app.modpacks.page * MODPACKS_PER_PAGE + 1;
-                let end_idx = (start_idx + hits.len().saturating_sub(1)).min(total_hits);
-                ui.label(
-                    RichText::new(format!(
-                        "{} {start_idx}–{end_idx} / {} {} ({})",
-                        app.i18n.tr("Hiển thị", "Showing"),
-                        format_downloads(total_hits as u64),
-                        content_kind_label(app, app.modpacks.content_kind),
-                        app.modpacks.provider.display_name(),
-                    ))
-                    .size(12.0)
-                    .weak(),
-                );
-                if app.modpacks.searching {
-                    ui.spinner();
+    ui.horizontal_wrapped(|ui| {
+        let start_idx = app.modpacks.page * MODPACKS_PER_PAGE + 1;
+        let end_idx = (start_idx + hits.len().saturating_sub(1)).min(total_hits);
+        ui.label(
+            RichText::new(format!(
+                "{} {start_idx}–{end_idx} / {} {} ({})",
+                app.i18n.tr("Hiển thị", "Showing"),
+                format_downloads(total_hits as u64),
+                content_kind_label(app, app.modpacks.content_kind),
+                app.modpacks.provider.display_name(),
+            ))
+            .size(12.0)
+            .weak(),
+        );
+        if app.modpacks.searching {
+            ui.spinner();
+        }
+    });
+    ui.add_space(6.0);
+
+    if app.modpacks.view_grid {
+        let avail_w = ui.available_width();
+        let cols: usize = if avail_w >= 1440.0 {
+            4
+        } else if avail_w >= 960.0 {
+            3
+        } else if avail_w >= 540.0 {
+            2
+        } else {
+            1
+        };
+        let gap = 10.0;
+        let col_w = (avail_w - gap * (cols.saturating_sub(1) as f32)) / (cols as f32);
+
+        for row_hits in hits.chunks(cols) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for hit in row_hits {
+                    ui.allocate_ui_with_layout(
+                        vec2(col_w, 0.0),
+                        Layout::top_down(Align::LEFT),
+                        |ui| {
+                            ui.set_max_width(col_w);
+                            render_showcase_grid_card(app, ui, hit, col_w, prov_col);
+                        },
+                    );
                 }
             });
+            ui.add_space(8.0);
+        }
+    } else {
+        for hit in &hits {
+            render_showcase_list_card(app, ui, hit, prov_col);
             ui.add_space(6.0);
+        }
+    }
 
-            if app.modpacks.view_grid {
-                let avail_w = ui.available_width();
-                let cols: usize = if avail_w >= 1440.0 {
-                    4
-                } else if avail_w >= 960.0 {
-                    3
-                } else if avail_w >= 540.0 {
-                    2
-                } else {
-                    1
-                };
-                let gap = 10.0;
-                let col_w = (avail_w - gap * (cols.saturating_sub(1) as f32)) / (cols as f32);
-
-                for row_hits in hits.chunks(cols) {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = gap;
-                        for hit in row_hits {
-                            ui.allocate_ui_with_layout(
-                                vec2(col_w, 146.0),
-                                Layout::top_down(Align::LEFT),
-                                |ui| {
-                                    render_showcase_grid_card(app, ui, hit, col_w, prov_col);
-                                },
-                            );
-                        }
-                    });
-                    ui.add_space(8.0);
-                }
-            } else {
-                for hit in &hits {
-                    render_showcase_list_card(app, ui, hit, prov_col);
-                    ui.add_space(6.0);
-                }
-            }
-
-            ui.add_space(6.0);
-            render_pagination_footer(app, ui, hits.len(), total_hits, total_pages, prov_col);
-            ui.add_space(10.0);
-        });
+    ui.add_space(6.0);
+    render_pagination_footer(app, ui, hits.len(), total_hits, total_pages, prov_col);
+    ui.add_space(10.0);
 }
 
 fn render_showcase_grid_card(
@@ -1233,252 +1228,330 @@ fn render_pagination_footer(
     );
 }
 
-fn render_project_detail_view(app: &mut LauncherAppState, ui: &mut egui::Ui) {
-    if app.modpacks.detail_loading && app.modpacks.selected.is_none() {
-        let preview = app.modpacks.selected_preview.clone();
-        let p_col = preview
-            .as_ref()
-            .map(|p| provider_accent(p.provider))
-            .unwrap_or(ACCENT_EMERALD);
-
-        if secondary_icon_button(
-            ui,
-            VectorIcon::ArrowLeft,
-            app.i18n.tr("Quay lại danh sách", "Back to Catalog"),
-        )
-        .clicked()
-        {
-            app.click_sfx();
-            app.modpacks.detail_seq += 1;
-            app.modpacks.detail_loading = false;
-            app.modpacks.selected_preview = None;
-            return;
-        }
-
-        ui.add_space(10.0);
-        gaming_card_3d(
-            ui,
-            "modpacks_detail_loading_card",
-            true,
-            p_col,
-            Margin::symmetric(20, 28),
-            |ui| {
-                ui.set_width(ui.available_width());
-                ui.vertical_centered(|ui| {
-                    paint_icon_3d(ui, 64.0, Icon3dKind::ModpackCrate, true);
-                    ui.add_space(8.0);
-                    let title = preview
-                        .as_ref()
-                        .map(|p| p.title.as_str())
-                        .unwrap_or("Modpack");
-                    ui.heading(RichText::new(title).size(19.0).strong());
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new(app.i18n.tr(
-                            "Đang tải mô tả chi tiết, ảnh chụp màn hình và danh sách phiên bản...",
-                            "Loading full description, screenshots, and release versions...",
-                        ))
-                        .weak(),
-                    );
-                    ui.add_space(10.0);
-                    let t = ui.input(|i| i.time) as f32;
-                    let pulse = 0.3 + ((t * 2.1).sin() * 0.5 + 0.5) * 0.6;
-                    paint_glowing_progress_bar(ui, pulse, 300.0, 14.0);
-                });
-            },
-        );
-        return;
-    }
-
-    let Some((detail, versions)) = app.modpacks.selected.clone() else {
-        return;
-    };
-    let p_col = provider_accent(detail.summary.provider);
-
+fn render_detail_hero_badges(
+    app: &LauncherAppState,
+    ui: &mut egui::Ui,
+    detail: &ProjectDetail,
+    p_col: Color32,
+) {
     ui.horizontal_wrapped(|ui| {
-        if secondary_icon_button(
-            ui,
-            VectorIcon::ArrowLeft,
-            app.i18n.tr("Quay lại kho tìm kiếm", "Back to Catalog"),
-        )
-        .clicked()
-        {
-            app.click_sfx();
-            app.modpacks.selected = None;
-            app.modpacks.selected_preview = None;
-            app.modpacks.lightbox_idx = None;
-            return;
-        }
-
-        badge(ui, detail.summary.provider.display_name(), p_col);
-        badge(
-            ui,
-            content_kind_label(app, detail.summary.content_kind),
-            ACCENT_VIOLET,
-        );
-        if let Some(ref src_url) = detail.source_url {
-            if secondary_icon_button(
+        if detail.summary.downloads > 0 {
+            badge(
                 ui,
-                VectorIcon::Globe,
-                app.i18n.tr("Mở trang gốc", "Open Website"),
-            )
-            .clicked()
-            {
-                app.click_sfx();
-                let _ = crate::dialogs::open_external_url(src_url);
+                &format!(
+                    "{} {}",
+                    format_downloads(detail.summary.downloads),
+                    app.i18n.tr("lượt tải", "downloads")
+                ),
+                ACCENT_BLUE,
+            );
+        }
+        if let Some(dt) = short_date(detail.summary.updated_at.as_deref()) {
+            badge(
+                ui,
+                &format!("{}: {dt}", app.i18n.tr("Cập nhật", "Updated")),
+                ACCENT_CYAN,
+            );
+        }
+        for ldr in detail.loaders.iter().take(4) {
+            badge(ui, ldr, category_chip_color(ldr, p_col));
+        }
+        for cat in detail.summary.categories.iter().take(4) {
+            if !detail.loaders.iter().any(|l| l.eq_ignore_ascii_case(cat)) {
+                badge(ui, cat, category_chip_color(cat, p_col));
             }
         }
     });
+}
 
-    if app.modpacks.selected.is_none() {
-        return;
-    }
+fn render_project_detail_view(app: &mut LauncherAppState, ui: &mut egui::Ui) {
+    let scroll_w = ui.available_width();
+    ScrollArea::vertical()
+        .id_salt("modpack_detail_workspace_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_max_width(scroll_w);
+            render_top_command_bar(app, ui);
+            ui.add_space(6.0);
 
-    ui.add_space(6.0);
+            if app.modpacks.detail_loading && app.modpacks.selected.is_none() {
+                let preview = app.modpacks.selected_preview.clone();
+                let p_col = preview
+                    .as_ref()
+                    .map(|p| provider_accent(p.provider))
+                    .unwrap_or(ACCENT_EMERALD);
 
-    let hero_tex = detail
-        .summary
-        .icon_url
-        .as_deref()
-        .and_then(|u| app.request_modpack_texture(u, 192));
+                if secondary_icon_button(
+                    ui,
+                    VectorIcon::ArrowLeft,
+                    app.i18n.tr("Quay lại danh sách", "Back to Catalog"),
+                )
+                .clicked()
+                {
+                    app.click_sfx();
+                    app.modpacks.detail_seq += 1;
+                    app.modpacks.detail_loading = false;
+                    app.modpacks.selected_preview = None;
+                    return;
+                }
 
-    gaming_card_3d(
-        ui,
-        "modpack_detail_hero_stage",
-        true,
-        p_col,
-        Margin::symmetric(16, 12),
-        |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                paint_pack_thumbnail(ui, hero_tex.as_ref(), 74.0, p_col, true);
-                ui.add_space(8.0);
-
-                let info_w = (ui.available_width() - 205.0).max(180.0);
-                ui.vertical(|ui| {
-                    ui.set_max_width(info_w);
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    ui.horizontal_wrapped(|ui| {
-                        ui.heading(RichText::new(&detail.summary.title).size(20.0).strong());
-                        if !detail.summary.author.trim().is_empty() {
+                ui.add_space(10.0);
+                gaming_card_3d(
+                    ui,
+                    "modpacks_detail_loading_card",
+                    true,
+                    p_col,
+                    Margin::symmetric(20, 28),
+                    |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.vertical_centered(|ui| {
+                            paint_icon_3d(ui, 64.0, Icon3dKind::ModpackCrate, true);
+                            ui.add_space(8.0);
+                            let title = preview
+                                .as_ref()
+                                .map(|p| p.title.as_str())
+                                .unwrap_or("Modpack");
+                            ui.heading(RichText::new(title).size(19.0).strong());
+                            ui.add_space(4.0);
                             ui.label(
-                                RichText::new(format!(
-                                    "{} {}",
-                                    app.i18n.tr("bởi", "by"),
-                                    detail.summary.author
+                                RichText::new(app.i18n.tr(
+                                    "Đang tải mô tả chi tiết, ảnh chụp màn hình và danh sách phiên bản...",
+                                    "Loading full description, screenshots, and release versions...",
                                 ))
-                                .size(13.0)
                                 .weak(),
                             );
-                        }
-                    });
+                            ui.add_space(10.0);
+                            let t = ui.input(|i| i.time) as f32;
+                            let pulse = 0.3 + ((t * 2.1).sin() * 0.5 + 0.5) * 0.6;
+                            let prog_w = 300.0_f32.min((ui.available_width() - 16.0).max(80.0));
+                            paint_glowing_progress_bar(ui, pulse, prog_w, 14.0);
+                        });
+                    },
+                );
+                return;
+            }
 
-                    if !detail.summary.summary.trim().is_empty() {
-                        ui.label(
-                            RichText::new(truncate_chars(&detail.summary.summary, 220))
-                                .size(12.5)
-                                .weak(),
-                        );
+            let Some((detail, versions)) = app.modpacks.selected.clone() else {
+                return;
+            };
+            let p_col = provider_accent(detail.summary.provider);
+
+            ui.horizontal_wrapped(|ui| {
+                if secondary_icon_button(
+                    ui,
+                    VectorIcon::ArrowLeft,
+                    app.i18n.tr("Quay lại kho tìm kiếm", "Back to Catalog"),
+                )
+                .clicked()
+                {
+                    app.click_sfx();
+                    app.modpacks.selected = None;
+                    app.modpacks.selected_preview = None;
+                    app.modpacks.lightbox_idx = None;
+                    return;
+                }
+
+                badge(ui, detail.summary.provider.display_name(), p_col);
+                badge(
+                    ui,
+                    content_kind_label(app, detail.summary.content_kind),
+                    ACCENT_VIOLET,
+                );
+                if let Some(ref src_url) = detail.source_url {
+                    if secondary_icon_button(
+                        ui,
+                        VectorIcon::Globe,
+                        app.i18n.tr("Mở trang gốc", "Open Website"),
+                    )
+                    .clicked()
+                    {
+                        app.click_sfx();
+                        let _ = crate::dialogs::open_external_url(src_url);
                     }
+                }
+            });
 
-                    ui.horizontal_wrapped(|ui| {
-                        if detail.summary.downloads > 0 {
-                            badge(
-                                ui,
-                                &format!(
-                                    "{} {}",
-                                    format_downloads(detail.summary.downloads),
-                                    app.i18n.tr("lượt tải", "downloads")
-                                ),
-                                ACCENT_BLUE,
-                            );
-                        }
-                        if let Some(dt) = short_date(detail.summary.updated_at.as_deref()) {
-                            badge(
-                                ui,
-                                &format!("{}: {dt}", app.i18n.tr("Cập nhật", "Updated")),
-                                ACCENT_CYAN,
-                            );
-                        }
-                        for ldr in detail.loaders.iter().take(4) {
-                            badge(ui, ldr, category_chip_color(ldr, p_col));
-                        }
-                        for cat in detail.summary.categories.iter().take(4) {
-                            if !detail.loaders.iter().any(|l| l.eq_ignore_ascii_case(cat)) {
-                                badge(ui, cat, category_chip_color(cat, p_col));
-                            }
-                        }
-                    });
-                });
+            if app.modpacks.selected.is_none() {
+                return;
+            }
 
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_space(6.0);
+
+            let hero_tex = detail
+                .summary
+                .icon_url
+                .as_deref()
+                .and_then(|u| app.request_modpack_texture(u, 192));
+
+            gaming_card_3d(
+                ui,
+                "modpack_detail_hero_stage",
+                true,
+                p_col,
+                Margin::symmetric(16, 12),
+                |ui| {
+                    let stage_w = ui.available_width();
+                    ui.set_width(stage_w);
                     let cta_label = if detail.summary.content_kind == ContentKind::Modpack {
                         app.i18n.tr("Cài đặt Modpack", "Install Modpack")
                     } else {
                         app.i18n.tr("Cài vào Profile", "Install to Profile")
                     };
-                    if tactile_button_3d(
-                        ui,
-                        Some(VectorIcon::Download),
-                        cta_label,
-                        ButtonStyle3d::HeroLaunch,
-                        vec2(182.0, 42.0),
-                    )
-                    .clicked()
-                    {
-                        app.click_sfx();
-                        app.open_modpack_install_modal(None);
+
+                    if stage_w < 500.0 {
+                        ui.horizontal(|ui| {
+                            paint_pack_thumbnail(ui, hero_tex.as_ref(), 60.0, p_col, true);
+                            ui.add_space(6.0);
+                            let title_w = ui.available_width().max(80.0);
+                            ui.vertical(|ui| {
+                                ui.set_max_width(title_w);
+                                ui.spacing_mut().item_spacing.y = 3.0;
+                                crate::views::bounded_wrap_label(
+                                    ui,
+                                    RichText::new(&detail.summary.title).size(18.0).strong(),
+                                    title_w,
+                                );
+                                if !detail.summary.author.trim().is_empty() {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} {}",
+                                            app.i18n.tr("bởi", "by"),
+                                            detail.summary.author
+                                        ))
+                                        .size(12.5)
+                                        .weak(),
+                                    );
+                                }
+                            });
+                        });
+                        if !detail.summary.summary.trim().is_empty() {
+                            ui.add_space(4.0);
+                            crate::views::bounded_wrap_label(
+                                ui,
+                                RichText::new(truncate_chars(&detail.summary.summary, 220))
+                                    .size(12.5)
+                                    .weak(),
+                                stage_w,
+                            );
+                        }
+                        ui.add_space(4.0);
+                        render_detail_hero_badges(app, ui, &detail, p_col);
+                        ui.add_space(8.0);
+                        let btn_w = stage_w.clamp(120.0, 240.0);
+                        if tactile_button_3d(
+                            ui,
+                            Some(VectorIcon::Download),
+                            cta_label,
+                            ButtonStyle3d::HeroLaunch,
+                            vec2(btn_w, 40.0),
+                        )
+                        .clicked()
+                        {
+                            app.click_sfx();
+                            app.open_modpack_install_modal(None);
+                        }
+                    } else {
+                        ui.horizontal(|ui| {
+                            paint_pack_thumbnail(ui, hero_tex.as_ref(), 74.0, p_col, true);
+                            ui.add_space(8.0);
+
+                            let info_w = (ui.available_width() - 205.0).max(160.0);
+                            ui.vertical(|ui| {
+                                ui.set_max_width(info_w);
+                                ui.spacing_mut().item_spacing.y = 4.0;
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.heading(
+                                        RichText::new(&detail.summary.title).size(20.0).strong(),
+                                    );
+                                    if !detail.summary.author.trim().is_empty() {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} {}",
+                                                app.i18n.tr("bởi", "by"),
+                                                detail.summary.author
+                                            ))
+                                            .size(13.0)
+                                            .weak(),
+                                        );
+                                    }
+                                });
+
+                                if !detail.summary.summary.trim().is_empty() {
+                                    ui.label(
+                                        RichText::new(truncate_chars(&detail.summary.summary, 220))
+                                            .size(12.5)
+                                            .weak(),
+                                    );
+                                }
+
+                                render_detail_hero_badges(app, ui, &detail, p_col);
+                            });
+
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if tactile_button_3d(
+                                    ui,
+                                    Some(VectorIcon::Download),
+                                    cta_label,
+                                    ButtonStyle3d::HeroLaunch,
+                                    vec2(182.0, 42.0),
+                                )
+                                .clicked()
+                                {
+                                    app.click_sfx();
+                                    app.open_modpack_install_modal(None);
+                                }
+                            });
+                        });
                     }
-                });
-            });
-        },
-    );
+                },
+            );
 
-    ui.add_space(8.0);
+            ui.add_space(8.0);
 
-    let detail_tabs = [
-        (
-            ModpackDetailTab::Overview,
-            VectorIcon::Sparkles,
-            app.i18n.tr("Mô tả chi tiết", "Overview").to_string(),
-        ),
-        (
-            ModpackDetailTab::Versions,
-            VectorIcon::Download,
-            format!(
-                "{} ({})",
-                app.i18n.tr("Phiên bản", "Versions"),
-                versions.len()
-            ),
-        ),
-        (
-            ModpackDetailTab::Gallery,
-            VectorIcon::Image,
-            format!(
-                "{} ({})",
-                app.i18n.tr("Thư viện ảnh", "Gallery"),
-                detail.gallery.len()
-            ),
-        ),
-    ];
+            let detail_tabs = [
+                (
+                    ModpackDetailTab::Overview,
+                    VectorIcon::Sparkles,
+                    app.i18n.tr("Mô tả chi tiết", "Overview").to_string(),
+                ),
+                (
+                    ModpackDetailTab::Versions,
+                    VectorIcon::Download,
+                    format!(
+                        "{} ({})",
+                        app.i18n.tr("Phiên bản", "Versions"),
+                        versions.len()
+                    ),
+                ),
+                (
+                    ModpackDetailTab::Gallery,
+                    VectorIcon::Image,
+                    format!(
+                        "{} ({})",
+                        app.i18n.tr("Thư viện ảnh", "Gallery"),
+                        detail.gallery.len()
+                    ),
+                ),
+            ];
 
-    if let Some(next_tab) = sliding_pill_tabs(
-        ui,
-        "modpack_detail_subtabs_pill",
-        &detail_tabs,
-        app.modpacks.detail_tab,
-    ) {
-        app.click_sfx();
-        app.modpacks.detail_tab = next_tab;
-    }
+            if let Some(next_tab) = sliding_pill_tabs(
+                ui,
+                "modpack_detail_subtabs_pill",
+                &detail_tabs,
+                app.modpacks.detail_tab,
+            ) {
+                app.click_sfx();
+                app.modpacks.detail_tab = next_tab;
+            }
 
-    ui.add_space(8.0);
+            ui.add_space(8.0);
 
-    match app.modpacks.detail_tab {
-        ModpackDetailTab::Overview => render_detail_overview_tab(app, ui, &detail, p_col),
-        ModpackDetailTab::Versions => render_detail_versions_tab(app, ui, &versions, p_col),
-        ModpackDetailTab::Gallery => render_detail_gallery_tab(app, ui, &detail, p_col),
-    }
+            match app.modpacks.detail_tab {
+                ModpackDetailTab::Overview => render_detail_overview_tab(app, ui, &detail, p_col),
+                ModpackDetailTab::Versions => render_detail_versions_tab(app, ui, &versions, p_col),
+                ModpackDetailTab::Gallery => render_detail_gallery_tab(app, ui, &detail, p_col),
+            }
+        });
 }
 
 fn render_detail_overview_tab(
@@ -1488,23 +1561,18 @@ fn render_detail_overview_tab(
     p_col: Color32,
 ) {
     let md_body = normalize_project_markdown(&detail.body_markdown, &detail.summary.summary);
-    ScrollArea::vertical()
-        .id_salt("modpack_detail_md_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            gaming_card_3d(
-                ui,
-                "modpack_detail_md_card",
-                false,
-                p_col,
-                Margin::same(16),
-                |ui| {
-                    ui.set_width(ui.available_width());
-                    CommonMarkViewer::new().show(ui, &mut app.modpacks.md_cache, &md_body);
-                },
-            );
-            ui.add_space(10.0);
-        });
+    gaming_card_3d(
+        ui,
+        "modpack_detail_md_card",
+        false,
+        p_col,
+        Margin::same(16),
+        |ui| {
+            ui.set_width(ui.available_width());
+            CommonMarkViewer::new().show(ui, &mut app.modpacks.md_cache, &md_body);
+        },
+    );
+    ui.add_space(10.0);
 }
 
 fn render_detail_versions_tab(
@@ -1640,136 +1708,143 @@ fn render_detail_versions_tab(
         .filter(|v| version_matches_detail_filters(v, &ch_f, ldr_f, &mc_f))
         .collect();
 
-    ScrollArea::vertical()
-        .id_salt("modpack_detail_versions_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if filtered.is_empty() {
-                gaming_card_3d(
-                    ui,
-                    "mp_versions_empty_card",
-                    false,
-                    p_col,
-                    Margin::same(18),
-                    |ui| {
-                        ui.set_width(ui.available_width());
+    if filtered.is_empty() {
+        gaming_card_3d(
+            ui,
+            "mp_versions_empty_card",
+            false,
+            p_col,
+            Margin::same(18),
+            |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(app.i18n.tr(
+                        "Không có phiên bản nào khớp với bộ lọc hiện tại.",
+                        "No versions match the selected filters.",
+                    ))
+                    .weak(),
+                );
+            },
+        );
+        return;
+    }
+
+    let mut install_ver_id: Option<String> = None;
+    for ver in filtered {
+        let chan_col = if ver.release_channel.eq_ignore_ascii_case("release") {
+            ACCENT_EMERALD
+        } else if ver.release_channel.eq_ignore_ascii_case("beta") {
+            ACCENT_AMBER
+        } else {
+            ACCENT_ORANGE
+        };
+        let primary_size = ver
+            .files
+            .iter()
+            .find(|f| f.primary)
+            .or_else(|| ver.files.first())
+            .map(|f| f.size)
+            .unwrap_or(0);
+        let req_deps = ver
+            .dependencies
+            .iter()
+            .filter(|d| d.relation == DependencyRelation::Required)
+            .count();
+
+        gaming_card_3d(
+            ui,
+            ("mp_ver_row", &ver.id),
+            false,
+            chan_col,
+            Margin::symmetric(14, 9),
+            |ui| {
+                let row_w = ui.available_width();
+                ui.set_width(row_w);
+                let render_ver_meta = |ui: &mut egui::Ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(
-                            RichText::new(app.i18n.tr(
-                                "Không có phiên bản nào khớp với bộ lọc hiện tại.",
-                                "No versions match the selected filters.",
-                            ))
-                            .weak(),
+                            RichText::new(truncate_chars(&ver.name, 54))
+                                .size(13.8)
+                                .strong(),
                         );
-                    },
-                );
-                return;
-            }
-
-            let mut install_ver_id: Option<String> = None;
-            for ver in filtered {
-                let chan_col = if ver.release_channel.eq_ignore_ascii_case("release") {
-                    ACCENT_EMERALD
-                } else if ver.release_channel.eq_ignore_ascii_case("beta") {
-                    ACCENT_AMBER
-                } else {
-                    ACCENT_ORANGE
+                        badge(ui, &ver.release_channel, chan_col);
+                        let canon_ver = ver.canonical_version_label();
+                        if canon_ver != ver.name && !canon_ver.is_empty() {
+                            badge(ui, &truncate_chars(&canon_ver, 22), ACCENT_BLUE);
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for ldr in ver.loaders.iter().take(3) {
+                            badge(ui, ldr, category_chip_color(ldr, p_col));
+                        }
+                        for gv in ver.game_versions.iter().take(4) {
+                            badge(ui, &format!("MC {gv}"), ACCENT_CYAN);
+                        }
+                        if ver.game_versions.len() > 4 {
+                            badge(
+                                ui,
+                                &format!("+{}", ver.game_versions.len() - 4),
+                                ACCENT_CYAN,
+                            );
+                        }
+                        if primary_size > 0 {
+                            ui.label(RichText::new(format_bytes(primary_size)).size(11.4).weak());
+                        }
+                        if let Some(dt) = short_date(ver.published_at.as_deref()) {
+                            ui.label(RichText::new(dt).size(11.4).weak());
+                        }
+                        if req_deps > 0 {
+                            badge(
+                                ui,
+                                &format!("{req_deps} {}", app.i18n.tr("phụ thuộc", "deps")),
+                                ACCENT_VIOLET,
+                            );
+                        }
+                    });
                 };
-                let primary_size = ver
-                    .files
-                    .iter()
-                    .find(|f| f.primary)
-                    .or_else(|| ver.files.first())
-                    .map(|f| f.size)
-                    .unwrap_or(0);
-                let req_deps = ver
-                    .dependencies
-                    .iter()
-                    .filter(|d| d.relation == DependencyRelation::Required)
-                    .count();
 
-                gaming_card_3d(
-                    ui,
-                    ("mp_ver_row", &ver.id),
-                    false,
-                    chan_col,
-                    Margin::symmetric(14, 9),
-                    |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.set_max_width((ui.available_width() - 140.0).max(160.0));
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(
-                                        RichText::new(truncate_chars(&ver.name, 54))
-                                            .size(13.8)
-                                            .strong(),
-                                    );
-                                    badge(ui, &ver.release_channel, chan_col);
-                                    let canon_ver = ver.canonical_version_label();
-                                    if canon_ver != ver.name && !canon_ver.is_empty() {
-                                        badge(ui, &truncate_chars(&canon_ver, 22), ACCENT_BLUE);
-                                    }
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    for ldr in ver.loaders.iter().take(3) {
-                                        badge(ui, ldr, category_chip_color(ldr, p_col));
-                                    }
-                                    for gv in ver.game_versions.iter().take(4) {
-                                        badge(ui, &format!("MC {gv}"), ACCENT_CYAN);
-                                    }
-                                    if ver.game_versions.len() > 4 {
-                                        badge(
-                                            ui,
-                                            &format!("+{}", ver.game_versions.len() - 4),
-                                            ACCENT_CYAN,
-                                        );
-                                    }
-                                    if primary_size > 0 {
-                                        ui.label(
-                                            RichText::new(format_bytes(primary_size))
-                                                .size(11.4)
-                                                .weak(),
-                                        );
-                                    }
-                                    if let Some(dt) = short_date(ver.published_at.as_deref()) {
-                                        ui.label(RichText::new(dt).size(11.4).weak());
-                                    }
-                                    if req_deps > 0 {
-                                        badge(
-                                            ui,
-                                            &format!(
-                                                "{req_deps} {}",
-                                                app.i18n.tr("phụ thuộc", "deps")
-                                            ),
-                                            ACCENT_VIOLET,
-                                        );
-                                    }
-                                });
-                            });
-
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if primary_icon_button(
-                                    ui,
-                                    VectorIcon::Download,
-                                    app.i18n.tr("Cài bản này", "Install"),
-                                )
-                                .clicked()
-                                {
-                                    install_ver_id = Some(ver.id.clone());
-                                }
-                            });
+                if row_w < 460.0 {
+                    render_ver_meta(ui);
+                    ui.add_space(6.0);
+                    if primary_icon_button(
+                        ui,
+                        VectorIcon::Download,
+                        app.i18n.tr("Cài bản này", "Install"),
+                    )
+                    .clicked()
+                    {
+                        install_ver_id = Some(ver.id.clone());
+                    }
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.set_max_width((row_w - 140.0).max(160.0));
+                            render_ver_meta(ui);
                         });
-                    },
-                );
-                ui.add_space(5.0);
-            }
 
-            if let Some(vid) = install_ver_id {
-                app.click_sfx();
-                app.open_modpack_install_modal(Some(&vid));
-            }
-            ui.add_space(8.0);
-        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if primary_icon_button(
+                                ui,
+                                VectorIcon::Download,
+                                app.i18n.tr("Cài bản này", "Install"),
+                            )
+                            .clicked()
+                            {
+                                install_ver_id = Some(ver.id.clone());
+                            }
+                        });
+                    });
+                }
+            },
+        );
+        ui.add_space(5.0);
+    }
+
+    if let Some(vid) = install_ver_id {
+        app.click_sfx();
+        app.open_modpack_install_modal(Some(&vid));
+    }
+    ui.add_space(8.0);
 }
 
 fn render_detail_gallery_tab(
@@ -1804,119 +1879,98 @@ fn render_detail_gallery_tab(
         return;
     }
 
-    ScrollArea::vertical()
-        .id_salt("modpack_detail_gallery_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let avail_w = ui.available_width();
-            let cols: usize = if avail_w >= 620.0 { 2 } else { 1 };
-            let gap = 12.0;
-            let col_w =
-                ((avail_w - gap * (cols.saturating_sub(1) as f32)) / (cols as f32)).max(240.0);
-            let img_h = ((col_w - 20.0) * 9.0 / 16.0).clamp(135.0, 260.0);
+    let avail_w = ui.available_width();
+    let cols: usize = if avail_w >= 620.0 { 2 } else { 1 };
+    let gap = 12.0;
+    let col_w = ((avail_w - gap * (cols.saturating_sub(1) as f32)) / (cols as f32)).max(140.0);
+    let img_h = ((col_w - 20.0) * 9.0 / 16.0).clamp(120.0, 260.0);
 
-            let mut clicked_idx: Option<usize> = None;
+    let mut clicked_idx: Option<usize> = None;
 
-            for (chunk_i, row_imgs) in detail.gallery.chunks(cols).enumerate() {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = gap;
-                    for (local_i, img) in row_imgs.iter().enumerate() {
-                        let global_idx = chunk_i * cols + local_i;
-                        let tex_opt = app.request_modpack_texture(&img.url, 960);
+    for (chunk_i, row_imgs) in detail.gallery.chunks(cols).enumerate() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (local_i, img) in row_imgs.iter().enumerate() {
+                let global_idx = chunk_i * cols + local_i;
+                let tex_opt = app.request_modpack_texture(&img.url, 960);
 
-                        ui.allocate_ui_with_layout(
-                            vec2(col_w, img_h + 44.0),
-                            Layout::top_down(Align::LEFT),
-                            |ui| {
-                                let (_, resp) = gaming_card_3d(
-                                    ui,
-                                    ("mp_gallery_card", global_idx),
-                                    false,
-                                    p_col,
-                                    Margin::same(10),
-                                    |ui| {
-                                        let inner_w = (col_w - 20.0).max(160.0);
-                                        let (img_rect, _) = ui.allocate_exact_size(
-                                            vec2(inner_w, img_h),
-                                            Sense::hover(),
-                                        );
-                                        let slot_bg = if ui.visuals().dark_mode {
-                                            Color32::from_rgb(20, 29, 44)
-                                        } else {
-                                            BG_SLOT_LIGHT
-                                        };
-                                        ui.painter().rect_filled(
-                                            img_rect,
-                                            CornerRadius::same(8),
-                                            slot_bg,
-                                        );
-                                        if let Some(ref tex) = tex_opt {
-                                            paint_cover_texture(
-                                                ui.painter(),
-                                                img_rect,
-                                                tex,
-                                                CornerRadius::same(8),
-                                                Color32::WHITE,
-                                            );
-                                        } else {
-                                            let c_rect = Rect::from_center_size(
-                                                img_rect.center(),
-                                                vec2(26.0, 26.0),
-                                            );
-                                            paint_vector_icon(
-                                                ui.painter(),
-                                                c_rect,
-                                                VectorIcon::Image,
-                                                p_col,
-                                            );
-                                        }
-                                        ui.painter().rect_stroke(
-                                            img_rect,
-                                            CornerRadius::same(8),
-                                            Stroke::new(
-                                                1.0,
-                                                Color32::from_rgba_unmultiplied(
-                                                    p_col.r(),
-                                                    p_col.g(),
-                                                    p_col.b(),
-                                                    95,
-                                                ),
-                                            ),
-                                            StrokeKind::Inside,
-                                        );
-
-                                        ui.add_space(4.0);
-                                        let caption = if img.title.trim().is_empty() {
-                                            format!(
-                                                "{} #{}",
-                                                app.i18n.tr("Ảnh chụp màn hình", "Screenshot"),
-                                                global_idx + 1
-                                            )
-                                        } else {
-                                            truncate_chars(&img.title, 48)
-                                        };
-                                        ui.label(RichText::new(caption).size(12.0).strong());
-                                    },
+                ui.allocate_ui_with_layout(vec2(col_w, 0.0), Layout::top_down(Align::LEFT), |ui| {
+                    ui.set_max_width(col_w);
+                    let (_, resp) = gaming_card_3d(
+                        ui,
+                        ("mp_gallery_card", global_idx),
+                        false,
+                        p_col,
+                        Margin::same(10),
+                        |ui| {
+                            let inner_w = (col_w - 20.0).max(120.0);
+                            let (img_rect, _) =
+                                ui.allocate_exact_size(vec2(inner_w, img_h), Sense::hover());
+                            let slot_bg = if ui.visuals().dark_mode {
+                                Color32::from_rgb(20, 29, 44)
+                            } else {
+                                BG_SLOT_LIGHT
+                            };
+                            ui.painter()
+                                .rect_filled(img_rect, CornerRadius::same(8), slot_bg);
+                            if let Some(ref tex) = tex_opt {
+                                paint_cover_texture(
+                                    ui.painter(),
+                                    img_rect,
+                                    tex,
+                                    CornerRadius::same(8),
+                                    Color32::WHITE,
                                 );
-                                if resp
-                                    .interact(Sense::click())
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .clicked()
-                                {
-                                    clicked_idx = Some(global_idx);
-                                }
-                            },
-                        );
+                            } else {
+                                let c_rect =
+                                    Rect::from_center_size(img_rect.center(), vec2(26.0, 26.0));
+                                paint_vector_icon(ui.painter(), c_rect, VectorIcon::Image, p_col);
+                            }
+                            ui.painter().rect_stroke(
+                                img_rect,
+                                CornerRadius::same(8),
+                                Stroke::new(
+                                    1.0,
+                                    Color32::from_rgba_unmultiplied(
+                                        p_col.r(),
+                                        p_col.g(),
+                                        p_col.b(),
+                                        95,
+                                    ),
+                                ),
+                                StrokeKind::Inside,
+                            );
+
+                            ui.add_space(4.0);
+                            let caption = if img.title.trim().is_empty() {
+                                format!(
+                                    "{} #{}",
+                                    app.i18n.tr("Ảnh chụp màn hình", "Screenshot"),
+                                    global_idx + 1
+                                )
+                            } else {
+                                truncate_chars(&img.title, 48)
+                            };
+                            ui.label(RichText::new(caption).size(12.0).strong());
+                        },
+                    );
+                    if resp
+                        .interact(Sense::click())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        clicked_idx = Some(global_idx);
                     }
                 });
-                ui.add_space(10.0);
-            }
-
-            if let Some(idx) = clicked_idx {
-                app.click_sfx();
-                app.modpacks.lightbox_idx = Some(idx);
             }
         });
+        ui.add_space(10.0);
+    }
+
+    if let Some(idx) = clicked_idx {
+        app.click_sfx();
+        app.modpacks.lightbox_idx = Some(idx);
+    }
 }
 
 pub fn render_modpack_modals(app: &mut LauncherAppState, ctx: &egui::Context) {
@@ -1966,95 +2020,110 @@ fn render_gallery_lightbox_modal(app: &mut LauncherAppState, ctx: &egui::Context
         .order(Order::Foreground)
         .show(ctx, |ui| {
             ui.set_width(ui.available_width());
-            let stage_h = (ui.available_height() - 48.0).max(160.0);
-            let (stage_rect, _) =
-                ui.allocate_exact_size(vec2(ui.available_width(), stage_h), Sense::hover());
-            let stage_bg = if ui.visuals().dark_mode {
-                Color32::from_rgb(14, 20, 32)
-            } else {
-                BG_SLOT_LIGHT
-            };
-            ui.painter()
-                .rect_filled(stage_rect, CornerRadius::same(10), stage_bg);
-            if let Some(ref tex) = tex_opt {
-                paint_contain_texture(ui.painter(), stage_rect.shrink(6.0), tex);
-            } else {
-                ui.painter().text(
-                    stage_rect.center(),
-                    Align2::CENTER_CENTER,
-                    app.i18n.tr(
-                        "Đang tải ảnh độ phân giải cao...",
-                        "Loading high-res image...",
-                    ),
-                    egui::FontId::proportional(14.0),
-                    ACCENT_CYAN,
-                );
-            }
-            ui.painter().rect_stroke(
-                stage_rect,
-                CornerRadius::same(10),
-                Stroke::new(1.2, p_col),
-                StrokeKind::Inside,
-            );
+            egui::Panel::bottom("thk_lightbox_footer_panel")
+                .resizable(false)
+                .frame(Frame::NONE.inner_margin(Margin {
+                    left: 0,
+                    right: 0,
+                    top: 8,
+                    bottom: 0,
+                }))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if count > 1
+                            && secondary_icon_button(
+                                ui,
+                                VectorIcon::ArrowLeft,
+                                app.i18n.tr("Ảnh trước", "Prev"),
+                            )
+                            .clicked()
+                        {
+                            app.click_sfx();
+                            next_idx = if safe_idx == 0 {
+                                count - 1
+                            } else {
+                                safe_idx - 1
+                            };
+                        }
 
-            ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                if count > 1
-                    && secondary_icon_button(
-                        ui,
-                        VectorIcon::ArrowLeft,
-                        app.i18n.tr("Ảnh trước", "Prev"),
-                    )
-                    .clicked()
-                {
-                    app.click_sfx();
-                    next_idx = if safe_idx == 0 {
-                        count - 1
-                    } else {
-                        safe_idx - 1
-                    };
-                }
+                        badge(ui, &format!("{} / {count}", safe_idx + 1), p_col);
+                        if !img.title.trim().is_empty() {
+                            ui.label(
+                                RichText::new(truncate_chars(&img.title, 52))
+                                    .size(12.5)
+                                    .strong(),
+                            );
+                        }
 
-                badge(ui, &format!("{} / {count}", safe_idx + 1), p_col);
-                if !img.title.trim().is_empty() {
-                    ui.label(
-                        RichText::new(truncate_chars(&img.title, 52))
-                            .size(12.5)
-                            .strong(),
-                    );
-                }
+                        if count > 1
+                            && secondary_icon_button(
+                                ui,
+                                VectorIcon::ArrowRight,
+                                app.i18n.tr("Ảnh tiếp", "Next"),
+                            )
+                            .clicked()
+                        {
+                            app.click_sfx();
+                            next_idx = (safe_idx + 1) % count;
+                        }
 
-                if count > 1
-                    && secondary_icon_button(
-                        ui,
-                        VectorIcon::ArrowRight,
-                        app.i18n.tr("Ảnh tiếp", "Next"),
-                    )
-                    .clicked()
-                {
-                    app.click_sfx();
-                    next_idx = (safe_idx + 1) % count;
-                }
-
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if danger_icon_button(ui, VectorIcon::Close, app.i18n.tr("Đóng", "Close"))
+                        if secondary_icon_button(
+                            ui,
+                            VectorIcon::Globe,
+                            app.i18n.tr("Mở ảnh gốc", "Open Original"),
+                        )
                         .clicked()
-                    {
-                        app.click_sfx();
-                        close_lightbox = true;
-                    }
-                    if secondary_icon_button(
-                        ui,
-                        VectorIcon::Globe,
-                        app.i18n.tr("Mở ảnh gốc", "Open Original"),
-                    )
-                    .clicked()
-                    {
-                        app.click_sfx();
-                        let _ = crate::dialogs::open_external_url(&img.url);
-                    }
+                        {
+                            app.click_sfx();
+                            let _ = crate::dialogs::open_external_url(&img.url);
+                        }
+                        if danger_icon_button(ui, VectorIcon::Close, app.i18n.tr("Đóng", "Close"))
+                            .clicked()
+                        {
+                            app.click_sfx();
+                            close_lightbox = true;
+                        }
+                    });
                 });
-            });
+
+            let body_w = ui.available_width();
+            let body_h = ui.available_height();
+            ScrollArea::vertical()
+                .id_salt("thk_lightbox_body_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_max_width(body_w);
+                    let stage_h = (body_h - 4.0).max(140.0);
+                    let (stage_rect, _) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), stage_h), Sense::hover());
+                    let stage_bg = if ui.visuals().dark_mode {
+                        Color32::from_rgb(14, 20, 32)
+                    } else {
+                        BG_SLOT_LIGHT
+                    };
+                    ui.painter()
+                        .rect_filled(stage_rect, CornerRadius::same(10), stage_bg);
+                    if let Some(ref tex) = tex_opt {
+                        paint_contain_texture(ui.painter(), stage_rect.shrink(6.0), tex);
+                    } else {
+                        ui.painter().text(
+                            stage_rect.center(),
+                            Align2::CENTER_CENTER,
+                            app.i18n.tr(
+                                "Đang tải ảnh độ phân giải cao...",
+                                "Loading high-res image...",
+                            ),
+                            egui::FontId::proportional(14.0),
+                            ACCENT_CYAN,
+                        );
+                    }
+                    ui.painter().rect_stroke(
+                        stage_rect,
+                        CornerRadius::same(10),
+                        Stroke::new(1.2, p_col),
+                        StrokeKind::Inside,
+                    );
+                });
         });
 
     if close_lightbox {
@@ -2123,154 +2192,304 @@ fn render_install_studio_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
         .order(Order::Foreground)
         .show(ctx, |ui| {
             ui.set_width(ui.available_width());
-            let max_title_chars = ((ui.available_width() - 90.0) / 7.5).clamp(32.0, 96.0) as usize;
-            gaming_card_3d(
-                ui,
-                "mp_install_modal_header",
-                true,
-                p_col,
-                Margin::symmetric(12, 10),
-                |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        paint_pack_thumbnail(ui, icon_tex.as_ref(), 48.0, p_col, true);
-                        ui.add_space(6.0);
-                        ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new(truncate_chars(
-                                    &modal_snap.detail.summary.title,
-                                    max_title_chars,
-                                ))
-                                .size(15.5)
-                                .strong(),
-                            );
-                            ui.horizontal_wrapped(|ui| {
-                                badge(ui, modal_snap.detail.summary.provider.display_name(), p_col);
-                                badge(
-                                    ui,
-                                    content_kind_label(app, modal_snap.content_kind),
-                                    ACCENT_VIOLET,
-                                );
-                            });
-                        });
-                    });
-                },
-            );
-
-            ui.add_space(10.0);
-
-            if let Some(ref err) = modal_snap.error_msg {
-                gaming_card_3d(
-                    ui,
-                    "mp_install_modal_err",
-                    false,
-                    ACCENT_RED,
-                    Margin::symmetric(12, 8),
-                    |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new(err).color(ACCENT_RED).size(12.2).strong());
-                    },
-                );
-                ui.add_space(8.0);
-            }
 
             if modal_snap.installing {
-                let task_prog = app
-                    .active_tasks
-                    .get("modpack-install")
-                    .map(|t| &t.progress)
-                    .or(app.active_progress.as_ref());
-                gaming_card_3d(
-                    ui,
-                    "mp_install_live_progress_card",
-                    true,
-                    ACCENT_EMERALD,
-                    Margin::same(14),
-                    |ui| {
-                        ui.set_width(ui.available_width());
-                        if let Some(prog) = task_prog {
-                            let frac = (prog.percent / 100.0).clamp(0.0, 1.0);
-                            ui.horizontal(|ui| {
-                                badge(ui, &prog.phase, ACCENT_CYAN);
-                                ui.label(
-                                    RichText::new(format!("{:.1}%", prog.percent))
-                                        .size(13.5)
-                                        .strong()
-                                        .color(ACCENT_EMERALD),
-                                );
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    badge(
-                                        ui,
-                                        &format!("{}/s", format_bytes(prog.bytes_per_sec)),
-                                        ACCENT_EMERALD,
-                                    );
-                                });
-                            });
-                            ui.add_space(6.0);
-                            paint_glowing_progress_bar(
+                egui::Panel::bottom("mp_install_studio_installing_footer")
+                    .resizable(false)
+                    .frame(Frame::NONE.inner_margin(Margin {
+                        left: 0,
+                        right: 0,
+                        top: 8,
+                        bottom: 0,
+                    }))
+                    .show(ui, |ui| {
+                        ui.separator();
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if secondary_icon_button(
                                 ui,
-                                frac,
-                                ui.available_width().max(80.0),
-                                18.0,
-                            );
-                            ui.add_space(6.0);
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} ({}/{})",
-                                    truncate_chars(&prog.message, 62),
-                                    prog.completed_files,
-                                    prog.total_files
-                                ))
-                                .size(12.0)
-                                .weak(),
-                            );
-                        } else {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label(
-                                    RichText::new(app.i18n.tr(
-                                        "Đang giải nén gói cài đặt và phân giải phụ thuộc...",
-                                        "Extracting manifest and resolving dependencies...",
-                                    ))
-                                    .strong(),
-                                );
-                            });
-                        }
-                    },
-                );
-
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if secondary_icon_button(
-                        ui,
-                        VectorIcon::ArrowLeft,
-                        app.i18n.tr("Thu gọn xuống thanh dưới", "Minimize to Status Bar"),
-                    )
-                    .clicked()
-                    {
-                        minimize_modal = true;
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if danger_icon_button(
-                            ui,
-                            VectorIcon::Close,
-                            app.i18n.tr("Hủy cài đặt", "Cancel Install"),
-                        )
-                        .clicked()
-                        {
-                            trigger_cancel = true;
-                        }
+                                VectorIcon::ArrowLeft,
+                                app.i18n.tr("Thu gọn xuống thanh dưới", "Minimize to Status Bar"),
+                            )
+                            .clicked()
+                            {
+                                minimize_modal = true;
+                            }
+                            if danger_icon_button(
+                                ui,
+                                VectorIcon::Close,
+                                app.i18n.tr("Hủy cài đặt", "Cancel Install"),
+                            )
+                            .clicked()
+                            {
+                                trigger_cancel = true;
+                            }
+                        });
                     });
-                });
+
+                let body_w = ui.available_width();
+                ScrollArea::vertical()
+                    .id_salt("mp_install_studio_installing_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_max_width(body_w);
+                        let max_title_chars =
+                            ((ui.available_width() - 90.0) / 7.5).clamp(32.0, 96.0) as usize;
+                        gaming_card_3d(
+                            ui,
+                            "mp_install_modal_header",
+                            true,
+                            p_col,
+                            Margin::symmetric(12, 10),
+                            |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    paint_pack_thumbnail(ui, icon_tex.as_ref(), 48.0, p_col, true);
+                                    ui.add_space(6.0);
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            RichText::new(truncate_chars(
+                                                &modal_snap.detail.summary.title,
+                                                max_title_chars,
+                                            ))
+                                            .size(15.5)
+                                            .strong(),
+                                        );
+                                        ui.horizontal_wrapped(|ui| {
+                                            badge(
+                                                ui,
+                                                modal_snap.detail.summary.provider.display_name(),
+                                                p_col,
+                                            );
+                                            badge(
+                                                ui,
+                                                content_kind_label(app, modal_snap.content_kind),
+                                                ACCENT_VIOLET,
+                                            );
+                                        });
+                                    });
+                                });
+                            },
+                        );
+
+                        ui.add_space(10.0);
+
+                        if let Some(ref err) = modal_snap.error_msg {
+                            gaming_card_3d(
+                                ui,
+                                "mp_install_modal_err",
+                                false,
+                                ACCENT_RED,
+                                Margin::symmetric(12, 8),
+                                |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.label(
+                                        RichText::new(err).color(ACCENT_RED).size(12.2).strong(),
+                                    );
+                                },
+                            );
+                            ui.add_space(8.0);
+                        }
+
+                        let task_prog = app
+                            .active_tasks
+                            .get("modpack-install")
+                            .map(|t| &t.progress)
+                            .or(app.active_progress.as_ref());
+                        gaming_card_3d(
+                            ui,
+                            "mp_install_live_progress_card",
+                            true,
+                            ACCENT_EMERALD,
+                            Margin::same(14),
+                            |ui| {
+                                ui.set_width(ui.available_width());
+                                if let Some(prog) = task_prog {
+                                    let frac = (prog.percent / 100.0).clamp(0.0, 1.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        badge(ui, &prog.phase, ACCENT_CYAN);
+                                        ui.label(
+                                            RichText::new(format!("{:.1}%", prog.percent))
+                                                .size(13.5)
+                                                .strong()
+                                                .color(ACCENT_EMERALD),
+                                        );
+                                        badge(
+                                            ui,
+                                            &format!("{}/s", format_bytes(prog.bytes_per_sec)),
+                                            ACCENT_EMERALD,
+                                        );
+                                    });
+                                    ui.add_space(6.0);
+                                    paint_glowing_progress_bar(
+                                        ui,
+                                        frac,
+                                        ui.available_width().max(80.0),
+                                        18.0,
+                                    );
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} ({}/{})",
+                                            truncate_chars(&prog.message, 62),
+                                            prog.completed_files,
+                                            prog.total_files
+                                        ))
+                                        .size(12.0)
+                                        .weak(),
+                                    );
+                                } else {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spinner();
+                                        ui.label(
+                                            RichText::new(app.i18n.tr(
+                                                "Đang giải nén gói cài đặt và phân giải phụ thuộc...",
+                                                "Extracting manifest and resolving dependencies...",
+                                            ))
+                                            .strong(),
+                                        );
+                                    });
+                                }
+                            },
+                        );
+                    });
                 return;
             }
 
-            let max_body_h = (ui.available_height() - 72.0).max(140.0);
+            egui::Panel::bottom("mp_install_studio_footer")
+                .resizable(false)
+                .frame(Frame::NONE.inner_margin(Margin {
+                    left: 0,
+                    right: 0,
+                    top: 8,
+                    bottom: 0,
+                }))
+                .show(ui, |ui| {
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if secondary_icon_button(
+                            ui,
+                            VectorIcon::Close,
+                            app.i18n.tr("Đóng", "Close"),
+                        )
+                        .clicked()
+                        {
+                            close_modal = true;
+                        }
+
+                        let can_install = modal_snap.content_kind == ContentKind::Modpack
+                            || updated_target_profile.is_some();
+                        let is_srv_target = modal_snap.content_kind == ContentKind::Modpack
+                            && updated_target_mode == ModpackInstallTarget::DedicatedServer;
+                        let (btn_icon, btn_lbl) = if is_srv_target {
+                            (
+                                Some(VectorIcon::Plus),
+                                app.i18n.tr("Tạo Máy chủ", "Create Server"),
+                            )
+                        } else {
+                            (
+                                Some(VectorIcon::Download),
+                                app.i18n.tr("Bắt đầu cài đặt", "Start Installation"),
+                            )
+                        };
+                        let install_btn_w = 178.0_f32.min(ui.max_rect().width().max(96.0));
+                        if ui.available_width() >= install_btn_w + 12.0 {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_enabled_ui(can_install, |ui| {
+                                    if tactile_button_3d(
+                                        ui,
+                                        btn_icon,
+                                        btn_lbl,
+                                        ButtonStyle3d::HeroLaunch,
+                                        vec2(install_btn_w, 36.0),
+                                    )
+                                    .clicked()
+                                    {
+                                        trigger_start = true;
+                                    }
+                                });
+                            });
+                        } else {
+                            ui.add_enabled_ui(can_install, |ui| {
+                                if tactile_button_3d(
+                                    ui,
+                                    btn_icon,
+                                    btn_lbl,
+                                    ButtonStyle3d::HeroLaunch,
+                                    vec2(install_btn_w, 36.0),
+                                )
+                                .clicked()
+                                {
+                                    trigger_start = true;
+                                }
+                            });
+                        }
+                    });
+                });
+
+            let body_w = ui.available_width();
             ScrollArea::vertical()
                 .id_salt("mp_install_studio_body_scroll")
-                .max_height(max_body_h)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    ui.set_max_width(body_w);
+                    let max_title_chars =
+                        ((ui.available_width() - 90.0) / 7.5).clamp(32.0, 96.0) as usize;
+                    gaming_card_3d(
+                        ui,
+                        "mp_install_modal_header",
+                        true,
+                        p_col,
+                        Margin::symmetric(12, 10),
+                        |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                paint_pack_thumbnail(ui, icon_tex.as_ref(), 48.0, p_col, true);
+                                ui.add_space(6.0);
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        RichText::new(truncate_chars(
+                                            &modal_snap.detail.summary.title,
+                                            max_title_chars,
+                                        ))
+                                        .size(15.5)
+                                        .strong(),
+                                    );
+                                    ui.horizontal_wrapped(|ui| {
+                                        badge(
+                                            ui,
+                                            modal_snap.detail.summary.provider.display_name(),
+                                            p_col,
+                                        );
+                                        badge(
+                                            ui,
+                                            content_kind_label(app, modal_snap.content_kind),
+                                            ACCENT_VIOLET,
+                                        );
+                                    });
+                                });
+                            });
+                        },
+                    );
+
+                    ui.add_space(10.0);
+
+                    if let Some(ref err) = modal_snap.error_msg {
+                        gaming_card_3d(
+                            ui,
+                            "mp_install_modal_err",
+                            false,
+                            ACCENT_RED,
+                            Margin::symmetric(12, 8),
+                            |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(RichText::new(err).color(ACCENT_RED).size(12.2).strong());
+                            },
+                        );
+                        ui.add_space(8.0);
+                    }
+
             if modal_snap.content_kind == ContentKind::Modpack {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(
@@ -2617,85 +2836,9 @@ fn render_install_studio_modal(app: &mut LauncherAppState, ctx: &egui::Context) 
                                 );
                             }
                         });
-
-                    if modal_snap.content_kind == ContentKind::Mod {
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(app.i18n.tr(
-                                "Tự động kiểm tra và tải kèm các Mod phụ thuộc bắt buộc (Required Dependencies).",
-                                "Required library dependencies will be resolved and installed automatically.",
-                            ))
-                            .size(11.4)
-                            .weak(),
-                        );
-                    }
                 }
             }
                 });
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(8.0);
-
-            ui.horizontal_wrapped(|ui| {
-                if secondary_icon_button(
-                    ui,
-                    VectorIcon::Close,
-                    app.i18n.tr("Đóng", "Close"),
-                )
-                .clicked()
-                {
-                    close_modal = true;
-                }
-
-                let can_install = modal_snap.content_kind == ContentKind::Modpack
-                    || updated_target_profile.is_some();
-                let is_srv_target = modal_snap.content_kind == ContentKind::Modpack
-                    && updated_target_mode == ModpackInstallTarget::DedicatedServer;
-                let (btn_icon, btn_lbl) = if is_srv_target {
-                    (
-                        Some(VectorIcon::Plus),
-                        app.i18n.tr("Tạo Máy chủ", "Create Server"),
-                    )
-                } else {
-                    (
-                        Some(VectorIcon::Download),
-                        app.i18n.tr("Bắt đầu cài đặt", "Start Installation"),
-                    )
-                };
-                let install_btn_w = 178.0_f32.min(ui.max_rect().width().max(96.0));
-                if ui.available_width() >= install_btn_w + 12.0 {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add_enabled_ui(can_install, |ui| {
-                            if tactile_button_3d(
-                                ui,
-                                btn_icon,
-                                btn_lbl,
-                                ButtonStyle3d::HeroLaunch,
-                                vec2(install_btn_w, 36.0),
-                            )
-                            .clicked()
-                            {
-                                trigger_start = true;
-                            }
-                        });
-                    });
-                } else {
-                    ui.add_enabled_ui(can_install, |ui| {
-                        if tactile_button_3d(
-                            ui,
-                            btn_icon,
-                            btn_lbl,
-                            ButtonStyle3d::HeroLaunch,
-                            vec2(install_btn_w, 36.0),
-                        )
-                        .clicked()
-                        {
-                            trigger_start = true;
-                        }
-                    });
-                }
-            });
         });
 
     if let Some(modal) = app.modpacks.install_modal.as_mut() {

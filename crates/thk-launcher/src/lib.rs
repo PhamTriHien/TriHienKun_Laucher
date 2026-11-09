@@ -327,7 +327,15 @@ mod tests {
 
         assert_eq!(
             android_upgraded_library_spec("net.java.dev.jna:jna:5.12.1").map(|t| t.0),
-            Some("net.java.dev.jna:jna:5.13.0")
+            Some("net.java.dev.jna:jna:5.14.0")
+        );
+        assert_eq!(
+            android_upgraded_library_spec("net.java.dev.jna:jna:5.13.0").map(|t| t.0),
+            Some("net.java.dev.jna:jna:5.14.0")
+        );
+        assert_eq!(
+            android_upgraded_library_spec("net.java.dev.jna:jna-platform:5.12.1").map(|t| t.0),
+            Some("net.java.dev.jna:jna-platform:5.14.0")
         );
         assert!(android_upgraded_library_spec("net.java.dev.jna:jna:5.14.0").is_none());
         assert_eq!(

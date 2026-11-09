@@ -2682,14 +2682,25 @@ impl LauncherAppState {
         };
 
         let _ = std::fs::create_dir_all(&prof.instance_path);
-        self.home.worlds = list_local_worlds(&prof.instance_path).unwrap_or_default();
-        self.home.dir_entries =
-            list_server_dir(&prof.instance_path, &self.home.current_rel_dir).unwrap_or_default();
-        self.home.daily_stats = self
-            .db
-            .get_daily_play_stats(&prof.id, 14)
-            .unwrap_or_default();
         self.home.content_updates.clear();
+
+        match self.home.active_tab {
+            HomeTab::Worlds => {
+                self.home.worlds = list_local_worlds(&prof.instance_path).unwrap_or_default();
+            }
+            HomeTab::Files => {
+                self.home.dir_entries =
+                    list_server_dir(&prof.instance_path, &self.home.current_rel_dir)
+                        .unwrap_or_default();
+            }
+            HomeTab::Analytics => {
+                self.home.daily_stats = self
+                    .db
+                    .get_daily_play_stats(&prof.id, 14)
+                    .unwrap_or_default();
+            }
+            _ => {}
+        }
 
         let kind_opt = match self.home.active_tab {
             HomeTab::Mods => Some(ContentKind::Mod),
@@ -3115,10 +3126,16 @@ impl LauncherAppState {
             file_name,
             enabled,
         ) {
-            Ok(_) => {
-                self.home.local_items =
-                    list_local_content(&self.db, &prof.id, &prof.instance_path, kind)
-                        .unwrap_or_default();
+            Ok(new_file_name) => {
+                if let Some(item) = self
+                    .home
+                    .local_items
+                    .iter_mut()
+                    .find(|i| i.file_name == file_name)
+                {
+                    item.file_name = new_file_name;
+                    item.enabled = enabled;
+                }
             }
             Err(e) => {
                 let msg = format!(
@@ -3137,9 +3154,7 @@ impl LauncherAppState {
         };
         match delete_local_content(&self.db, &prof.id, &prof.instance_path, kind, file_name) {
             Ok(()) => {
-                self.home.local_items =
-                    list_local_content(&self.db, &prof.id, &prof.instance_path, kind)
-                        .unwrap_or_default();
+                self.home.local_items.retain(|i| i.file_name != file_name);
                 let msg = if self.settings.language == Language::Vi {
                     format!("Đã xóa '{file_name}'.")
                 } else {

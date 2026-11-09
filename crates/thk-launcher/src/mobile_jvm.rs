@@ -256,6 +256,154 @@ fn scale_even_dimension(px: u32, scale_pct: u32) -> u32 {
     }
 }
 
+fn instance_has_vulkan_mod(instance_dir: &Path) -> bool {
+    let mods_dir = instance_dir.join("mods");
+    let Ok(entries) = fs::read_dir(&mods_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if name.ends_with(".jar") && name.contains("vulkan") {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn is_incompatible_mobile_library_jar(norm_path: &str) -> bool {
+    let lower = norm_path.replace('\\', "/").to_ascii_lowercase();
+    if !lower.ends_with(".jar") {
+        return false;
+    }
+    let file_name = lower.rsplit('/').next().unwrap_or(&lower);
+    if lower.contains("/org/lwjgl/") {
+        if file_name.starts_with("lwjgl-jemalloc-") && !file_name.contains("-natives-") {
+            return false;
+        }
+        return true;
+    }
+    if file_name.ends_with("-linux-aarch_64.jar")
+        || file_name.ends_with("-linux-aarch64.jar")
+        || file_name.ends_with("-linux-arm64.jar")
+        || file_name.ends_with("-natives-linux-arm64.jar")
+        || file_name.ends_with("-natives-linux-aarch_64.jar")
+        || file_name.ends_with("-natives-linux-aarch64.jar")
+    {
+        return false;
+    }
+
+    const FOREIGN_EXACT_SUFFIXES: &[&str] = &[
+        "-linux-x86_64.jar",
+        "-linux-x86_32.jar",
+        "-linux-x86.jar",
+        "-linux-riscv64.jar",
+        "-linux-ppc64le.jar",
+        "-linux-s390x.jar",
+        "-linux-arm_32.jar",
+        "-linux-armel.jar",
+        "-natives-linux.jar",
+        "-windows-x86_64.jar",
+        "-windows-x86.jar",
+        "-windows-arm64.jar",
+    ];
+    if FOREIGN_EXACT_SUFFIXES
+        .iter()
+        .any(|suf| file_name.ends_with(suf))
+    {
+        return true;
+    }
+
+    const FOREIGN_NATIVE_MARKERS: &[&str] = &[
+        "-natives-windows",
+        "-natives-macos",
+        "-natives-osx",
+        "-natives-freebsd",
+        "-natives-linux-x86",
+        "-natives-linux-arm32",
+        "-natives-linux-arm_32",
+        "-natives-linux-riscv",
+    ];
+    if FOREIGN_NATIVE_MARKERS
+        .iter()
+        .any(|pat| file_name.contains(pat))
+    {
+        return true;
+    }
+
+    let segs: Vec<&str> = lower.split('/').collect();
+    if segs.len() >= 3 {
+        let artifact = segs[segs.len() - 3];
+        let version = segs[segs.len() - 2];
+        let prefix = format!("{artifact}-{version}-");
+        if let Some(cls) = file_name
+            .strip_prefix(&prefix)
+            .and_then(|s| s.strip_suffix(".jar"))
+        {
+            if cls.starts_with("macos-")
+                || cls.starts_with("osx-")
+                || cls.starts_with("windows-")
+                || cls == "macos"
+                || cls == "osx"
+                || cls == "windows"
+            {
+                return true;
+            }
+        }
+    } else if (file_name.contains("-macos-") && !file_name.contains("-classes-macos-"))
+        || file_name.contains("-osx-")
+    {
+        return true;
+    }
+
+    false
+}
+
+fn sync_merge_modules_arg(args: &mut [String], cp_entries: &[String]) {
+    let mut jna_jar_name: Option<String> = None;
+    let mut jna_platform_jar_name: Option<String> = None;
+    for entry in cp_entries {
+        let fname = entry.rsplit(['/', '\\']).next().unwrap_or(entry);
+        let lower = fname.to_ascii_lowercase();
+        if lower.starts_with("jna-platform-") && lower.ends_with(".jar") {
+            jna_platform_jar_name = Some(fname.to_string());
+        } else if lower.starts_with("jna-") && lower.ends_with(".jar") {
+            jna_jar_name = Some(fname.to_string());
+        }
+    }
+    if jna_jar_name.is_none() && jna_platform_jar_name.is_none() {
+        return;
+    }
+    for arg in args.iter_mut() {
+        let Some(rest) = arg.strip_prefix("-DmergeModules=") else {
+            continue;
+        };
+        let rewritten: Vec<String> = rest
+            .split(';')
+            .map(|group| {
+                group
+                    .split(',')
+                    .map(|item| {
+                        let trimmed = item.trim();
+                        let lower = trimmed.to_ascii_lowercase();
+                        if lower.starts_with("jna-platform-") && lower.ends_with(".jar") {
+                            if let Some(ref actual) = jna_platform_jar_name {
+                                return actual.clone();
+                            }
+                        } else if lower.starts_with("jna-") && lower.ends_with(".jar") {
+                            if let Some(ref actual) = jna_jar_name {
+                                return actual.clone();
+                            }
+                        }
+                        trimmed.to_string()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .collect();
+        *arg = format!("-DmergeModules={}", rewritten.join(";"));
+    }
+}
+
 pub fn build_mobile_launch_spec(inp: MobileSpecInputs<'_>) -> ThkResult<MobileLaunchSpec> {
     let jre_home = inp
         .java_bin
@@ -273,8 +421,8 @@ pub fn build_mobile_launch_spec(inp: MobileSpecInputs<'_>) -> ThkResult<MobileLa
     };
 
     let scale_pct = sanitize_mobile_render_scale_pct(inp.render_scale_pct);
-    let phys_w = inp.surface_size.0.max(640);
-    let phys_h = inp.surface_size.1.max(360);
+    let phys_w = inp.surface_size.0.max(inp.surface_size.1).max(640);
+    let phys_h = inp.surface_size.0.min(inp.surface_size.1).max(360);
     let (win_w, win_h) = match (inp.profile.window_width, inp.profile.window_height) {
         (Some(w), Some(h)) if w >= 320 && h >= 240 => (w, h),
         _ => (
@@ -383,12 +531,24 @@ pub fn build_mobile_launch_spec(inp: MobileSpecInputs<'_>) -> ThkResult<MobileLa
 
     let mut cp_entries: Vec<String> = Vec::new();
     cp_entries.push(lwjgl_jars_dir.join("lwjgl.jar").display().to_string());
-    cp_entries.push(
-        lwjgl_jars_dir
-            .join(format!("lwjgl-{lwjgl_ver}-merged-modules.jar"))
-            .display()
-            .to_string(),
-    );
+    let split_glfw = lwjgl_jars_dir.join("lwjgl-glfw.jar");
+    let split_opengl = lwjgl_jars_dir.join("lwjgl-opengl.jar");
+    if split_glfw.is_file() && split_opengl.is_file() {
+        cp_entries.push(split_glfw.display().to_string());
+        cp_entries.push(split_opengl.display().to_string());
+    } else {
+        cp_entries.push(
+            lwjgl_jars_dir
+                .join(format!("lwjgl-{lwjgl_ver}-merged-modules.jar"))
+                .display()
+                .to_string(),
+        );
+    }
+    let wants_vulkan = inp.vanilla.libraries.iter().any(|p| {
+        p.to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("lwjgl-vulkan")
+    }) || instance_has_vulkan_mod(&inp.profile.instance_path);
     if let Ok(entries) = fs::read_dir(&lwjgl_jars_dir) {
         let mut extras: Vec<PathBuf> = entries
             .flatten()
@@ -399,8 +559,11 @@ pub fn build_mobile_launch_spec(inp: MobileSpecInputs<'_>) -> ThkResult<MobileLa
                 };
                 name.ends_with(".jar")
                     && name != "lwjgl.jar"
+                    && name != "lwjgl-glfw.jar"
+                    && name != "lwjgl-opengl.jar"
                     && !name.ends_with("-merged-modules.jar")
                     && !name.ends_with("lwjglx.jar")
+                    && (wants_vulkan || name != "lwjgl-vma.jar")
             })
             .collect();
         extras.sort();
@@ -411,7 +574,7 @@ pub fn build_mobile_launch_spec(inp: MobileSpecInputs<'_>) -> ThkResult<MobileLa
 
     for lib_path in &inp.vanilla.libraries {
         let norm = lib_path.to_string_lossy().replace('\\', "/");
-        if norm.contains("/org/lwjgl/") {
+        if is_incompatible_mobile_library_jar(&norm) {
             continue;
         }
         cp_entries.push(lib_path.display().to_string());
@@ -456,6 +619,7 @@ pub fn build_mobile_launch_spec(inp: MobileSpecInputs<'_>) -> ThkResult<MobileLa
             && arg != "-XstartOnFirstThread"
             && arg != "--fullscreen"
     });
+    sync_merge_modules_arg(&mut desktop_style_args, &cp_entries);
 
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -477,6 +641,7 @@ pub fn build_mobile_launch_spec(inp: MobileSpecInputs<'_>) -> ThkResult<MobileLa
         format!("-Djava.home={}", jre_home.display()),
         format!("-Djava.io.tmpdir={}", cache_dir.display()),
         format!("-Djna.boot.library.path={}", runtime_lib_dir.display()),
+        "-Djna.nosys=true".to_string(),
         format!("-Duser.home={}", inp.profile.instance_path.display()),
         "-Dos.name=Linux".to_string(),
         "-Dos.version=Android".to_string(),
@@ -952,4 +1117,366 @@ where
     };
 
     Ok((exit_code, elapsed_secs, crash_report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vanilla::{MojangArguments, MojangLibrary, VanillaVersionJson};
+    use thk_core::models::{AccountType, LoaderType, SkinVariant};
+
+    fn fixture_account() -> Account {
+        Account {
+            id: "acc-mob".into(),
+            username: "TriHienKun".into(),
+            uuid: "b50ad385-829d-3141-a216-7e7d7539ba7f".into(),
+            account_type: AccountType::Offline,
+            skin_variant: SkinVariant::Wide,
+            skin_url: None,
+            cape_url: None,
+            custom_skin_path: None,
+            custom_cape_path: None,
+            custom_elytra_path: None,
+            oauth_client_id: None,
+            token_expires_at: None,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn normalizes_portrait_surface_to_landscape_and_respects_scale_or_custom_resolution() {
+        let root = std::env::temp_dir().join(format!("thk-mob-norm-{}", Uuid::new_v4()));
+        let paths = AppPaths::from_root(root.clone()).unwrap();
+        let inst_dir = root.join("instance");
+        fs::create_dir_all(&inst_dir).unwrap();
+        let runtime_root = root.join("mobile_runtime");
+        fs::create_dir_all(runtime_root.join("lwjgl3/3.3.3")).unwrap();
+        fs::write(runtime_root.join("lwjgl3/3.3.3/lwjgl.jar"), b"").unwrap();
+        fs::write(runtime_root.join("lwjgl3/3.3.3/lwjgl-glfw.jar"), b"").unwrap();
+        fs::write(runtime_root.join("lwjgl3/3.3.3/lwjgl-opengl.jar"), b"").unwrap();
+        fs::write(runtime_root.join("lwjgl3/3.3.3/lwjgl-vma.jar"), b"").unwrap();
+
+        let mut profile = GameProfile {
+            id: "mob-forge".into(),
+            name: "Cisco RPG".into(),
+            game_version: "1.19.2".into(),
+            loader: LoaderType::Forge,
+            loader_version: Some("43.5.1".into()),
+            instance_path: inst_dir,
+            is_custom_path: true,
+            ram_mb: 4096,
+            java_path: None,
+            jvm_args: String::new(),
+            auto_perf_mods: false,
+            icon_url: None,
+            window_width: None,
+            window_height: None,
+            fullscreen: true,
+            total_play_seconds: 0,
+            session_count: 0,
+            crash_count: 0,
+            last_played_at: None,
+            created_at: 0,
+        };
+        let account = fixture_account();
+        let vanilla = PreparedVanillaAssets {
+            version_json: VanillaVersionJson {
+                id: "1.19.2".into(),
+                main_class: "net.minecraft.client.main.Main".into(),
+                minecraft_arguments: None,
+                arguments: Some(MojangArguments {
+                    jvm: vec![json!("-cp"), json!("${classpath}")],
+                    game: vec![],
+                }),
+                libraries: vec![MojangLibrary {
+                    name: "org.lwjgl:lwjgl:3.3.1".into(),
+                    downloads: None,
+                    url: None,
+                    rules: None,
+                    natives: None,
+                }],
+                downloads: None,
+                asset_index: None,
+                assets: None,
+                java_version: None,
+            },
+            client_jar: root.join("client.jar"),
+            libraries: vec![],
+            natives_dir: root.join("natives"),
+            assets_dir: root.join("assets"),
+            virtual_assets_dir: None,
+            map_to_resources: false,
+            asset_index_id: "1.19".into(),
+        };
+
+        let java_bin = root.join("jre17/bin/java");
+        let log_file = root.join("mobile_game.log");
+
+        let spec_full = build_mobile_launch_spec(MobileSpecInputs {
+            paths: &paths,
+            profile: &profile,
+            account: &account,
+            access_token: "0",
+            vanilla: &vanilla,
+            java_bin: &java_bin,
+            java_major: 17,
+            main_class: "cpw.mods.bootstraplauncher.BootstrapLauncher",
+            include_client_jar: false,
+            loader_jvm_args: &[],
+            loader_game_args: &[],
+            legacy_mc_args_override: None,
+            authlib_jvm_args: &[],
+            quick_play_server: None,
+            renderer: MobileRendererMode::MobileGlues,
+            render_scale_pct: 100,
+            surface_size: (1280, 2772),
+            input_port: 41000,
+            runtime_root: &runtime_root,
+            log_file: &log_file,
+        })
+        .unwrap();
+
+        assert_eq!(spec_full.physical_width, 2772);
+        assert_eq!(spec_full.physical_height, 1280);
+        assert_eq!(spec_full.window_width, 2772);
+        assert_eq!(spec_full.window_height, 1280);
+        assert_eq!(
+            spec_full.env.get("AWTSTUB_WIDTH").map(String::as_str),
+            Some("2772")
+        );
+        assert_eq!(
+            spec_full.env.get("AWTSTUB_HEIGHT").map(String::as_str),
+            Some("1280")
+        );
+        assert!(spec_full
+            .argv
+            .iter()
+            .any(|a| a == "-Dglfwstub.windowWidth=2772"));
+        assert!(spec_full
+            .argv
+            .iter()
+            .any(|a| a == "-Dglfwstub.windowHeight=1280"));
+        assert!(spec_full
+            .argv
+            .iter()
+            .any(|a| a == "-Dcacio.managed.screensize=2772x1280"));
+
+        let spec_scaled = build_mobile_launch_spec(MobileSpecInputs {
+            paths: &paths,
+            profile: &profile,
+            account: &account,
+            access_token: "0",
+            vanilla: &vanilla,
+            java_bin: &java_bin,
+            java_major: 17,
+            main_class: "cpw.mods.bootstraplauncher.BootstrapLauncher",
+            include_client_jar: false,
+            loader_jvm_args: &[],
+            loader_game_args: &[],
+            legacy_mc_args_override: None,
+            authlib_jvm_args: &[],
+            quick_play_server: None,
+            renderer: MobileRendererMode::MobileGlues,
+            render_scale_pct: 75,
+            surface_size: (1280, 2772),
+            input_port: 41001,
+            runtime_root: &runtime_root,
+            log_file: &log_file,
+        })
+        .unwrap();
+
+        assert_eq!(spec_scaled.physical_width, 2772);
+        assert_eq!(spec_scaled.physical_height, 1280);
+        assert_eq!(spec_scaled.window_width, 2078);
+        assert_eq!(spec_scaled.window_height, 960);
+
+        profile.window_width = Some(1600);
+        profile.window_height = Some(900);
+        let spec_custom = build_mobile_launch_spec(MobileSpecInputs {
+            paths: &paths,
+            profile: &profile,
+            account: &account,
+            access_token: "0",
+            vanilla: &vanilla,
+            java_bin: &java_bin,
+            java_major: 17,
+            main_class: "cpw.mods.bootstraplauncher.BootstrapLauncher",
+            include_client_jar: false,
+            loader_jvm_args: &[],
+            loader_game_args: &[],
+            legacy_mc_args_override: None,
+            authlib_jvm_args: &[],
+            quick_play_server: None,
+            renderer: MobileRendererMode::MobileGlues,
+            render_scale_pct: 75,
+            surface_size: (1280, 2772),
+            input_port: 41002,
+            runtime_root: &runtime_root,
+            log_file: &log_file,
+        })
+        .unwrap();
+
+        assert_eq!(spec_custom.physical_width, 2772);
+        assert_eq!(spec_custom.physical_height, 1280);
+        assert_eq!(spec_custom.window_width, 1600);
+        assert_eq!(spec_custom.window_height, 900);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn filters_foreign_native_jars_keeps_arm64_and_syncs_forge_merge_modules() {
+        assert!(is_incompatible_mobile_library_jar(
+            "/data/libraries/io/netty/netty-transport-native-epoll/4.1.77.Final/netty-transport-native-epoll-4.1.77.Final-linux-x86_64.jar"
+        ));
+        assert!(is_incompatible_mobile_library_jar(
+            "/data/libraries/io/netty/netty-transport-native-epoll/4.1.82.Final/netty-transport-native-epoll-4.1.82.Final-linux-riscv64.jar"
+        ));
+        assert!(is_incompatible_mobile_library_jar(
+            "/data/libraries/com/mojang/text2speech/1.13.9/text2speech-1.13.9-natives-windows.jar"
+        ));
+        assert!(is_incompatible_mobile_library_jar(
+            "/data/libraries/com/mojang/text2speech/1.13.9/text2speech-1.13.9-natives-linux.jar"
+        ));
+        assert!(is_incompatible_mobile_library_jar(
+            "/data/libraries/ca/weblite/java-objc-bridge/1.1/java-objc-bridge-1.1-natives-osx.jar"
+        ));
+        assert!(is_incompatible_mobile_library_jar(
+            "/data/libraries/io/netty/netty-resolver-dns-native-macos/4.1.77.Final/netty-resolver-dns-native-macos-4.1.77.Final-osx-aarch_64.jar"
+        ));
+        assert!(is_incompatible_mobile_library_jar(
+            "/data/libraries/org/lwjgl/lwjgl-glfw/3.3.1/lwjgl-glfw-3.3.1-natives-linux-arm64.jar"
+        ));
+        assert!(is_incompatible_mobile_library_jar(
+            "/data/libraries/org/lwjgl/lwjgl-jemalloc/3.3.1/lwjgl-jemalloc-3.3.1-natives-linux.jar"
+        ));
+        assert!(!is_incompatible_mobile_library_jar(
+            "/data/libraries/org/lwjgl/lwjgl-jemalloc/3.3.1/lwjgl-jemalloc-3.3.1.jar"
+        ));
+
+        assert!(!is_incompatible_mobile_library_jar(
+            "/data/libraries/io/netty/netty-transport-native-epoll/4.1.77.Final/netty-transport-native-epoll-4.1.77.Final-linux-aarch_64.jar"
+        ));
+        assert!(!is_incompatible_mobile_library_jar(
+            "/data/libraries/com/example/native/1.0/native-1.0-linux-arm64.jar"
+        ));
+        assert!(!is_incompatible_mobile_library_jar(
+            "/data/libraries/com/mojang/text2speech/1.16.7/text2speech-1.16.7-natives-linux-arm64.jar"
+        ));
+        assert!(!is_incompatible_mobile_library_jar(
+            "/data/libraries/com/mojang/text2speech/1.16.7/text2speech-1.16.7-natives-linux-aarch_64.jar"
+        ));
+        assert!(!is_incompatible_mobile_library_jar(
+            "/data/libraries/io/netty/netty-resolver-dns-classes-macos/4.1.82.Final/netty-resolver-dns-classes-macos-4.1.82.Final.jar"
+        ));
+
+        let root = std::env::temp_dir().join(format!("thk-mob-cp-{}", Uuid::new_v4()));
+        let paths = AppPaths::from_root(root.clone()).unwrap();
+        let inst_dir = root.join("instance");
+        fs::create_dir_all(&inst_dir).unwrap();
+        let runtime_root = root.join("mobile_runtime");
+        fs::create_dir_all(runtime_root.join("lwjgl3/3.3.3")).unwrap();
+        fs::write(runtime_root.join("lwjgl3/3.3.3/lwjgl.jar"), b"").unwrap();
+        fs::write(runtime_root.join("lwjgl3/3.3.3/lwjgl-glfw.jar"), b"").unwrap();
+        fs::write(runtime_root.join("lwjgl3/3.3.3/lwjgl-opengl.jar"), b"").unwrap();
+        fs::write(runtime_root.join("lwjgl3/3.3.3/lwjgl-vma.jar"), b"").unwrap();
+
+        let profile = GameProfile {
+            id: "mob-cp".into(),
+            name: "Forge 1.19.2".into(),
+            game_version: "1.19.2".into(),
+            loader: LoaderType::Forge,
+            loader_version: Some("43.5.1".into()),
+            instance_path: inst_dir,
+            is_custom_path: true,
+            ram_mb: 4096,
+            java_path: None,
+            jvm_args: String::new(),
+            auto_perf_mods: false,
+            icon_url: None,
+            window_width: None,
+            window_height: None,
+            fullscreen: false,
+            total_play_seconds: 0,
+            session_count: 0,
+            crash_count: 0,
+            last_played_at: None,
+            created_at: 0,
+        };
+        let account = fixture_account();
+        let vanilla = PreparedVanillaAssets {
+            version_json: VanillaVersionJson {
+                id: "1.19.2".into(),
+                main_class: "net.minecraft.client.main.Main".into(),
+                minecraft_arguments: None,
+                arguments: Some(MojangArguments {
+                    jvm: vec![json!("-cp"), json!("${classpath}")],
+                    game: vec![],
+                }),
+                libraries: vec![],
+                downloads: None,
+                asset_index: None,
+                assets: None,
+                java_version: None,
+            },
+            client_jar: root.join("client.jar"),
+            libraries: vec![
+                PathBuf::from("/libs/io/netty/netty-transport-native-epoll/4.1.77.Final/netty-transport-native-epoll-4.1.77.Final-linux-x86_64.jar"),
+                PathBuf::from("/libs/io/netty/netty-transport-native-epoll/4.1.77.Final/netty-transport-native-epoll-4.1.77.Final-linux-aarch_64.jar"),
+                PathBuf::from("/libs/com/mojang/text2speech/1.13.9/text2speech-1.13.9-natives-windows.jar"),
+                PathBuf::from("/libs/net/java/dev/jna/jna/5.14.0/jna-5.14.0.jar"),
+                PathBuf::from("/libs/net/java/dev/jna/jna-platform/5.14.0/jna-platform-5.14.0.jar"),
+            ],
+            natives_dir: root.join("natives"),
+            assets_dir: root.join("assets"),
+            virtual_assets_dir: None,
+            map_to_resources: false,
+            asset_index_id: "1.19".into(),
+        };
+
+        let loader_jvm_args = vec![
+            "-DmergeModules=jna-5.12.1.jar,jna-platform-5.12.1.jar;fmlloader-1.19.2.jar"
+                .to_string(),
+        ];
+        let java_bin = root.join("jre17/bin/java");
+        let log_file = root.join("mobile_game.log");
+        let spec = build_mobile_launch_spec(MobileSpecInputs {
+            paths: &paths,
+            profile: &profile,
+            account: &account,
+            access_token: "0",
+            vanilla: &vanilla,
+            java_bin: &java_bin,
+            java_major: 17,
+            main_class: "cpw.mods.bootstraplauncher.BootstrapLauncher",
+            include_client_jar: false,
+            loader_jvm_args: &loader_jvm_args,
+            loader_game_args: &[],
+            legacy_mc_args_override: None,
+            authlib_jvm_args: &[],
+            quick_play_server: None,
+            renderer: MobileRendererMode::MobileGlues,
+            render_scale_pct: 100,
+            surface_size: (1280, 2772),
+            input_port: 41003,
+            runtime_root: &runtime_root,
+            log_file: &log_file,
+        })
+        .unwrap();
+
+        let cp_idx = spec.argv.iter().position(|a| a == "-cp").unwrap();
+        let cp_val = &spec.argv[cp_idx + 1];
+        assert!(!cp_val.contains("linux-x86_64.jar"));
+        assert!(!cp_val.contains("natives-windows.jar"));
+        assert!(!cp_val.contains("lwjgl-vma.jar"));
+        assert!(cp_val.contains("lwjgl-glfw.jar"));
+        assert!(cp_val.contains("lwjgl-opengl.jar"));
+        assert!(cp_val.contains("netty-transport-native-epoll-4.1.77.Final-linux-aarch_64.jar"));
+        assert!(spec.argv.iter().any(|a| a == "-Djna.nosys=true"));
+        assert!(spec.argv.iter().any(|a| {
+            a == "-DmergeModules=jna-5.14.0.jar,jna-platform-5.14.0.jar;fmlloader-1.19.2.jar"
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

@@ -1040,6 +1040,21 @@ fn collect_loader_library_tasks(
         if !evaluate_rules(lib.rules.as_deref(), &features) {
             continue;
         }
+        if cfg!(target_os = "android") {
+            if let Some((upgraded_coord, rel_path, url, sha1)) =
+                crate::vanilla::android_upgraded_library_spec(&lib.name)
+            {
+                let dest = SafePath::resolve_child(libraries_dir, rel_path)?;
+                paths.push(dest.clone());
+                if !dest.is_file() {
+                    let mut task = DownloadTask::new(url.to_string(), dest);
+                    task.expected_sha1 = Some(sha1.to_string());
+                    task.label = upgraded_coord.to_string();
+                    tasks.push(task);
+                }
+                continue;
+            }
+        }
         let art = lib.downloads.as_ref().and_then(|d| d.artifact.as_ref());
         let rel_opt = art
             .and_then(|a| a.path.clone())
