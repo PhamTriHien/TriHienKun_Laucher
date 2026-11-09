@@ -1,0 +1,23 @@
+[package]
+name = "thk-android-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "thk_android_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni-sys = "0.4.1"
+libc = "0.2.191"

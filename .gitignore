@@ -3,6 +3,8 @@
 **/*.rs.bk
 
 # IDE & OS metadata
+.agents/
+.agent/
 .vscode/
 .idea/
 .vs/

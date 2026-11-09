@@ -152,36 +152,82 @@ pub fn build_java_ld_library_path(java_home: &Path, existing: Option<&str>) -> O
 }
 
 #[cfg(target_os = "android")]
-const ANDROID_JVM_SHIM_SO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libthk_jvm_shim.so"));
+fn resolve_running_android_apk_path() -> Option<PathBuf> {
+    if let Some(env_apk) = std::env::var_os("THK_ANDROID_APK_PATH")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
+        return Some(env_apk);
+    }
+
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    let mut fallback: Option<PathBuf> = None;
+    for line in maps.lines() {
+        for token in line.split_whitespace() {
+            if token.starts_with('/') && token.ends_with(".apk") {
+                let candidate = Path::new(token);
+                if candidate.is_file() {
+                    if token.contains("com.trihienkun.laucher") {
+                        return Some(candidate.to_path_buf());
+                    }
+                    if fallback.is_none() {
+                        fallback = Some(candidate.to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+    fallback
+}
 
 #[cfg(target_os = "android")]
 pub fn ensure_android_jvm_shim_library(fallback_dir: Option<&Path>) -> Option<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
     let base_dir = thk_core::AppPaths::resolve_default()
         .ok()
         .map(|p| p.root.join(".jvm_compat"))
         .or_else(|| fallback_dir.map(|d| d.join(".jvm_compat")))?;
     std::fs::create_dir_all(&base_dir).ok()?;
-    let shim_path = base_dir.join("libthk_jvm_shim.so");
-    let needs_write = match std::fs::metadata(&shim_path) {
-        Ok(meta) => meta.len() != ANDROID_JVM_SHIM_SO.len() as u64,
-        Err(_) => true,
-    };
-    if needs_write {
-        let tmp_path = base_dir.join(format!(".libthk_jvm_shim.{}.tmp", std::process::id()));
-        std::fs::write(&tmp_path, ANDROID_JVM_SHIM_SO).ok()?;
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755));
+    let shim_path = base_dir.join("libthk_android_ffi.so");
+
+    if let Ok(meta) = std::fs::metadata(&shim_path) {
+        if meta.is_file() && meta.len() > 0 {
+            let _ = std::fs::set_permissions(&shim_path, std::fs::Permissions::from_mode(0o755));
+            return Some(shim_path);
         }
-        if std::fs::rename(&tmp_path, &shim_path).is_err() {
-            let _ = std::fs::remove_file(&tmp_path);
-            if !shim_path.is_file() {
-                return None;
-            }
+    }
+
+    let apk_path = resolve_running_android_apk_path()?;
+    let apk_file = std::fs::File::open(&apk_path).ok()?;
+    let mut archive = zip::ZipArchive::new(apk_file).ok()?;
+    let mut entry = archive
+        .by_name("lib/arm64-v8a/libthk_android_ffi.so")
+        .ok()?;
+
+    let tmp_path = base_dir.join(format!(".libthk_android_ffi.{}.tmp", std::process::id()));
+    let copy_ok = (|| -> Option<()> {
+        let mut out_file = std::fs::File::create(&tmp_path).ok()?;
+        let copied = std::io::copy(&mut entry, &mut out_file).ok()?;
+        if copied == 0 {
+            return None;
         }
-    } else {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&shim_path, std::fs::Permissions::from_mode(0o755));
+        out_file.flush().ok()?;
+        Some(())
+    })();
+
+    if copy_ok.is_none() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return shim_path.is_file().then_some(shim_path);
+    }
+
+    let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755));
+    if std::fs::rename(&tmp_path, &shim_path).is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+        if !shim_path.is_file() {
+            return None;
+        }
     }
     Some(shim_path)
 }

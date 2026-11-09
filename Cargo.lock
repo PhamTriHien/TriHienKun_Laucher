@@ -6025,6 +6025,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "thk-android-ffi"
+version = "1.0.1"
+dependencies = [
+ "jni-sys 0.4.1",
+ "libc",
+ "serde",
+ "serde_json",
+ "zip",
+]
+
+[[package]]
 name = "thk-app"
 version = "1.0.1"
 dependencies = [
@@ -6134,6 +6145,7 @@ dependencies = [
  "tracing",
  "urlencoding",
  "uuid 1.29.0",
+ "zip",
 ]
 
 [[package]]

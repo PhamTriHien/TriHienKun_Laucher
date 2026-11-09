@@ -817,7 +817,7 @@ pub(super) fn profile_tabs_ui(
     sliding_pill_tabs(ui, "home_profile_tabs_pill", &tabs, current)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows"))]
 pub(crate) fn render_tab_general(
     app: &mut LauncherAppState,
     ui: &mut egui::Ui,

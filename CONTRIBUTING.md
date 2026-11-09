@@ -54,7 +54,7 @@ cargo build --release -p thk-app
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android-apk.ps1 -Profile release
 ```
 
-Quy trình chi tiết, lệnh live Modrinth và phạm vi xác minh nằm trong [docs/TESTING.md](docs/TESTING.md). Tại mốc `v1.0.1` ngày 09/11/2026, Windows đạt **175 passed, 0 failed, 1 ignored** (bao gồm 22 ảnh golden `egui_kittest` khớp `0 failed pixels`), `cargo fmt --all -- --check` đạt `0 diff` toàn workspace, doc-tests, Clippy (cả host lẫn `--target aarch64-linux-android`) và build Release Desktop / Android APK đều đạt. Test bị ignore cần mạng, chạy riêng; số lượng test không phải bằng chứng mọi tính năng đã chạy đầu-cuối.
+Quy trình chi tiết, lệnh live Modrinth và phạm vi xác minh nằm trong [docs/TESTING.md](docs/TESTING.md). Tại mốc `v1.0.1` ngày 09/11/2026, Windows đạt **183 passed, 0 failed, 1 ignored** trên 10 crates (bao gồm 22 ảnh golden `egui_kittest` khớp `0 failed pixels`), `cargo fmt --all -- --check` đạt `0 diff` toàn workspace, doc-tests, Clippy (cả host lẫn `--target aarch64-linux-android --lib -p thk-android-ffi -p thk-app`) và build Release Desktop / Android APK đều đạt. Test bị ignore cần mạng, chạy riêng; số lượng test không phải bằng chứng mọi tính năng đã chạy đầu-cuối.
 
 - Kiểm tra `git -c core.autocrlf=false diff --check` trước khi gửi thay đổi.
 - Chạy `cargo fmt --all -- --check` để đảm bảo toàn bộ tệp `.rs` trong workspace tuân thủ `rustfmt` chuẩn.
@@ -66,7 +66,7 @@ Quy trình chi tiết, lệnh live Modrinth và phạm vi xác minh nằm trong 
 
 ## 3. Quy Chuẩn Kiến Trúc & An Toàn Mã Nguồn
 
-1. **Cấm mã `unsafe`**: Giữ nguyên `#![deny(unsafe_code)]` ở đầu mọi crate (chỉ miễn trừ duy nhất chữ ký xuất điểm vào `#[cfg(target_os = "android")] #[allow(unsafe_code)] #[no_mangle] pub fn android_main` không chứa khối `unsafe` trong `crates/thk-app/src/lib.rs`). Không thêm khối `unsafe` dưới bất kỳ hình thức nào.
+1. **Thuần Rust (`0` tệp C/C++) & Phân tách biên `unsafe`**: Toàn dự án tuyệt đối không chứa mã C/C++ (`0` tệp `.c`, `.h`, `.cpp`, `.hpp`). Giữ nguyên `#![deny(unsafe_code)]` ở đầu toàn bộ **9 crate cốt lõi** (`thk-core`, `thk-auth`, `thk-java`, `thk-mods`, `thk-launcher`, `thk-network`, `thk-server`, `thk-renderer3d`, `thk-app`; chỉ miễn trừ duy nhất chữ ký xuất điểm vào `#[cfg(target_os = "android")] #[allow(unsafe_code)] #[no_mangle] pub fn android_main` không chứa khối `unsafe` trong `crates/thk-app/src/lib.rs`). Toàn bộ tương tác FFI/JNI/Bionic trên Android được cô lập vào crate chuyên trách `crates/thk-android-ffi` (mọi hàm `extern "system"` bắt buộc bọc `std::panic::catch_unwind`, kiểm tra `NULL` và kiểm tra/xóa ngoại lệ tồn đọng qua `ExceptionCheck` / `ExceptionClear` cho Android `CheckJNI`), đồng thời thư mục `android/java/` chỉ giữ vỏ `.dex` mỏng chuyển tiếp lời gọi `native` và Android UI Looper SDK.
 2. **Tách biệt tầng nghiệp vụ và giao diện**:
    - Logic nghiệp vụ, giao thức mạng, giải nén, cài đặt nội dung theo giao dịch (`thk-mods::install`) và cơ sở dữ liệu phải đặt trong các crate nền (`thk-core`, `thk-auth`, `thk-java`, `thk-mods`, `thk-launcher`, `thk-server`, `thk-network`, `thk-renderer3d`) kèm bài kiểm thử đơn vị độc lập.
    - `thk-app` điều phối trạng thái giao diện `egui`, âm thanh, khay hệ thống và kết nối sự kiện `tokio`; các module chuyên trách `pack_install` và `updater` (cùng `apply_update.ps1`) xử lý giao dịch Profile/modpack và helper cập nhật ứng dụng. Không rải logic filesystem của các luồng này vào hàm vẽ UI.
@@ -84,13 +84,13 @@ Quy trình chi tiết, lệnh live Modrinth và phạm vi xác minh nằm trong 
 
 Quy trình `.github/workflows/release.yml` tự động vận hành qua 4 job để kiểm định và xuất bản đầy đủ **6 nền tảng phát hành** khớp với `updater::expected_asset_name_for`:
 
-1. **`quality-gate`**: Chạy song song trên cả **`ubuntu-24.04`** và **`windows-latest`** với các cổng bắt buộc: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` và `cargo test --workspace -- --test-threads=1` (trên runner Windows Server dùng `--skip views::servers::visual_tests::visual_` để thực thi toàn bộ 171 bài kiểm thử đơn vị/giao dịch/PowerShell self-updater/`egui_kittest` bounds/AccessKit và tách riêng 4 hàm so khớp pixel `threshold(0.0)` của 22 ảnh golden vốn phụ thuộc bản sửa đổi font hệ thống/GPU driver máy trạm cục bộ theo `crates/thk-app/tests/README.md`).
+1. **`quality-gate`**: Chạy song song trên cả **`ubuntu-24.04`** và **`windows-latest`** với các cổng bắt buộc: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` và `cargo test --workspace -- --test-threads=1` (trên runner Windows Server dùng `--skip views::servers::visual_tests::visual_` để thực thi toàn bộ 179 bài kiểm thử đơn vị/giao dịch/PowerShell self-updater/`egui_kittest` bounds/AccessKit và tách riêng 4 hàm so khớp pixel `threshold(0.0)` của 22 ảnh golden vốn phụ thuộc bản sửa đổi font hệ thống/GPU driver máy trạm cục bộ theo `crates/thk-app/tests/README.md`).
 2. **`build-matrix`** *(5 nền tảng Desktop)*: Sau khi vượt qua `quality-gate`, biên dịch song song các tệp thực thi tối ưu hóa Release:
    - `trihienkun-laucher-windows-x64.exe` (`x86_64-pc-windows-msvc` trên `windows-latest`)
    - `trihienkun-laucher-linux-x64` (`x86_64-unknown-linux-gnu` trên `ubuntu-24.04`)
    - `trihienkun-laucher-linux-arm64` (`aarch64-unknown-linux-gnu` trên `ubuntu-24.04-arm`)
    - `trihienkun-laucher-macos-x64` (`x86_64-apple-darwin` trên `macos-latest`)
    - `trihienkun-laucher-macos-arm64` (`aarch64-apple-darwin` trên `macos-latest`)
-3. **`build-android`** *(Nền tảng thứ 6 — Android Native)*: Sau khi vượt qua `quality-gate`, trên `windows-latest` kiểm tra `cargo clippy --target aarch64-linux-android --lib -p thk-app -- -D warnings` và đóng gói APK căn chỉnh trang nhớ `16 KB` qua `scripts/build-android-apk.ps1 -Profile release`:
+3. **`build-android`** *(Nền tảng thứ 6 — Android Native)*: Sau khi vượt qua `quality-gate`, trên `windows-latest` kiểm tra `cargo clippy --target aarch64-linux-android --lib -p thk-android-ffi -p thk-app -- -D warnings` và đóng gói APK căn chỉnh trang nhớ `16 KB` qua `scripts/build-android-apk.ps1 -Profile release`:
    - `trihienkun-laucher-android-arm64.apk` (`aarch64-linux-android` / `arm64-v8a`)
 4. **`publish-release`**: Khi đẩy thẻ phiên bản dạng `v*` (ví dụ `git tag v1.0.1 && git push origin v1.0.1`), hệ thống hợp nhất các tệp băm theo thứ tự `LC_ALL=C sort` vào `SHA256SUMS.txt` duy nhất (loại bỏ các tệp `.sha256` lẻ) và phát hành trọn bộ **6 gói cài đặt + `SHA256SUMS.txt`** lên GitHub Releases để trình cập nhật trong ứng dụng (`updater.rs`) tải về và đối chiếu `SHA-256`.

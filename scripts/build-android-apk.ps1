@@ -84,8 +84,8 @@ $env:AR_aarch64_linux_android = $LlvmAr
 $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = $Clang
 $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS = "-C link-arg=-Wl,-z,max-page-size=16384"
 
-Write-Host "[1/6] Building native Rust library (aarch64-linux-android, $Profile)..."
-$CargoArgs = @("build", "--target", "aarch64-linux-android", "--lib", "-p", "thk-app")
+Write-Host "[1/6] Building native Rust libraries (aarch64-linux-android, $Profile)..."
+$CargoArgs = @("build", "--target", "aarch64-linux-android", "--lib", "-p", "thk-android-ffi", "-p", "thk-app")
 if ($Profile -eq "release") {
     $CargoArgs += "--release"
 }
@@ -99,21 +99,30 @@ $SoPath = Join-Path $RepoRoot "target\aarch64-linux-android\$CargoOutDir\libthk_
 if (-not (Test-Path $SoPath)) {
     throw "Expected native shared library missing at $SoPath"
 }
+$FfiSoPath = Join-Path $RepoRoot "target\aarch64-linux-android\$CargoOutDir\libthk_android_ffi.so"
+if (-not (Test-Path $FfiSoPath)) {
+    throw "Expected native shared library missing at $FfiSoPath"
+}
 
 Write-Host "[2/6] Auditing ELF dependencies and 16 KB page alignment..."
-$NeededOutput = (& $ReadObj --needed-libs $SoPath) -join "`n"
-Write-Host $NeededOutput
-$NeedsCppShared = $NeededOutput -match "libc\+\+_shared\.so"
+$NeedsCppShared = $false
+foreach ($ElfPath in @($SoPath, $FfiSoPath)) {
+    $NeededOutput = (& $ReadObj --needed-libs $ElfPath) -join "`n"
+    Write-Host $NeededOutput
+    if ($NeededOutput -match "libc\+\+_shared\.so") {
+        $NeedsCppShared = $true
+    }
 
-$PhdrOutput = (& $ReadObj --program-headers $SoPath) -join "`n"
-$LoadAlignments = [regex]::Matches($PhdrOutput, "Type:\s+PT_LOAD[\s\S]*?Alignment:\s+(\d+)")
-if ($LoadAlignments.Count -eq 0) {
-    throw "Failed to inspect PT_LOAD segments in $SoPath"
-}
-foreach ($m in $LoadAlignments) {
-    $alignVal = [int]$m.Groups[1].Value
-    if ($alignVal -lt 16384) {
-        throw "PT_LOAD segment alignment ($alignVal) is below 16384 bytes"
+    $PhdrOutput = (& $ReadObj --program-headers $ElfPath) -join "`n"
+    $LoadAlignments = [regex]::Matches($PhdrOutput, "Type:\s+PT_LOAD[\s\S]*?Alignment:\s+(\d+)")
+    if ($LoadAlignments.Count -eq 0) {
+        throw "Failed to inspect PT_LOAD segments in $ElfPath"
+    }
+    foreach ($m in $LoadAlignments) {
+        $alignVal = [int]$m.Groups[1].Value
+        if ($alignVal -lt 16384) {
+            throw "PT_LOAD segment alignment ($alignVal) in $ElfPath is below 16384 bytes"
+        }
     }
 }
 
@@ -188,25 +197,10 @@ if ($Profile -eq "debug" -and (Test-Path $LlvmStrip)) {
     & $LlvmStrip --strip-debug $StagedSo
 }
 
-$ShimSrc = Join-Path $RepoRoot "crates\thk-java\native\thk_jvm_shim.c"
-$ShimSo = Join-Path $NativeAbiStage "libthk_jvm_shim.so"
-& $Clang -shared -fPIC -O2 -Wall -Wextra -Werror "-Wl,-z,max-page-size=16384" -o $ShimSo $ShimSrc -ldl
-if ($LASTEXITCODE -ne 0) {
-    throw "clang build for libthk_jvm_shim.so failed with exit code $LASTEXITCODE"
-}
-$ShimPhdr = (& $ReadObj --program-headers $ShimSo) -join "`n"
-$ShimAlignments = [regex]::Matches($ShimPhdr, "Type:\s+PT_LOAD[\s\S]*?Alignment:\s+(\d+)")
-if ($ShimAlignments.Count -eq 0) {
-    throw "Failed to inspect PT_LOAD segments in $ShimSo"
-}
-foreach ($m in $ShimAlignments) {
-    $alignVal = [int]$m.Groups[1].Value
-    if ($alignVal -lt 16384) {
-        throw "libthk_jvm_shim.so PT_LOAD segment alignment ($alignVal) is below 16384 bytes"
-    }
-}
+$StagedFfiSo = Join-Path $NativeAbiStage "libthk_android_ffi.so"
+Copy-Item -Path $FfiSoPath -Destination $StagedFfiSo -Force
 if ($Profile -eq "debug" -and (Test-Path $LlvmStrip)) {
-    & $LlvmStrip --strip-debug $ShimSo
+    & $LlvmStrip --strip-debug $StagedFfiSo
 }
 
 if ($NeedsCppShared) {
@@ -281,7 +275,7 @@ Write-Host $AlignCheck
 if ($LASTEXITCODE -ne 0) {
     throw "zipalign 16 KB verification failed on $OutApk"
 }
-if ($AlignCheck -match "libthk_(app|jvm_shim)\.so \(OK - compressed\)") {
+if ($AlignCheck -match "libthk_(app|android_ffi)\.so \(OK - compressed\)") {
     throw "Native .so libraries must be stored uncompressed (ZIP method 0) for extractNativeLibs=false"
 }
 

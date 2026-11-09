@@ -123,8 +123,8 @@ Một số luồng cần người dùng tự xác thực tài khoản hoặc ch�
 
 ```text
 trihienkun-laucher/
-├── Cargo.toml                  # Cấu hình Cargo Workspace (9 crates)
-├── android/                    # Mã nguồn đóng gói Android Native (Manifest, Java bridge, tài nguyên)
+├── Cargo.toml                  # Cấu hình Cargo Workspace (10 crates)
+├── android/                    # Vỏ .dex mỏng trên Android (Manifest, 13 tệp .java chuyển tiếp JNI, tài nguyên)
 ├── scripts/                    # Kịch bản đóng gói APK arm64-v8a căn chỉnh 16 KB
 ├── assets/                     # Biểu tượng ứng dụng, tài nguyên giao diện và từ điển vi/en
 ├── crates/
@@ -136,6 +136,7 @@ trihienkun-laucher/
 │   ├── thk-server/             # Cài đặt 10 lõi máy chủ, giám sát tài nguyên, quản lý người chơi, FTP/FTPS
 │   ├── thk-network/            # Mở cổng LAN / VPN / IPv6 / UPnP, Ping máy chủ, đường hầm Bore, Discord RPC
 │   ├── thk-renderer3d/         # Kết xuất mô hình nhân vật 3D, Cape và Elytra bằng wgpu
+│   ├── thk-android-ffi/        # Cầu nối JNI, Bionic runtime, giải nén mobile_runtime và điều phối :game trên Android
 │   └── thk-app/                # Giao diện người dùng trên Desktop và Android, trình tự cập nhật
 └── docs/                       # Tài liệu kiến trúc, cơ sở dữ liệu, bảo mật, hướng dẫn sử dụng và kiểm thử
 ```

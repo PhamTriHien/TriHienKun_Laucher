@@ -10,6 +10,7 @@ members = [
     "crates/thk-server",
     "crates/thk-renderer3d",
     "crates/thk-app",
+    "crates/thk-android-ffi",
 ]
 
 [workspace.package]

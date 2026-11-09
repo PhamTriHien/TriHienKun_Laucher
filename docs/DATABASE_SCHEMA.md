@@ -23,7 +23,7 @@ Thư mục gốc được xác định bởi `AppPaths::resolve_default()` thôn
 ├── thk_laucher.db-wal         # Nhật ký ghi trước SQLite (Write-Ahead Log)
 ├── thk_laucher.db-shm         # Bộ nhớ chia sẻ chỉ mục WAL
 ├── authlib-injector.jar       # Agent JVM cục bộ hỗ trợ hiển thị Skin/Cape Offline
-├── .jvm_compat/               # Thư viện shim libthk_jvm_shim.so tắt Bionic Heap Tagging cho JVM trên Android
+├── .jvm_compat/               # Thư viện thuần Rust libthk_android_ffi.so tắt Bionic Heap Tagging cho JVM trên Android
 ├── icons/                     # Biểu tượng ứng dụng sinh tự động (icon.png, icon.ico)
 ├── backgrounds/               # Ảnh nền tùy chỉnh (wallpaper.*) & nhạc nền riêng (custom_bgm.*)
 ├── cache/                     # Bộ nhớ đệm tải gói Modpack, bản cập nhật & vanilla_steve_{wide,slim}.png

@@ -23,11 +23,11 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.nio.charset.StandardCharsets;
-
 public final class ThkKeepAliveService extends Service {
+    static {
+        ThkNativeBridge.ensureLoaded();
+    }
+
     public static final String ACTION_START_OR_UPDATE = "com.trihienkun.laucher.KEEP_ALIVE_UPDATE";
     public static final String ACTION_STOP = "com.trihienkun.laucher.KEEP_ALIVE_STOP";
     public static final String ACTION_OPEN_HUB = "com.trihienkun.laucher.OPEN_HUB";
@@ -351,23 +351,7 @@ public final class ThkKeepAliveService extends Service {
     }
 
     private void writeFocusMode(String mode) {
-        try {
-            File dir = new File(getFilesDir(), ".thk_bridge");
-            if (!dir.exists()) {
-                dir.mkdirs();
-            }
-            File tmp = new File(dir, "focus_mode.tmp");
-            File dst = new File(dir, "focus_mode.txt");
-            try (FileOutputStream out = new FileOutputStream(tmp)) {
-                out.write(mode.getBytes(StandardCharsets.UTF_8));
-                out.flush();
-            }
-            if (dst.exists()) {
-                dst.delete();
-            }
-            tmp.renameTo(dst);
-        } catch (Throwable ignored) {
-        }
+        ThkNativeBridge.nativeWriteFocusMode(getFilesDir().getAbsolutePath(), mode);
     }
 
     private void bringLauncherToFront(String focusMode) {

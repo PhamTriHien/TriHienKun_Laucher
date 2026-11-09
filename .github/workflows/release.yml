@@ -281,7 +281,7 @@ jobs:
           $env:AR_aarch64_linux_android = $LlvmAr
           $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = $Clang
           $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS = "-C link-arg=-Wl,-z,max-page-size=16384"
-          & cargo clippy --target aarch64-linux-android --lib -p thk-app -- -D warnings
+          & cargo clippy --target aarch64-linux-android --lib -p thk-android-ffi -p thk-app -- -D warnings
           if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
           }
