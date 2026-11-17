@@ -45,19 +45,21 @@ use thk_mods::{
     import_curseforge_zip, import_mrpack_archive, import_server_addon_jar,
     inspect_modpack_for_server, install_curseforge_content, install_curseforge_modpack_version,
     install_ftb_modpack_version, install_modrinth_content, install_modrinth_modpack_version,
-    install_server_provider_addon, install_spiget_plugin, install_technic_modpack_version,
-    list_local_content, list_local_worlds, list_server_addon_files, loader_to_server_engine,
-    populate_server_from_cloud_modpack, populate_server_from_modpack_archive,
-    populate_server_from_profile, search_provider, toggle_local_content, toggle_server_addon_file,
-    ContentUpdateCandidate, ImportedPackMetadata, LocalContentItem, LocalWorldInfo, ProjectDetail,
-    ProjectSummary, ProjectVersion, SearchQuery, SearchSort, ServerAddonFile,
+    install_selected_optimizations, install_server_provider_addon, install_spiget_plugin,
+    install_technic_modpack_version, list_local_content, list_local_worlds,
+    list_server_addon_files, loader_to_server_engine, populate_server_from_cloud_modpack,
+    populate_server_from_modpack_archive, populate_server_from_profile,
+    resolve_optimization_suggestions, search_provider, target_supports_optimizations,
+    toggle_local_content, toggle_server_addon_file, ContentUpdateCandidate, ImportedPackMetadata,
+    LocalContentItem, LocalWorldInfo, OptimizationTarget, ProjectDetail, ProjectSummary,
+    ProjectVersion, ResolvedOptimizationSuggestion, SearchQuery, SearchSort, ServerAddonFile,
     ServerModpackInspection,
 };
 use thk_network::{
     detect_local_network_snapshot, detect_primary_lan_ipv4, ping_minecraft_server,
-    probe_connected_network_snapshot, ConnectedNetworkSnapshot, DirectHostConfig, DirectHostStatus,
-    DiscordPresenceState, DiscordRpcService, LanShareCoordinator, LanTunnelEvent,
-    LanWorldAnnouncement, ServerStatusPing, TunnelStatus,
+    ConnectedNetworkSnapshot, DiscordPresenceState, DiscordRpcService, LanShareCoordinator,
+    LanTunnelEvent, LanWorldAnnouncement, ServerStatusPing, VirtualPortClientStatus,
+    VirtualPortHostStatus,
 };
 use thk_renderer3d::{
     detect_skin_variant, extract_vanilla_steve_skin, load_and_normalize_cape_file,
@@ -293,6 +295,12 @@ pub enum AppAsyncEvent {
         engine: ServerEngine,
         versions: Vec<String>,
     },
+    OptimizationSuggestionsLoaded {
+        is_server: bool,
+        key: OptimizationQueryKey,
+        seq: u64,
+        result: Result<Vec<ResolvedOptimizationSuggestion>, String>,
+    },
     ServerJarInstalled {
         server_id: String,
         jar_file: String,
@@ -375,7 +383,175 @@ pub enum AppAsyncEvent {
         artifacts: Vec<RecoveryArtifact>,
         notify_if_found: bool,
     },
-    NetworkSnapshotProbed(ConnectedNetworkSnapshot),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OptimizationQueryKey {
+    pub target: OptimizationTarget,
+    pub game_version: String,
+}
+
+#[derive(Default)]
+pub struct OptimizationSuggestionDraft {
+    pub loading: bool,
+    pub active_key: Option<OptimizationQueryKey>,
+    pub error: Option<String>,
+    pub suggestions: Vec<ResolvedOptimizationSuggestion>,
+    pub selected_ids: HashSet<String>,
+    pub user_unselected_ids: HashSet<String>,
+    pub cache: HashMap<OptimizationQueryKey, Vec<ResolvedOptimizationSuggestion>>,
+    pub request_seq: u64,
+}
+
+impl OptimizationSuggestionDraft {
+    pub fn apply_resolved(
+        &mut self,
+        key: &OptimizationQueryKey,
+        result: Result<Vec<ResolvedOptimizationSuggestion>, String>,
+    ) {
+        let target_changed = self
+            .active_key
+            .as_ref()
+            .is_some_and(|prev| prev.target != key.target);
+        if target_changed {
+            self.selected_ids.clear();
+            self.user_unselected_ids.clear();
+        }
+        self.loading = false;
+        self.active_key = Some(key.clone());
+
+        match result {
+            Ok(items) => {
+                if items.iter().all(|item| item.error.is_none()) {
+                    self.cache.insert(key.clone(), items.clone());
+                }
+                self.suggestions = items;
+                self.error = None;
+                let valid_ids: HashSet<&str> = self
+                    .suggestions
+                    .iter()
+                    .map(|item| item.project_id.as_str())
+                    .collect();
+                self.selected_ids
+                    .retain(|id| valid_ids.contains(id.as_str()));
+                for item in &self.suggestions {
+                    if item.compatible_version.is_none() {
+                        self.selected_ids.remove(&item.project_id);
+                    } else if item.recommended_by_default
+                        && !self.user_unselected_ids.contains(&item.project_id)
+                    {
+                        self.selected_ids.insert(item.project_id.clone());
+                    }
+                }
+            }
+            Err(err) => {
+                self.suggestions.clear();
+                self.error = Some(err);
+            }
+        }
+    }
+
+    pub fn set_checked(&mut self, project_id: &str, checked: bool) {
+        if checked {
+            self.selected_ids.insert(project_id.to_string());
+            self.user_unselected_ids.remove(project_id);
+        } else {
+            self.selected_ids.remove(project_id);
+            self.user_unselected_ids.insert(project_id.to_string());
+        }
+    }
+
+    pub fn select_recommended(&mut self) {
+        self.selected_ids.clear();
+        self.user_unselected_ids.clear();
+        for item in &self.suggestions {
+            if item.recommended_by_default && item.compatible_version.is_some() {
+                self.selected_ids.insert(item.project_id.clone());
+            }
+        }
+    }
+
+    pub fn select_all_compatible(&mut self) {
+        self.selected_ids.clear();
+        self.user_unselected_ids.clear();
+        for item in &self.suggestions {
+            if item.compatible_version.is_some() {
+                self.selected_ids.insert(item.project_id.clone());
+            }
+        }
+    }
+
+    pub fn select_none(&mut self) {
+        self.selected_ids.clear();
+        for item in &self.suggestions {
+            self.user_unselected_ids.insert(item.project_id.clone());
+        }
+    }
+
+    pub fn selected_suggestions(&self) -> Vec<ResolvedOptimizationSuggestion> {
+        self.suggestions
+            .iter()
+            .filter(|item| {
+                item.compatible_version.is_some() && self.selected_ids.contains(&item.project_id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn prepare_resolution(
+        &mut self,
+        key: Option<OptimizationQueryKey>,
+        force: bool,
+    ) -> Option<(OptimizationQueryKey, u64)> {
+        let Some(key) = key else {
+            self.reset_active_for_reuse();
+            return None;
+        };
+        if !force && self.active_key.as_ref() == Some(&key) {
+            return None;
+        }
+        if !force {
+            if let Some(cached) = self.cache.get(&key).cloned() {
+                self.request_seq = self.request_seq.wrapping_add(1);
+                self.apply_resolved(&key, Ok(cached));
+                return None;
+            }
+        }
+        if self
+            .active_key
+            .as_ref()
+            .is_some_and(|prev| prev.target != key.target)
+        {
+            self.selected_ids.clear();
+            self.user_unselected_ids.clear();
+        }
+        if self.active_key.as_ref() != Some(&key) {
+            self.suggestions.clear();
+        }
+        self.request_seq = self.request_seq.wrapping_add(1);
+        let seq = self.request_seq;
+        self.active_key = Some(key.clone());
+        self.loading = true;
+        self.error = None;
+        Some((key, seq))
+    }
+
+    pub fn reset_active_for_reuse(&mut self) {
+        if self.loading {
+            self.request_seq = self.request_seq.wrapping_add(1);
+        }
+        self.loading = false;
+        self.active_key = None;
+        self.error = None;
+        self.suggestions.clear();
+        self.selected_ids.clear();
+        self.user_unselected_ids.clear();
+    }
+}
+
+enum OptimizationInstallDest {
+    Profile(GameProfile),
+    Server(ManagedServer),
 }
 
 pub struct NewProfileDraft {
@@ -386,6 +562,7 @@ pub struct NewProfileDraft {
     pub ram_mb: u32,
     pub auto_perf_mods: bool,
     pub custom_dir: Option<PathBuf>,
+    pub optimizations: OptimizationSuggestionDraft,
 }
 
 impl Default for NewProfileDraft {
@@ -398,6 +575,7 @@ impl Default for NewProfileDraft {
             ram_mb: 4096,
             auto_perf_mods: true,
             custom_dir: None,
+            optimizations: OptimizationSuggestionDraft::default(),
         }
     }
 }
@@ -670,6 +848,7 @@ pub struct NewServerDraft {
     pub creating: bool,
     pub create_cancel: Option<CancellationToken>,
     pub create_error: Option<String>,
+    pub optimizations: OptimizationSuggestionDraft,
 }
 
 impl Default for NewServerDraft {
@@ -702,6 +881,7 @@ impl Default for NewServerDraft {
             creating: false,
             create_cancel: None,
             create_error: None,
+            optimizations: OptimizationSuggestionDraft::default(),
         }
     }
 }
@@ -744,14 +924,8 @@ pub struct ServersViewState {
     pub server_logs: HashMap<String, Vec<String>>,
     pub server_stats: HashMap<String, ServerResourceStats>,
     pub server_states: HashMap<String, ServerRuntimeState>,
-    pub server_tunnels: HashMap<String, TunnelStatus>,
-    pub server_direct_hosts: HashMap<String, DirectHostStatus>,
-    pub direct_host_port_input: String,
-    pub direct_bind_ip: Option<std::net::Ipv4Addr>,
-    pub direct_announce_lan: bool,
-    pub direct_try_upnp: bool,
+    pub server_virtual_hosts: HashMap<String, VirtualPortHostStatus>,
     pub network_snapshot: ConnectedNetworkSnapshot,
-    pub probing_network: bool,
     pub current_rel_dir: String,
     pub dir_entries: Vec<ServerFileEntry>,
     pub selected_entries: HashSet<String>,
@@ -812,14 +986,8 @@ impl Default for ServersViewState {
             server_logs: HashMap::new(),
             server_stats: HashMap::new(),
             server_states: HashMap::new(),
-            server_tunnels: HashMap::new(),
-            server_direct_hosts: HashMap::new(),
-            direct_host_port_input: "25565".into(),
-            direct_bind_ip: None,
-            direct_announce_lan: true,
-            direct_try_upnp: true,
+            server_virtual_hosts: HashMap::new(),
             network_snapshot: detect_local_network_snapshot(),
-            probing_network: false,
             current_rel_dir: String::new(),
             dir_entries: Vec::new(),
             selected_entries: HashSet::new(),
@@ -924,21 +1092,26 @@ impl Default for JavaModalState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VirtualPortUiMode {
+    #[default]
+    Host,
+    Join,
+}
+
 pub struct LanModalState {
     pub scanner_active: bool,
     pub detected_world: Option<LanWorldAnnouncement>,
     pub ignored_foreign_packets: usize,
     pub manual_port_input: String,
-    pub auto_open_tunnel: bool,
-    pub tunnel_status: TunnelStatus,
     pub primary_lan_ip: Option<String>,
-    pub direct_host_port_input: String,
-    pub direct_bind_ip: Option<std::net::Ipv4Addr>,
-    pub direct_announce_lan: bool,
-    pub direct_try_upnp: bool,
-    pub auto_open_direct_host: bool,
-    pub direct_host_status: DirectHostStatus,
-    pub network_snapshot: ConnectedNetworkSnapshot,
+    pub virtual_mode: VirtualPortUiMode,
+    pub auto_open_virtual_host: bool,
+    pub virtual_host_status: VirtualPortHostStatus,
+    pub virtual_client_status: VirtualPortClientStatus,
+    pub virtual_join_code_input: String,
+    pub virtual_join_port_input: String,
+    pub virtual_join_announce_lan: bool,
 }
 
 impl Default for LanModalState {
@@ -950,16 +1123,14 @@ impl Default for LanModalState {
             detected_world: None,
             ignored_foreign_packets: 0,
             manual_port_input: "25565".into(),
-            auto_open_tunnel: false,
-            tunnel_status: TunnelStatus::Idle,
             primary_lan_ip: Some(primary_ip.to_string()),
-            direct_host_port_input: "25565".into(),
-            direct_bind_ip: None,
-            direct_announce_lan: true,
-            direct_try_upnp: true,
-            auto_open_direct_host: true,
-            direct_host_status: DirectHostStatus::Idle,
-            network_snapshot: snap,
+            virtual_mode: VirtualPortUiMode::Host,
+            auto_open_virtual_host: true,
+            virtual_host_status: VirtualPortHostStatus::Idle,
+            virtual_client_status: VirtualPortClientStatus::Idle,
+            virtual_join_code_input: String::new(),
+            virtual_join_port_input: String::new(),
+            virtual_join_announce_lan: true,
         }
     }
 }
@@ -1163,7 +1334,24 @@ impl LauncherAppState {
             .filter(|id| profiles.iter().any(|p| &p.id == id))
             .or_else(|| profiles.first().map(|p| p.id.clone()));
 
-        let accounts = db.list_accounts().unwrap_or_default();
+        let mut accounts = db.list_accounts().unwrap_or_default();
+        if db.get_kv("skin_variant_reconcile_v1")?.is_none() {
+            for acct in &mut accounts {
+                if let Some(ref skin_path) = acct.custom_skin_path {
+                    if skin_path.is_file() {
+                        if let Ok(rgba) = load_and_normalize_skin_file(skin_path) {
+                            if let Some(detected) = detect_skin_variant(&rgba) {
+                                if acct.skin_variant != detected {
+                                    acct.skin_variant = detected;
+                                    let _ = db.upsert_account(acct);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            db.set_kv("skin_variant_reconcile_v1", Some("1"))?;
+        }
         let selected_account_id = db
             .get_kv("selected_account_id")
             .ok()
@@ -1607,20 +1795,15 @@ impl LauncherAppState {
             )
         });
         let lan_active = matches!(
-            self.lan_modal.tunnel_status,
-            TunnelStatus::Connecting { .. } | TunnelStatus::Running { .. }
+            self.lan_modal.virtual_host_status,
+            VirtualPortHostStatus::Starting { .. } | VirtualPortHostStatus::Running(_)
         ) || matches!(
-            self.lan_modal.direct_host_status,
-            DirectHostStatus::Starting { .. } | DirectHostStatus::Running(_)
-        ) || self.servers.server_tunnels.values().any(|t| {
+            self.lan_modal.virtual_client_status,
+            VirtualPortClientStatus::Connecting { .. } | VirtualPortClientStatus::Running(_)
+        ) || self.servers.server_virtual_hosts.values().any(|v| {
             matches!(
-                t,
-                TunnelStatus::Connecting { .. } | TunnelStatus::Running { .. }
-            )
-        }) || self.servers.server_direct_hosts.values().any(|d| {
-            matches!(
-                d,
-                DirectHostStatus::Starting { .. } | DirectHostStatus::Running(_)
+                v,
+                VirtualPortHostStatus::Starting { .. } | VirtualPortHostStatus::Running(_)
             )
         });
         let enabled = self.settings.mobile_keep_alive || game_active || server_active || lan_active;
@@ -2010,14 +2193,6 @@ impl LauncherAppState {
 
     pub fn sync_server_edit_draft(&mut self) {
         if let Some(s) = self.selected_server().cloned() {
-            let effective_port = resolve_effective_server_port(&s);
-            let direct_busy = matches!(
-                self.server_supervisor.server_direct_host_status(&s.id),
-                DirectHostStatus::Running(_) | DirectHostStatus::Starting { .. }
-            );
-            if !direct_busy {
-                self.servers.direct_host_port_input = effective_port.to_string();
-            }
             self.servers.edit_draft = ServerEditDraft {
                 loaded_for_id: s.id,
                 name: s.name,
@@ -2585,6 +2760,9 @@ impl LauncherAppState {
         } else {
             Some(self.home.new_draft.loader_version.trim().to_string())
         };
+        let selected_opts = self.home.new_draft.optimizations.selected_suggestions();
+        let has_resolved_opts = !self.home.new_draft.optimizations.suggestions.is_empty()
+            && self.home.new_draft.optimizations.error.is_none();
 
         let prof = GameProfile {
             id: id.clone(),
@@ -2597,7 +2775,9 @@ impl LauncherAppState {
             ram_mb: self.home.new_draft.ram_mb.max(512),
             java_path: None,
             jvm_args: String::new(),
-            auto_perf_mods: loader == LoaderType::Fabric && self.home.new_draft.auto_perf_mods,
+            auto_perf_mods: loader == LoaderType::Fabric
+                && self.home.new_draft.auto_perf_mods
+                && !has_resolved_opts,
             icon_url: None,
             window_width: None,
             window_height: None,
@@ -2612,6 +2792,7 @@ impl LauncherAppState {
         match self.db.upsert_profile(&prof) {
             Ok(()) => {
                 self.home.profiles = self.db.list_profiles().unwrap_or_default();
+                self.home.new_draft.optimizations.reset_active_for_reuse();
                 self.show_new_profile_modal = false;
                 self.select_profile(id);
                 let msg = self
@@ -2622,6 +2803,9 @@ impl LauncherAppState {
                     )
                     .to_string();
                 self.push_toast(ToastKind::Success, msg);
+                if !selected_opts.is_empty() {
+                    self.install_optimizations_for_profile(prof, selected_opts);
+                }
             }
             Err(e) => {
                 let msg = format!(
@@ -4633,6 +4817,119 @@ impl LauncherAppState {
         });
     }
 
+    pub fn current_profile_optimization_key(&self) -> Option<OptimizationQueryKey> {
+        let target = OptimizationTarget::Client(self.home.new_draft.loader);
+        let gv = self.home.new_draft.game_version.trim();
+        if !target_supports_optimizations(target) || gv.is_empty() {
+            return None;
+        }
+        Some(OptimizationQueryKey {
+            target,
+            game_version: gv.to_string(),
+        })
+    }
+
+    pub fn current_server_optimization_key(&self) -> Option<OptimizationQueryKey> {
+        if self.servers.new_draft.source_mode != NewServerSourceMode::StandardEngine {
+            return None;
+        }
+        let gv = self.servers.new_draft.game_version.trim();
+        if gv.is_empty() {
+            return None;
+        }
+        let engine = self.servers.new_draft.engine;
+        let mod_loader = (engine == ServerEngine::Arclight)
+            .then(|| thk_server::jars::arclight_loader_for_mc(gv));
+        let target = OptimizationTarget::Server { engine, mod_loader };
+        if !target_supports_optimizations(target) {
+            return None;
+        }
+        Some(OptimizationQueryKey {
+            target,
+            game_version: gv.to_string(),
+        })
+    }
+
+    pub fn ensure_profile_optimization_suggestions(&mut self, force: bool) {
+        self.ensure_optimization_suggestions_for_draft(false, force);
+    }
+
+    pub fn ensure_server_optimization_suggestions(&mut self, force: bool) {
+        self.ensure_optimization_suggestions_for_draft(true, force);
+    }
+
+    fn ensure_optimization_suggestions_for_draft(&mut self, is_server: bool, force: bool) {
+        let key = if is_server {
+            self.current_server_optimization_key()
+        } else {
+            self.current_profile_optimization_key()
+        };
+        let draft = if is_server {
+            &mut self.servers.new_draft.optimizations
+        } else {
+            &mut self.home.new_draft.optimizations
+        };
+        if let Some((key, seq)) = draft.prepare_resolution(key, force) {
+            self.spawn_optimization_resolution(is_server, key, seq);
+        }
+    }
+
+    fn spawn_optimization_resolution(&self, is_server: bool, key: OptimizationQueryKey, seq: u64) {
+        let dl = self.downloader.clone();
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        self.rt.spawn(async move {
+            let result = resolve_optimization_suggestions(&dl, key.target, &key.game_version)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppAsyncEvent::OptimizationSuggestionsLoaded {
+                is_server,
+                key,
+                seq,
+                result,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn install_optimizations_for_profile(
+        &mut self,
+        profile: GameProfile,
+        selected: Vec<ResolvedOptimizationSuggestion>,
+    ) {
+        self.spawn_optimization_install(OptimizationInstallDest::Profile(profile), selected);
+    }
+
+    pub fn install_optimizations_for_server(
+        &mut self,
+        server: ManagedServer,
+        selected: Vec<ResolvedOptimizationSuggestion>,
+    ) {
+        self.spawn_optimization_install(OptimizationInstallDest::Server(server), selected);
+    }
+
+    fn spawn_optimization_install(
+        &mut self,
+        dest: OptimizationInstallDest,
+        selected: Vec<ResolvedOptimizationSuggestion>,
+    ) {
+        if selected.is_empty() {
+            return;
+        }
+        let dl = self.downloader.clone();
+        let db = Arc::clone(&self.db);
+        let lang = self.settings.language;
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        let cancel = CancellationToken::new();
+        let task_id = optimization_task_id(&dest);
+        send_optimization_start_progress(&tx, &ctx, &task_id, lang, selected.len(), &cancel);
+        self.rt.spawn(async move {
+            run_optimization_install_task(dl, db, lang, tx, ctx, dest, selected, Some(cancel))
+                .await;
+        });
+    }
+
     pub fn pick_new_server_modpack_archive(&mut self) {
         if self.servers.new_draft.creating {
             return;
@@ -4854,10 +5151,15 @@ impl LauncherAppState {
                     jar_file: detected_target,
                     created_at: Utc::now().timestamp(),
                 };
+                let selected_opts = self.servers.new_draft.optimizations.selected_suggestions();
 
                 match self.db.upsert_server(&srv) {
                     Ok(()) => {
                         self.servers.servers = self.db.list_servers().unwrap_or_default();
+                        self.servers
+                            .new_draft
+                            .optimizations
+                            .reset_active_for_reuse();
                         self.show_new_server_modal = false;
                         self.select_server(id);
                         let msg = self
@@ -4866,7 +5168,19 @@ impl LauncherAppState {
                             .to_string();
                         self.push_toast(ToastKind::Success, msg);
                         if install_now {
-                            self.install_selected_server_jar();
+                            if srv.engine == ServerEngine::Arclight && !selected_opts.is_empty() {
+                                self.spawn_server_jar_and_optional_optimizations(
+                                    srv,
+                                    selected_opts,
+                                );
+                            } else {
+                                self.install_selected_server_jar();
+                                if !selected_opts.is_empty() {
+                                    self.install_optimizations_for_server(srv, selected_opts);
+                                }
+                            }
+                        } else if !selected_opts.is_empty() {
+                            self.install_optimizations_for_server(srv, selected_opts);
                         }
                     }
                     Err(e) => {
@@ -5319,6 +5633,14 @@ impl LauncherAppState {
         let Some(srv) = self.selected_server().cloned() else {
             return;
         };
+        self.spawn_server_jar_and_optional_optimizations(srv, Vec::new());
+    }
+
+    pub(crate) fn spawn_server_jar_and_optional_optimizations(
+        &mut self,
+        srv: ManagedServer,
+        follow_up_opts: Vec<ResolvedOptimizationSuggestion>,
+    ) {
         let dl = self.downloader.clone();
         let sup = self.server_supervisor.clone();
         let db = Arc::clone(&self.db);
@@ -5398,6 +5720,20 @@ impl LauncherAppState {
                         server_id: srv.id,
                         jar_file: jar_target,
                     });
+                    if !follow_up_opts.is_empty() {
+                        run_optimization_install_task(
+                            dl,
+                            db,
+                            lang,
+                            tx,
+                            ctx,
+                            OptimizationInstallDest::Server(updated),
+                            follow_up_opts,
+                            None,
+                        )
+                        .await;
+                        return;
+                    }
                 }
                 Err(e) => {
                     let text = if lang == Language::Vi {
@@ -6724,62 +7060,35 @@ impl LauncherAppState {
     }
 
     pub fn refresh_connected_network_snapshot(&mut self) {
-        if self.servers.probing_network {
-            return;
-        }
         let local = detect_local_network_snapshot();
-        if let Some(ip) = local.primary_ipv4 {
-            self.lan_modal.primary_lan_ip = Some(ip.to_string());
-        }
-        self.servers.network_snapshot = local.clone();
-        self.lan_modal.network_snapshot = local;
-        self.servers.probing_network = true;
-
-        let tx = self.ui_tx.clone();
-        let ctx = self.egui_ctx.clone();
-        self.rt.spawn(async move {
-            let snap = probe_connected_network_snapshot().await;
-            let _ = tx.send(AppAsyncEvent::NetworkSnapshotProbed(snap));
-            ctx.request_repaint();
-        });
+        self.lan_modal.primary_lan_ip = local.primary_ipv4.map(|ip| ip.to_string());
+        self.servers.network_snapshot = local;
     }
 
-    pub fn toggle_selected_server_direct_host(&mut self) {
+    pub fn toggle_selected_server_virtual_host(&mut self) {
         let Some(srv) = self.selected_server().cloned() else {
             return;
         };
-        let status = self.server_supervisor.server_direct_host_status(&srv.id);
-        if matches!(
-            status,
-            DirectHostStatus::Running(_) | DirectHostStatus::Starting { .. }
-        ) {
-            self.server_supervisor.stop_server_direct_host(&srv.id);
+        let status = self.server_supervisor.server_virtual_host_status(&srv.id);
+        let ui_active = matches!(
+            self.servers.server_virtual_hosts.get(&srv.id),
+            Some(VirtualPortHostStatus::Running(_) | VirtualPortHostStatus::Starting { .. })
+        );
+        if ui_active
+            || matches!(
+                status,
+                VirtualPortHostStatus::Running(_) | VirtualPortHostStatus::Starting { .. }
+            )
+        {
+            self.server_supervisor.stop_server_virtual_host(&srv.id);
             self.servers
-                .server_direct_hosts
-                .insert(srv.id, DirectHostStatus::Stopped);
+                .server_virtual_hosts
+                .insert(srv.id, VirtualPortHostStatus::Stopped);
+            self.sync_android_keep_alive_service();
             return;
         }
 
-        let Ok(host_port) = self
-            .servers
-            .direct_host_port_input
-            .trim()
-            .parse::<u16>()
-            .map_err(|_| ())
-            .and_then(|p| if p > 0 { Ok(p) } else { Err(()) })
-        else {
-            let msg = self
-                .i18n
-                .tr(
-                    "Cổng mở không hợp lệ (1 - 65535).",
-                    "Invalid host port (1 - 65535).",
-                )
-                .to_string();
-            self.push_toast(ToastKind::Error, msg);
-            return;
-        };
-
-        let local_target_port = resolve_effective_server_port(&srv);
+        let local_port = resolve_effective_server_port(&srv);
         let motd = self
             .servers
             .properties_map
@@ -6787,87 +7096,37 @@ impl LauncherAppState {
             .cloned()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| srv.name.clone());
-        let cfg = DirectHostConfig {
-            local_target_port,
-            host_port,
-            bind_ipv4: self.servers.direct_bind_ip,
-            motd,
-            announce_on_lan: self.servers.direct_announce_lan,
-            try_upnp: self.servers.direct_try_upnp,
-        };
-
-        self.servers.server_direct_hosts.insert(
+        self.servers.server_virtual_hosts.insert(
             srv.id.clone(),
-            DirectHostStatus::Starting {
-                local_port: local_target_port,
-                host_port,
-            },
+            VirtualPortHostStatus::Starting { local_port },
         );
-        let sup = self.server_supervisor.clone();
-        let srv_id = srv.id;
-        let lang = self.settings.language;
-        let tx = self.ui_tx.clone();
-        let ctx = self.egui_ctx.clone();
-        self.rt.spawn(async move {
-            if let Err(e) = sup.start_server_direct_host(&srv_id, cfg).await {
-                let err_str = e.to_string();
-                let _ = tx.send(AppAsyncEvent::Server(
-                    ServerSupervisorEvent::DirectHostChanged {
-                        server_id: srv_id,
-                        status: DirectHostStatus::Error(err_str.clone()),
-                    },
-                ));
-                let _ = tx.send(AppAsyncEvent::Toast {
-                    kind: ToastKind::Error,
-                    text: format!(
-                        "{}: {err_str}",
-                        tr_lang(
-                            lang,
-                            "Không thể mở Port trên mạng hiện tại",
-                            "Failed to open port on current network"
-                        )
-                    ),
-                });
-                ctx.request_repaint();
-            }
-        });
-    }
-
-    pub fn toggle_selected_server_tunnel(&mut self) {
-        let Some(srv) = self.selected_server().cloned() else {
-            return;
-        };
-        let status = self.server_supervisor.server_tunnel_status(&srv.id);
-        if matches!(
-            status,
-            TunnelStatus::Running { .. } | TunnelStatus::Connecting { .. }
-        ) {
-            self.server_supervisor.stop_server_tunnel(&srv.id);
-            self.servers
-                .server_tunnels
-                .insert(srv.id, TunnelStatus::Stopped);
-            return;
-        }
-
-        let local_port = resolve_effective_server_port(&srv);
+        self.sync_android_keep_alive_service();
         let sup = self.server_supervisor.clone();
         let lang = self.settings.language;
         let tx = self.ui_tx.clone();
         let ctx = self.egui_ctx.clone();
         self.rt.spawn(async move {
-            if let Err(e) = sup.start_server_tunnel(&srv.id, local_port).await {
-                let _ = tx.send(AppAsyncEvent::Toast {
-                    kind: ToastKind::Error,
-                    text: format!(
-                        "{}: {e}",
-                        tr_lang(
-                            lang,
-                            "Không thể mở Bore Tunnel",
-                            "Failed to open Bore Tunnel"
-                        )
-                    ),
-                });
-                ctx.request_repaint();
+            if let Err(e) = sup
+                .start_server_virtual_host(&srv.id, local_port, motd)
+                .await
+            {
+                if !matches!(e, thk_core::ThkError::Cancelled) {
+                    let err_msg = e.to_string();
+                    let _ = tx.send(AppAsyncEvent::Server(
+                        ServerSupervisorEvent::VirtualHostChanged {
+                            server_id: srv.id,
+                            status: VirtualPortHostStatus::Error(err_msg.clone()),
+                        },
+                    ));
+                    let _ = tx.send(AppAsyncEvent::Toast {
+                        kind: ToastKind::Error,
+                        text: format!(
+                            "{}: {err_msg}",
+                            tr_lang(lang, "Không thể tạo Mã Phòng", "Failed to create Room Code")
+                        ),
+                    });
+                    ctx.request_repaint();
+                }
             }
         });
     }
@@ -7746,30 +8005,168 @@ impl LauncherAppState {
     }
 
     pub fn sync_lan_auto_host_template(&self) {
-        let template = if self.lan_modal.auto_open_direct_host {
-            self.lan_modal
-                .direct_host_port_input
-                .trim()
-                .parse::<u16>()
-                .ok()
-                .filter(|&p| p > 0)
-                .map(|host_port| DirectHostConfig {
-                    local_target_port: 25565,
-                    host_port,
-                    bind_ipv4: self.lan_modal.direct_bind_ip,
-                    motd: self
-                        .lan_modal
-                        .detected_world
-                        .as_ref()
-                        .map(|w| w.motd.clone())
-                        .unwrap_or_default(),
-                    announce_on_lan: self.lan_modal.direct_announce_lan,
-                    try_upnp: self.lan_modal.direct_try_upnp,
-                })
-        } else {
-            None
+        self.lan_coordinator.set_auto_direct_host_template(None);
+        self.lan_coordinator
+            .set_auto_open_flags(self.lan_modal.auto_open_virtual_host, false);
+    }
+
+    fn parse_u16_port_or_toast(
+        &mut self,
+        raw: &str,
+        allow_zero: bool,
+        vi_err: &str,
+        en_err: &str,
+    ) -> Option<u16> {
+        let parsed = raw
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|&p| allow_zero || p > 0);
+        if parsed.is_none() {
+            let msg = self.i18n.tr(vi_err, en_err).to_string();
+            self.push_toast(ToastKind::Error, msg);
+        }
+        parsed
+    }
+
+    pub fn toggle_lan_virtual_host(&mut self) {
+        let current = self.lan_coordinator.virtual_host_status();
+        let ui_active = matches!(
+            self.lan_modal.virtual_host_status,
+            VirtualPortHostStatus::Running(_) | VirtualPortHostStatus::Starting { .. }
+        );
+        if ui_active
+            || matches!(
+                current,
+                VirtualPortHostStatus::Running(_) | VirtualPortHostStatus::Starting { .. }
+            )
+        {
+            self.lan_coordinator.stop_virtual_host();
+            self.lan_modal.virtual_host_status = VirtualPortHostStatus::Stopped;
+            self.sync_android_keep_alive_service();
+            return;
+        }
+
+        let Some(local_port) = self.parse_u16_port_or_toast(
+            &self.lan_modal.manual_port_input.clone(),
+            false,
+            "Cổng nội bộ không hợp lệ (1 - 65535).",
+            "Invalid local port (1 - 65535).",
+        ) else {
+            return;
         };
-        self.lan_coordinator.set_auto_direct_host_template(template);
+        let motd = self
+            .lan_modal
+            .detected_world
+            .as_ref()
+            .map(|w| w.motd.clone())
+            .unwrap_or_else(|| "Minecraft LAN World".to_string());
+
+        self.lan_modal.virtual_host_status = VirtualPortHostStatus::Starting { local_port };
+        self.sync_android_keep_alive_service();
+        let coord = self.lan_coordinator.clone();
+        let lang = self.settings.language;
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        self.rt.spawn(async move {
+            if let Err(e) = coord.start_virtual_host(local_port, motd).await {
+                if !matches!(e, thk_core::ThkError::Cancelled) {
+                    let err_msg = e.to_string();
+                    let _ = tx.send(AppAsyncEvent::Lan(
+                        LanTunnelEvent::VirtualHostStatusChanged(VirtualPortHostStatus::Error(
+                            err_msg.clone(),
+                        )),
+                    ));
+                    let _ = tx.send(AppAsyncEvent::Toast {
+                        kind: ToastKind::Error,
+                        text: format!(
+                            "{}: {err_msg}",
+                            tr_lang(lang, "Không thể tạo Mã Phòng", "Failed to create Room Code")
+                        ),
+                    });
+                    ctx.request_repaint();
+                }
+            }
+        });
+    }
+
+    pub fn toggle_lan_virtual_client(&mut self) {
+        let current = self.lan_coordinator.virtual_client_status();
+        let ui_active = matches!(
+            self.lan_modal.virtual_client_status,
+            VirtualPortClientStatus::Running(_) | VirtualPortClientStatus::Connecting { .. }
+        );
+        if ui_active
+            || matches!(
+                current,
+                VirtualPortClientStatus::Running(_) | VirtualPortClientStatus::Connecting { .. }
+            )
+        {
+            self.lan_coordinator.stop_virtual_client();
+            self.lan_modal.virtual_client_status = VirtualPortClientStatus::Stopped;
+            self.sync_android_keep_alive_service();
+            return;
+        }
+
+        let room_code = self.lan_modal.virtual_join_code_input.trim().to_string();
+        if room_code.is_empty() {
+            let msg = self
+                .i18n
+                .tr(
+                    "Hãy dán Mã Phòng của bạn bè trước.",
+                    "Paste a friend's Room Code first.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Error, msg);
+            return;
+        }
+
+        let raw_pref_port = self.lan_modal.virtual_join_port_input.trim().to_string();
+        let preferred_port = if raw_pref_port.is_empty() || raw_pref_port == "0" {
+            0
+        } else if let Some(p) = self.parse_u16_port_or_toast(
+            &raw_pref_port,
+            true,
+            "Cổng nhận nội bộ không hợp lệ (để trống hoặc 1 - 65535).",
+            "Invalid local port (leave blank or 1 - 65535).",
+        ) {
+            p
+        } else {
+            return;
+        };
+
+        let announce_on_lan = self.lan_modal.virtual_join_announce_lan;
+        self.lan_modal.virtual_client_status =
+            VirtualPortClientStatus::Connecting { preferred_port };
+        self.sync_android_keep_alive_service();
+
+        let coord = self.lan_coordinator.clone();
+        let lang = self.settings.language;
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        self.rt.spawn(async move {
+            if let Err(e) = coord
+                .start_virtual_client(&room_code, preferred_port, announce_on_lan)
+                .await
+            {
+                if !matches!(e, thk_core::ThkError::Cancelled) {
+                    let err_msg = e.to_string();
+                    let _ = tx.send(AppAsyncEvent::Lan(
+                        LanTunnelEvent::VirtualClientStatusChanged(VirtualPortClientStatus::Error(
+                            err_msg.clone(),
+                        )),
+                    ));
+                    let _ = tx.send(AppAsyncEvent::Toast {
+                        kind: ToastKind::Error,
+                        text: format!(
+                            "{}: {err_msg}",
+                            tr_lang(lang, "Không thể vào phòng", "Failed to join room")
+                        ),
+                    });
+                    ctx.request_repaint();
+                }
+            }
+        });
     }
 
     pub fn toggle_lan_scanner(&mut self) {
@@ -7777,152 +8174,10 @@ impl LauncherAppState {
             self.lan_coordinator.stop_scan();
         } else {
             self.sync_lan_auto_host_template();
-            if let Err(e) = self
-                .lan_coordinator
-                .start_lan_scan(&self.rt, self.lan_modal.auto_open_tunnel)
-            {
+            if let Err(e) = self.lan_coordinator.start_lan_scan(&self.rt, false) {
                 self.push_toast(ToastKind::Error, e.to_string());
             }
         }
-    }
-
-    pub fn toggle_lan_direct_host(&mut self) {
-        let current = self.lan_coordinator.direct_host_status();
-        if matches!(
-            current,
-            DirectHostStatus::Running(_) | DirectHostStatus::Starting { .. }
-        ) {
-            self.lan_coordinator.stop_direct_host();
-            self.lan_modal.direct_host_status = DirectHostStatus::Stopped;
-            return;
-        }
-
-        let Ok(local_target_port) = self
-            .lan_modal
-            .manual_port_input
-            .trim()
-            .parse::<u16>()
-            .map_err(|_| ())
-            .and_then(|p| if p > 0 { Ok(p) } else { Err(()) })
-        else {
-            let msg = self
-                .i18n
-                .tr(
-                    "Cổng thế giới nội bộ không hợp lệ (1 - 65535).",
-                    "Invalid local world port (1 - 65535).",
-                )
-                .to_string();
-            self.push_toast(ToastKind::Error, msg);
-            return;
-        };
-
-        let Ok(host_port) = self
-            .lan_modal
-            .direct_host_port_input
-            .trim()
-            .parse::<u16>()
-            .map_err(|_| ())
-            .and_then(|p| if p > 0 { Ok(p) } else { Err(()) })
-        else {
-            let msg = self
-                .i18n
-                .tr(
-                    "Cổng mở cố định không hợp lệ (1 - 65535).",
-                    "Invalid host port (1 - 65535).",
-                )
-                .to_string();
-            self.push_toast(ToastKind::Error, msg);
-            return;
-        };
-
-        let motd = self
-            .lan_modal
-            .detected_world
-            .as_ref()
-            .map(|w| w.motd.clone())
-            .unwrap_or_else(|| "Minecraft LAN World".to_string());
-        let cfg = DirectHostConfig {
-            local_target_port,
-            host_port,
-            bind_ipv4: self.lan_modal.direct_bind_ip,
-            motd,
-            announce_on_lan: self.lan_modal.direct_announce_lan,
-            try_upnp: self.lan_modal.direct_try_upnp,
-        };
-
-        self.lan_modal.direct_host_status = DirectHostStatus::Starting {
-            local_port: local_target_port,
-            host_port,
-        };
-        let coord = self.lan_coordinator.clone();
-        let lang = self.settings.language;
-        let tx = self.ui_tx.clone();
-        let ctx = self.egui_ctx.clone();
-        self.rt.spawn(async move {
-            if let Err(e) = coord.start_direct_host(cfg).await {
-                let err_str = e.to_string();
-                let _ = tx.send(AppAsyncEvent::Lan(LanTunnelEvent::DirectHostStatusChanged(
-                    DirectHostStatus::Error(err_str.clone()),
-                )));
-                let _ = tx.send(AppAsyncEvent::Toast {
-                    kind: ToastKind::Error,
-                    text: format!(
-                        "{}: {err_str}",
-                        tr_lang(
-                            lang,
-                            "Không thể mở Port trên mạng hiện tại",
-                            "Failed to open port on current network"
-                        )
-                    ),
-                });
-                ctx.request_repaint();
-            }
-        });
-    }
-
-    pub fn start_manual_bore_tunnel(&mut self) {
-        let Ok(port) = self.lan_modal.manual_port_input.trim().parse::<u16>() else {
-            let msg = self
-                .i18n
-                .tr(
-                    "Cổng nội bộ không hợp lệ (1 - 65535).",
-                    "Invalid local port (1 - 65535).",
-                )
-                .to_string();
-            self.push_toast(ToastKind::Error, msg);
-            return;
-        };
-        if port == 0 {
-            let msg = self
-                .i18n
-                .tr(
-                    "Cổng nội bộ phải lớn hơn 0.",
-                    "Local port must be greater than 0.",
-                )
-                .to_string();
-            self.push_toast(ToastKind::Error, msg);
-            return;
-        }
-        let coord = self.lan_coordinator.clone();
-        let lang = self.settings.language;
-        let tx = self.ui_tx.clone();
-        let ctx = self.egui_ctx.clone();
-        self.rt.spawn(async move {
-            if let Err(e) = coord.start_manual_tunnel(port).await {
-                let _ = tx.send(AppAsyncEvent::Toast {
-                    kind: ToastKind::Error,
-                    text: format!(
-                        "{}: {e}",
-                        tr_lang(
-                            lang,
-                            "Mở Bore Tunnel thất bại",
-                            "Failed to open Bore Tunnel"
-                        )
-                    ),
-                });
-                ctx.request_repaint();
-            }
-        });
     }
 
     pub fn auto_fix_crash_mod(&mut self, profile_id: &str, mod_id: &str) {
@@ -8809,6 +9064,24 @@ impl LauncherAppState {
                         self.servers.new_draft.game_version = versions[0].clone();
                     }
                     self.servers.engine_versions.insert(engine, versions);
+                    if self.show_new_server_modal {
+                        self.ensure_server_optimization_suggestions(false);
+                    }
+                }
+                AppAsyncEvent::OptimizationSuggestionsLoaded {
+                    is_server,
+                    key,
+                    seq,
+                    result,
+                } => {
+                    let draft = if is_server {
+                        &mut self.servers.new_draft.optimizations
+                    } else {
+                        &mut self.home.new_draft.optimizations
+                    };
+                    if seq == draft.request_seq {
+                        draft.apply_resolved(&key, result);
+                    }
                 }
                 AppAsyncEvent::ServerJarInstalled {
                     server_id,
@@ -9325,24 +9598,6 @@ impl LauncherAppState {
                         self.push_toast(ToastKind::Info, msg);
                     }
                 }
-                AppAsyncEvent::NetworkSnapshotProbed(snap) => {
-                    self.servers.probing_network = false;
-                    if let Some(ip) = snap.primary_ipv4 {
-                        self.lan_modal.primary_lan_ip = Some(ip.to_string());
-                    }
-                    if let Some(sel) = self.servers.direct_bind_ip {
-                        if !snap.interfaces.iter().any(|i| i.ipv4 == sel) {
-                            self.servers.direct_bind_ip = None;
-                        }
-                    }
-                    if let Some(sel) = self.lan_modal.direct_bind_ip {
-                        if !snap.interfaces.iter().any(|i| i.ipv4 == sel) {
-                            self.lan_modal.direct_bind_ip = None;
-                        }
-                    }
-                    self.servers.network_snapshot = snap.clone();
-                    self.lan_modal.network_snapshot = snap;
-                }
             }
         }
     }
@@ -9507,30 +9762,24 @@ impl LauncherAppState {
             ServerSupervisorEvent::StatsUpdated { server_id, stats } => {
                 self.servers.server_stats.insert(server_id, stats);
             }
-            ServerSupervisorEvent::TunnelChanged { server_id, status } => {
-                self.servers.server_tunnels.insert(server_id, status);
-                self.sync_android_keep_alive_service();
-            }
-            ServerSupervisorEvent::DirectHostChanged { server_id, status } => {
+            ServerSupervisorEvent::TunnelChanged { .. }
+            | ServerSupervisorEvent::DirectHostChanged { .. } => {}
+            ServerSupervisorEvent::VirtualHostChanged { server_id, status } => {
                 let was_running = matches!(
-                    self.servers.server_direct_hosts.get(&server_id),
-                    Some(DirectHostStatus::Running(_))
+                    self.servers.server_virtual_hosts.get(&server_id),
+                    Some(VirtualPortHostStatus::Running(_))
                 );
-                if !was_running {
-                    if let DirectHostStatus::Running(ref info) = status {
-                        let summary_ep = info
-                            .preferred_online_endpoint()
-                            .or_else(|| info.primary_lan_endpoint().map(str::to_string))
-                            .unwrap_or_else(|| format!("0.0.0.0:{}", info.host_port));
-                        let msg = if self.settings.language == Language::Vi {
-                            format!("Đã mở Port mạng hiện tại: {summary_ep}")
-                        } else {
-                            format!("Network port active: {summary_ep}")
-                        };
-                        self.push_toast(ToastKind::Success, msg);
-                    }
+                if !was_running && matches!(status, VirtualPortHostStatus::Running(_)) {
+                    let msg = self
+                        .i18n
+                        .tr(
+                            "Đã tạo Phòng Online — sao chép Mã Phòng để mời bạn bè!",
+                            "Online Room ready — copy the Room Code to invite friends!",
+                        )
+                        .to_string();
+                    self.push_toast(ToastKind::Success, msg);
                 }
-                self.servers.server_direct_hosts.insert(server_id, status);
+                self.servers.server_virtual_hosts.insert(server_id, status);
                 self.sync_android_keep_alive_service();
             }
             ServerSupervisorEvent::InstallProgress {
@@ -9571,38 +9820,42 @@ impl LauncherAppState {
             LanTunnelEvent::IgnoredForeignAnnouncement { .. } => {
                 self.lan_modal.ignored_foreign_packets += 1;
             }
-            LanTunnelEvent::TunnelStatusChanged(st) => {
-                if let Some(endpoint) = st.public_endpoint() {
-                    let msg = if self.settings.language == Language::Vi {
-                        format!("Đã mở cổng công khai: {endpoint}")
-                    } else {
-                        format!("Public tunnel active: {endpoint}")
-                    };
+            LanTunnelEvent::TunnelStatusChanged(_) | LanTunnelEvent::DirectHostStatusChanged(_) => {
+            }
+            LanTunnelEvent::VirtualHostStatusChanged(st) => {
+                let was_running = matches!(
+                    self.lan_modal.virtual_host_status,
+                    VirtualPortHostStatus::Running(_)
+                );
+                if !was_running && matches!(st, VirtualPortHostStatus::Running(_)) {
+                    let msg = self
+                        .i18n
+                        .tr(
+                            "Đã tạo Phòng Online — sao chép Mã Phòng để mời bạn bè!",
+                            "Online Room ready — copy the Room Code to invite friends!",
+                        )
+                        .to_string();
                     self.push_toast(ToastKind::Success, msg);
                 }
-                self.lan_modal.tunnel_status = st;
+                self.lan_modal.virtual_host_status = st;
                 self.sync_android_keep_alive_service();
             }
-            LanTunnelEvent::DirectHostStatusChanged(st) => {
+            LanTunnelEvent::VirtualClientStatusChanged(st) => {
                 let was_running = matches!(
-                    self.lan_modal.direct_host_status,
-                    DirectHostStatus::Running(_)
+                    self.lan_modal.virtual_client_status,
+                    VirtualPortClientStatus::Running(_)
                 );
                 if !was_running {
-                    if let DirectHostStatus::Running(ref info) = st {
-                        let summary_ep = info
-                            .preferred_online_endpoint()
-                            .or_else(|| info.primary_lan_endpoint().map(str::to_string))
-                            .unwrap_or_else(|| format!("0.0.0.0:{}", info.host_port));
+                    if let VirtualPortClientStatus::Running(ref info) = st {
                         let msg = if self.settings.language == Language::Vi {
-                            format!("Đã mở Port mạng hiện tại: {summary_ep}")
+                            format!("Đã kết nối vào phòng tại {}", info.local_endpoint)
                         } else {
-                            format!("Network port active: {summary_ep}")
+                            format!("Room connected at {}", info.local_endpoint)
                         };
                         self.push_toast(ToastKind::Success, msg);
                     }
                 }
-                self.lan_modal.direct_host_status = st;
+                self.lan_modal.virtual_client_status = st;
                 self.sync_android_keep_alive_service();
             }
         }
@@ -9986,6 +10239,185 @@ fn tr_lang<'a>(lang: Language, vi: &'a str, en: &'a str) -> &'a str {
         Language::Vi => vi,
         Language::En => en,
     }
+}
+
+fn optimization_task_id(dest: &OptimizationInstallDest) -> String {
+    match dest {
+        OptimizationInstallDest::Profile(prof) => format!("profile-opt-install:{}", prof.id),
+        OptimizationInstallDest::Server(srv) => format!("server-opt-install:{}", srv.id),
+    }
+}
+
+fn send_optimization_start_progress(
+    tx: &mpsc::UnboundedSender<AppAsyncEvent>,
+    ctx: &egui::Context,
+    task_id: &str,
+    lang: Language,
+    total_files: usize,
+    cancel: &CancellationToken,
+) {
+    let _ = tx.send(AppAsyncEvent::KeyedTaskProgress {
+        task_id: task_id.to_string(),
+        progress: Some(DownloadProgress {
+            phase: "optimizations".into(),
+            message: tr_lang(
+                lang,
+                "Đang cài đặt gói tối ưu...",
+                "Installing optimization packages...",
+            )
+            .to_string(),
+            completed_files: 0,
+            total_files,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            bytes_per_sec: 0,
+            percent: 0.0,
+        }),
+        cancel: Some(cancel.clone()),
+    });
+    ctx.request_repaint();
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_optimization_install_task(
+    dl: DownloadManager,
+    db: Arc<Database>,
+    lang: Language,
+    tx: mpsc::UnboundedSender<AppAsyncEvent>,
+    ctx: egui::Context,
+    dest: OptimizationInstallDest,
+    selected: Vec<ResolvedOptimizationSuggestion>,
+    pre_cancel: Option<CancellationToken>,
+) {
+    if selected.is_empty() {
+        return;
+    }
+    let task_id = optimization_task_id(&dest);
+    let cancel = match pre_cancel {
+        Some(existing) => existing,
+        None => {
+            let fresh = CancellationToken::new();
+            send_optimization_start_progress(&tx, &ctx, &task_id, lang, selected.len(), &fresh);
+            fresh
+        }
+    };
+
+    let (target_profile_id, root_dir, target, game_version, label_name) = match &dest {
+        OptimizationInstallDest::Profile(prof) => (
+            prof.id.clone(),
+            prof.instance_path.clone(),
+            OptimizationTarget::Client(prof.loader),
+            prof.game_version.clone(),
+            prof.name.clone(),
+        ),
+        OptimizationInstallDest::Server(srv) => {
+            let mod_loader = (srv.engine == ServerEngine::Arclight)
+                .then(|| detect_arclight_loader(&srv.server_dir, &srv.game_version));
+            (
+                format!("server:{}", srv.id),
+                srv.server_dir.clone(),
+                OptimizationTarget::Server {
+                    engine: srv.engine,
+                    mod_loader,
+                },
+                srv.game_version.clone(),
+                srv.name.clone(),
+            )
+        }
+    };
+
+    let tx_p = tx.clone();
+    let ctx_p = ctx.clone();
+    let tid_p = task_id.clone();
+    let cancel_p = cancel.clone();
+    let res = install_selected_optimizations(
+        &dl,
+        &db,
+        &target_profile_id,
+        &root_dir,
+        target,
+        &game_version,
+        &selected,
+        Some(cancel.clone()),
+        move |p| {
+            let _ = tx_p.send(AppAsyncEvent::KeyedTaskProgress {
+                task_id: tid_p.clone(),
+                progress: Some(p),
+                cancel: Some(cancel_p.clone()),
+            });
+            ctx_p.request_repaint();
+        },
+    )
+    .await;
+
+    let _ = tx.send(AppAsyncEvent::KeyedTaskProgress {
+        task_id,
+        progress: None,
+        cancel: None,
+    });
+
+    match res {
+        Ok(installed_paths) => {
+            let count = installed_paths.len();
+            let text = match dest {
+                OptimizationInstallDest::Profile(prof) => {
+                    if let Ok(items) =
+                        list_local_content(&db, &prof.id, &prof.instance_path, ContentKind::Mod)
+                    {
+                        let _ = tx.send(AppAsyncEvent::LocalContentRefreshed {
+                            profile_id: prof.id,
+                            kind: ContentKind::Mod,
+                            items,
+                        });
+                    }
+                    if lang == Language::Vi {
+                        format!("Đã cài đặt {count} bản mod tối ưu cho '{label_name}'.")
+                    } else {
+                        format!("Installed {count} optimization mod(s) for '{label_name}'.")
+                    }
+                }
+                OptimizationInstallDest::Server(srv) => {
+                    let _ =
+                        tx.send(AppAsyncEvent::ServerExternalFileImported { server_id: srv.id });
+                    if lang == Language::Vi {
+                        format!("Đã cài đặt {count} gói tối ưu cho máy chủ '{label_name}'.")
+                    } else {
+                        format!(
+                            "Installed {count} optimization package(s) for server '{label_name}'."
+                        )
+                    }
+                }
+            };
+            let _ = tx.send(AppAsyncEvent::Toast {
+                kind: ToastKind::Success,
+                text,
+            });
+        }
+        Err(e) => {
+            let was_cancelled = cancel.is_cancelled() || matches!(e, thk_core::ThkError::Cancelled);
+            let text = if was_cancelled {
+                tr_lang(
+                    lang,
+                    "Đã hủy cài đặt gói tối ưu.",
+                    "Cancelled optimization installation.",
+                )
+                .to_string()
+            } else if lang == Language::Vi {
+                format!("Cài đặt tối ưu cho '{label_name}' thất bại: {e}")
+            } else {
+                format!("Optimization installation failed for '{label_name}': {e}")
+            };
+            let _ = tx.send(AppAsyncEvent::Toast {
+                kind: if was_cancelled {
+                    ToastKind::Info
+                } else {
+                    ToastKind::Error
+                },
+                text,
+            });
+        }
+    }
+    ctx.request_repaint();
 }
 
 pub(crate) fn preferred_server_version_index(versions: &[ProjectVersion]) -> usize {

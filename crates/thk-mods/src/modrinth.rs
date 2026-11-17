@@ -194,46 +194,138 @@ pub async fn search_modrinth(
     })
 }
 
+fn map_modrinth_project_summary(p: ModrinthProjectFull) -> ProjectSummary {
+    ProjectSummary {
+        provider: ProviderSource::Modrinth,
+        project_id: p.id,
+        slug: p.slug,
+        title: p.title,
+        summary: p.description,
+        author: String::new(),
+        downloads: p.downloads,
+        icon_url: p.icon_url,
+        categories: p.categories,
+        updated_at: p.updated,
+        content_kind: p
+            .project_type
+            .as_deref()
+            .map(ContentKind::from_str_lossy)
+            .unwrap_or(ContentKind::Mod),
+    }
+}
+
+pub(crate) async fn get_modrinth_project_with_base(
+    downloader: &DownloadManager,
+    base_url: &str,
+    project_id: &str,
+) -> ThkResult<ProjectDetail> {
+    let url = format!("{base_url}/project/{}", urlencoding::encode(project_id));
+    let mut p: ModrinthProjectFull = downloader.get_json(&url).await?;
+    let body_markdown = std::mem::take(&mut p.body);
+    let gallery = std::mem::take(&mut p.gallery)
+        .into_iter()
+        .map(|g| GalleryImage {
+            url: g.url,
+            title: g.title.unwrap_or_default(),
+        })
+        .collect();
+    let source_url = p.source_url.take();
+    let game_versions = std::mem::take(&mut p.game_versions);
+    let loaders = std::mem::take(&mut p.loaders);
+    Ok(ProjectDetail {
+        summary: map_modrinth_project_summary(p),
+        body_markdown,
+        gallery,
+        source_url,
+        game_versions,
+        loaders,
+    })
+}
+
 pub async fn get_modrinth_project(
     downloader: &DownloadManager,
     project_id: &str,
 ) -> ThkResult<ProjectDetail> {
-    let url = format!(
-        "{MODRINTH_API_BASE}/project/{}",
+    get_modrinth_project_with_base(downloader, MODRINTH_API_BASE, project_id).await
+}
+
+pub(crate) async fn get_modrinth_projects_batch_with_base(
+    downloader: &DownloadManager,
+    base_url: &str,
+    project_ids: &[&str],
+) -> ThkResult<HashMap<String, ProjectSummary>> {
+    let clean_ids: Vec<&str> = project_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .collect();
+    if clean_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids_json = serde_json::to_string(&clean_ids)?;
+    let url = format!("{base_url}/projects?ids={}", urlencoding::encode(&ids_json));
+    let projects: Vec<ModrinthProjectFull> = downloader.get_json(&url).await?;
+    Ok(projects
+        .into_iter()
+        .map(|p| {
+            let summary = map_modrinth_project_summary(p);
+            (summary.project_id.clone(), summary)
+        })
+        .collect())
+}
+
+pub async fn get_modrinth_projects_batch(
+    downloader: &DownloadManager,
+    project_ids: &[&str],
+) -> ThkResult<HashMap<String, ProjectSummary>> {
+    get_modrinth_projects_batch_with_base(downloader, MODRINTH_API_BASE, project_ids).await
+}
+
+pub(crate) async fn get_modrinth_versions_for_loaders_with_base(
+    downloader: &DownloadManager,
+    base_url: &str,
+    project_id: &str,
+    game_version: Option<&str>,
+    loaders: &[&str],
+) -> ThkResult<Vec<ProjectVersion>> {
+    let mut url = format!(
+        "{base_url}/project/{}/version?",
         urlencoding::encode(project_id)
     );
-    let p: ModrinthProjectFull = downloader.get_json(&url).await?;
-    Ok(ProjectDetail {
-        summary: ProjectSummary {
-            provider: ProviderSource::Modrinth,
-            project_id: p.id,
-            slug: p.slug,
-            title: p.title,
-            summary: p.description,
-            author: String::new(),
-            downloads: p.downloads,
-            icon_url: p.icon_url,
-            categories: p.categories,
-            updated_at: p.updated,
-            content_kind: p
-                .project_type
-                .as_deref()
-                .map(ContentKind::from_str_lossy)
-                .unwrap_or(ContentKind::Mod),
-        },
-        body_markdown: p.body,
-        gallery: p
-            .gallery
-            .into_iter()
-            .map(|g| GalleryImage {
-                url: g.url,
-                title: g.title.unwrap_or_default(),
-            })
-            .collect(),
-        source_url: p.source_url,
-        game_versions: p.game_versions,
-        loaders: p.loaders,
-    })
+    let mut query_parts = Vec::new();
+    if let Some(gv) = game_version.map(str::trim).filter(|s| !s.is_empty()) {
+        let gv_json = serde_json::to_string(&[gv])?;
+        query_parts.push(format!("game_versions={}", urlencoding::encode(&gv_json)));
+    }
+    let clean_loaders: Vec<&str> = loaders
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !clean_loaders.is_empty() {
+        let ldr_json = serde_json::to_string(&clean_loaders)?;
+        query_parts.push(format!("loaders={}", urlencoding::encode(&ldr_json)));
+    }
+    url.push_str(&query_parts.join("&"));
+
+    let raw_list: Vec<ModrinthVersionRaw> = downloader.get_json(&url).await?;
+    Ok(raw_list.into_iter().map(map_modrinth_version).collect())
+}
+
+pub async fn get_modrinth_versions_for_loaders(
+    downloader: &DownloadManager,
+    project_id: &str,
+    game_version: Option<&str>,
+    loaders: &[&str],
+) -> ThkResult<Vec<ProjectVersion>> {
+    get_modrinth_versions_for_loaders_with_base(
+        downloader,
+        MODRINTH_API_BASE,
+        project_id,
+        game_version,
+        loaders,
+    )
+    .await
 }
 
 pub async fn get_modrinth_versions(
@@ -242,23 +334,26 @@ pub async fn get_modrinth_versions(
     game_version: Option<&str>,
     loader: Option<LoaderType>,
 ) -> ThkResult<Vec<ProjectVersion>> {
-    let mut url = format!(
-        "{MODRINTH_API_BASE}/project/{}/version?",
-        urlencoding::encode(project_id)
-    );
-    let mut query_parts = Vec::new();
-    if let Some(gv) = game_version.filter(|s| !s.trim().is_empty()) {
-        let gv_json = serde_json::to_string(&[gv])?;
-        query_parts.push(format!("game_versions={}", urlencoding::encode(&gv_json)));
-    }
-    if let Some(ldr) = loader.filter(|l| *l != LoaderType::Vanilla) {
-        let ldr_json = serde_json::to_string(&[ldr.as_str()])?;
-        query_parts.push(format!("loaders={}", urlencoding::encode(&ldr_json)));
-    }
-    url.push_str(&query_parts.join("&"));
+    let loaders = loader
+        .filter(|l| *l != LoaderType::Vanilla)
+        .map(|l| [l.as_str()]);
+    get_modrinth_versions_for_loaders(
+        downloader,
+        project_id,
+        game_version,
+        loaders.as_ref().map_or(&[], |arr| arr.as_slice()),
+    )
+    .await
+}
 
-    let raw_list: Vec<ModrinthVersionRaw> = downloader.get_json(&url).await?;
-    Ok(raw_list.into_iter().map(map_modrinth_version).collect())
+pub(crate) async fn get_modrinth_version_by_id_with_base(
+    downloader: &DownloadManager,
+    base_url: &str,
+    version_id: &str,
+) -> ThkResult<ProjectVersion> {
+    let url = format!("{base_url}/version/{}", urlencoding::encode(version_id));
+    let raw = downloader.get_json::<ModrinthVersionRaw>(&url).await?;
+    Ok(map_modrinth_version(raw))
 }
 
 pub(crate) fn map_modrinth_version(v: ModrinthVersionRaw) -> ProjectVersion {
@@ -407,9 +502,9 @@ where
                     && profile.loader != LoaderType::Vanilla)
                     .then_some(profile.loader);
                 let resolved_dep_ver = if let Some(ref vid) = dep.version_id {
-                    let url = format!("{MODRINTH_API_BASE}/version/{}", urlencoding::encode(vid));
-                    let raw = downloader.get_json::<ModrinthVersionRaw>(&url).await?;
-                    let dependency = map_modrinth_version(raw);
+                    let dependency =
+                        get_modrinth_version_by_id_with_base(downloader, MODRINTH_API_BASE, vid)
+                            .await?;
                     if dependency.project_id != dep.project_id
                         || !version_matches_profile(&dependency, &profile.game_version, dep_loader)
                     {

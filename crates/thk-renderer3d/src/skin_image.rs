@@ -248,6 +248,17 @@ pub fn detect_skin_variant(img: &RgbaImage) -> Option<SkinVariant> {
         return Some(SkinVariant::Slim);
     }
 
+    if let Some(pad_px) = rect_uniform_opaque_color(img, 50 * s, 16 * s, 2 * s, 4 * s) {
+        if rect_uniform_opaque_color(img, 54 * s, 20 * s, 2 * s, 12 * s) == Some(pad_px)
+            && ((20 * s)..(32 * s))
+                .any(|y| ((51 * s)..(54 * s)).any(|x| *img.get_pixel(x, y) != pad_px))
+            && ((16 * s)..(20 * s))
+                .any(|y| ((47 * s)..(50 * s)).any(|x| *img.get_pixel(x, y) != pad_px))
+        {
+            return Some(SkinVariant::Slim);
+        }
+    }
+
     if rect_has_alpha(img, 50 * s, 16 * s, 2 * s, 4 * s)
         || rect_has_alpha(img, 54 * s, 20 * s, 2 * s, 12 * s)
     {
@@ -255,6 +266,27 @@ pub fn detect_skin_variant(img: &RgbaImage) -> Option<SkinVariant> {
     }
 
     None
+}
+
+fn rect_uniform_opaque_color(
+    img: &RgbaImage,
+    x0: u32,
+    y0: u32,
+    w: u32,
+    h: u32,
+) -> Option<Rgba<u8>> {
+    let x1 = (x0 + w).min(img.width());
+    let y1 = (y0 + h).min(img.height());
+    if x0 >= x1 || y0 >= y1 {
+        return None;
+    }
+    let first = *img.get_pixel(x0, y0);
+    if first[3] < 255 {
+        return None;
+    }
+    (y0..y1)
+        .all(|y| (x0..x1).all(|x| *img.get_pixel(x, y) == first))
+        .then_some(first)
 }
 
 fn rect_has_alpha(img: &RgbaImage, x0: u32, y0: u32, w: u32, h: u32) -> bool {

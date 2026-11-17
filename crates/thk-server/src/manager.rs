@@ -13,8 +13,9 @@ use thk_core::models::{DownloadProgress, ManagedServer};
 use thk_core::{AppPaths, DownloadManager, SafePath, ThkError, ThkResult};
 use thk_java::{ensure_mojang_java, ensure_optimal_java, probe_java_binary, RequiredJavaSpec};
 use thk_network::{
-    start_bore_tunnel, start_direct_port_host, BoreTunnelHandle, DirectHostConfig,
-    DirectHostStatus, DirectPortHostHandle, LanTunnelEvent, TunnelStatus,
+    start_bore_tunnel, start_direct_port_host, start_virtual_port_host, BoreTunnelHandle,
+    DirectHostConfig, DirectHostStatus, DirectPortHostHandle, LanTunnelEvent, TunnelStatus,
+    VirtualPortHostHandle, VirtualPortHostStatus,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -81,6 +82,10 @@ pub enum ServerSupervisorEvent {
     DirectHostChanged {
         server_id: String,
         status: DirectHostStatus,
+    },
+    VirtualHostChanged {
+        server_id: String,
+        status: VirtualPortHostStatus,
     },
     InstallProgress {
         server_id: String,
@@ -191,6 +196,8 @@ pub struct LocalServerSupervisor {
     tunnel_generations: Arc<RwLock<HashMap<String, u64>>>,
     direct_hosts: Arc<RwLock<HashMap<String, DirectPortHostHandle>>>,
     direct_host_generations: Arc<RwLock<HashMap<String, u64>>>,
+    virtual_hosts: Arc<RwLock<HashMap<String, VirtualPortHostHandle>>>,
+    virtual_host_generations: Arc<RwLock<HashMap<String, u64>>>,
     prefer_optimal_java: Arc<AtomicBool>,
     events_tx: mpsc::UnboundedSender<ServerSupervisorEvent>,
 }
@@ -209,6 +216,8 @@ impl LocalServerSupervisor {
             tunnel_generations: Arc::new(RwLock::new(HashMap::new())),
             direct_hosts: Arc::new(RwLock::new(HashMap::new())),
             direct_host_generations: Arc::new(RwLock::new(HashMap::new())),
+            virtual_hosts: Arc::new(RwLock::new(HashMap::new())),
+            virtual_host_generations: Arc::new(RwLock::new(HashMap::new())),
             prefer_optimal_java: Arc::new(AtomicBool::new(false)),
             events_tx,
         };
@@ -700,6 +709,8 @@ impl LocalServerSupervisor {
 
             metrics_cancel.cancel();
             sup_exit.stop_server_direct_host(&srv_id_wait);
+            sup_exit.stop_server_virtual_host(&srv_id_wait);
+            sup_exit.stop_server_tunnel(&srv_id_wait);
             running_map
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
@@ -783,6 +794,8 @@ impl LocalServerSupervisor {
         &self,
         server_id: &str,
         local_port: u16,
+        bore_server: Option<&str>,
+        secret: Option<&str>,
     ) -> ThkResult<BoreTunnelHandle> {
         let session_gen = {
             let mut gens = self
@@ -826,7 +839,23 @@ impl LocalServerSupervisor {
             }
         });
 
-        let handle = start_bore_tunnel(local_port, None, None, Some(lan_tx)).await?;
+        let handle = match start_bore_tunnel(local_port, bore_server, secret, Some(lan_tx)).await {
+            Ok(h) => h,
+            Err(err) => {
+                let still_current = self
+                    .tunnel_generations
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(server_id)
+                    .copied()
+                    .unwrap_or(0)
+                    == session_gen;
+                if !still_current {
+                    return Err(ThkError::Cancelled);
+                }
+                return Err(err);
+            }
+        };
         let still_current = self
             .tunnel_generations
             .read()
@@ -898,6 +927,124 @@ impl LocalServerSupervisor {
             .get(server_id)
             .map(BoreTunnelHandle::current_status)
             .unwrap_or(TunnelStatus::Idle)
+    }
+
+    pub async fn start_server_virtual_host(
+        &self,
+        server_id: &str,
+        local_port: u16,
+        motd: String,
+    ) -> ThkResult<VirtualPortHostHandle> {
+        let session_gen = {
+            let mut gens = self
+                .virtual_host_generations
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let entry = gens.entry(server_id.to_string()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        if let Some(old) = self
+            .virtual_hosts
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(server_id)
+        {
+            old.stop();
+        }
+
+        let (lan_tx, mut lan_rx) = mpsc::unbounded_channel::<LanTunnelEvent>();
+        let srv_id = server_id.to_string();
+        let out_tx = self.events_tx.clone();
+        let gens_ref = Arc::clone(&self.virtual_host_generations);
+        tokio::spawn(async move {
+            while let Some(ev) = lan_rx.recv().await {
+                let current_gen = gens_ref
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&srv_id)
+                    .copied()
+                    .unwrap_or(0);
+                if current_gen != session_gen {
+                    break;
+                }
+                if let LanTunnelEvent::VirtualHostStatusChanged(status) = ev {
+                    let _ = out_tx.send(ServerSupervisorEvent::VirtualHostChanged {
+                        server_id: srv_id.clone(),
+                        status,
+                    });
+                }
+            }
+        });
+
+        let handle = match start_virtual_port_host(local_port, motd, Some(lan_tx)).await {
+            Ok(h) => h,
+            Err(err) => {
+                let still_current = self
+                    .virtual_host_generations
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(server_id)
+                    .copied()
+                    .unwrap_or(0)
+                    == session_gen;
+                if !still_current {
+                    return Err(ThkError::Cancelled);
+                }
+                return Err(err);
+            }
+        };
+        let still_current = self
+            .virtual_host_generations
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(server_id)
+            .copied()
+            .unwrap_or(0)
+            == session_gen;
+        if still_current {
+            self.virtual_hosts
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(server_id.to_string(), handle.clone());
+        } else {
+            handle.stop();
+        }
+        Ok(handle)
+    }
+
+    pub fn stop_server_virtual_host(&self, server_id: &str) {
+        {
+            let mut gens = self
+                .virtual_host_generations
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let entry = gens.entry(server_id.to_string()).or_insert(0);
+            *entry += 1;
+        }
+        if let Some(handle) = self
+            .virtual_hosts
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(server_id)
+        {
+            handle.stop();
+            let _ = self
+                .events_tx
+                .send(ServerSupervisorEvent::VirtualHostChanged {
+                    server_id: server_id.to_string(),
+                    status: VirtualPortHostStatus::Stopped,
+                });
+        }
+    }
+
+    pub fn server_virtual_host_status(&self, server_id: &str) -> VirtualPortHostStatus {
+        self.virtual_hosts
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(server_id)
+            .map(VirtualPortHostHandle::current_status)
+            .unwrap_or(VirtualPortHostStatus::Idle)
     }
 
     pub async fn start_server_direct_host(
@@ -1041,6 +1188,14 @@ impl LocalServerSupervisor {
 
         let mut direct_guard = self.direct_hosts.write().unwrap_or_else(|e| e.into_inner());
         for (_, handle) in direct_guard.drain() {
+            handle.stop();
+        }
+
+        let mut virtual_guard = self
+            .virtual_hosts
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        for (_, handle) in virtual_guard.drain() {
             handle.stop();
         }
     }

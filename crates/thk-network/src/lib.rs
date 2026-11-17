@@ -4,6 +4,7 @@ pub mod direct_host;
 pub mod discord_rpc;
 pub mod lan_tunnel;
 pub mod ping;
+pub mod virtual_port;
 
 pub use direct_host::{
     detect_local_network_snapshot, detect_local_network_snapshot_with_bridge,
@@ -15,14 +16,19 @@ pub use direct_host::{
 };
 pub use discord_rpc::{DiscordPresenceState, DiscordRpcService, DEFAULT_DISCORD_APP_ID};
 pub use lan_tunnel::{
-    is_local_interface_ipv4, parse_lan_announcement, start_bore_tunnel, BoreTunnelHandle,
-    LanShareCoordinator, LanTunnelEvent, LanWorldAnnouncement, TunnelStatus, DEFAULT_BORE_SERVER,
-    MC_LAN_MULTICAST_GROUP, MC_LAN_MULTICAST_PORT,
+    is_local_interface_ipv4, normalize_bore_server_input, parse_lan_announcement,
+    start_bore_tunnel, BoreTunnelHandle, LanShareCoordinator, LanTunnelEvent, LanWorldAnnouncement,
+    TunnelStatus, DEFAULT_BORE_SERVER, MC_LAN_MULTICAST_GROUP, MC_LAN_MULTICAST_PORT,
 };
 pub use ping::{
     decode_varint_slice, detect_primary_lan_ipv4, encode_varint, parse_chat_component_to_spans,
     parse_host_and_port, parse_legacy_section_str, ping_minecraft_server, resolve_minecraft_srv,
     strip_section_codes, MotdSpan, ServerStatusPing,
+};
+pub use virtual_port::{
+    decode_room_ticket, encode_room_ticket, start_virtual_port_client, start_virtual_port_host,
+    VirtualPortClientHandle, VirtualPortClientInfo, VirtualPortClientStatus, VirtualPortHostHandle,
+    VirtualPortHostInfo, VirtualPortHostStatus, VirtualRoomTicket, VIRTUAL_PORT_ALPN,
 };
 
 #[cfg(test)]
@@ -265,5 +271,36 @@ mod tests {
         handle.stop();
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         assert!(matches!(handle.current_status(), DirectHostStatus::Stopped));
+    }
+
+    #[test]
+    fn bore_server_input_normalization_validates_default_schemes_and_ports() {
+        assert_eq!(
+            normalize_bore_server_input(None).unwrap(),
+            DEFAULT_BORE_SERVER
+        );
+        assert_eq!(
+            normalize_bore_server_input(Some("  ")).unwrap(),
+            DEFAULT_BORE_SERVER
+        );
+        assert_eq!(
+            normalize_bore_server_input(Some("bore.pub:7835")).unwrap(),
+            "bore.pub"
+        );
+        assert_eq!(
+            normalize_bore_server_input(Some("tcp://my-relay.example.com:7835/")).unwrap(),
+            "my-relay.example.com"
+        );
+        assert_eq!(
+            normalize_bore_server_input(Some("[2604:a880::1]:7835")).unwrap(),
+            "2604:a880::1"
+        );
+        assert_eq!(
+            normalize_bore_server_input(Some("2604:a880::1")).unwrap(),
+            "2604:a880::1"
+        );
+        assert!(normalize_bore_server_input(Some("my-relay.example.com:9999")).is_err());
+        assert!(normalize_bore_server_input(Some("[2604:a880::1]:9999")).is_err());
+        assert!(normalize_bore_server_input(Some("bad host.com")).is_err());
     }
 }

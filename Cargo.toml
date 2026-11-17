@@ -67,6 +67,7 @@ regex = "1.13.1"
 quick-xml = { version = "0.42.0", features = ["serialize"] }
 sysinfo = "0.40.1"
 bore-cli = "0.6.0"
+iroh = { version = "1.4.1", default-features = false, features = ["tls-ring", "portmapper"] }
 hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "system-config"] }
 discord-rich-presence = "1.1.0"
 open = "5.4.5"

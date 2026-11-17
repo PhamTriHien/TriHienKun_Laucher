@@ -77,6 +77,32 @@ mod tests {
             }
         }
         assert_eq!(detect_skin_variant(&hd_slim), Some(SkinVariant::Slim));
+
+        // 128x128 solid-padded Slim skin without any 2nd-layer outer sleeve pixels
+        let mut padded_no_outer = RgbaImage::from_pixel(128, 128, Rgba([0, 0, 0, 0]));
+        for y in 32..40 {
+            for x in 88..94 {
+                padded_no_outer.put_pixel(x, y, Rgba([255, 235, 240, 255]));
+            }
+            for x in 94..100 {
+                padded_no_outer.put_pixel(x, y, Rgba([127, 123, 164, 255]));
+            }
+            for x in 100..104 {
+                padded_no_outer.put_pixel(x, y, Rgba([247, 207, 183, 255]));
+            }
+        }
+        for y in 40..64 {
+            for x in 80..108 {
+                padded_no_outer.put_pixel(x, y, Rgba([255, 248, 249, 255]));
+            }
+            for x in 108..112 {
+                padded_no_outer.put_pixel(x, y, Rgba([247, 207, 183, 255]));
+            }
+        }
+        assert_eq!(
+            detect_skin_variant(&padded_no_outer),
+            Some(SkinVariant::Slim)
+        );
     }
 
     #[test]

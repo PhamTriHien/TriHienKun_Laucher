@@ -20,8 +20,7 @@ use egui::{
     pos2, vec2, Align, Align2, Color32, CornerRadius, Frame, Layout, Margin, Rect, RichText, Sense,
     Stroke, Vec2,
 };
-use thk_core::models::Language;
-use thk_network::{ConnectedNetworkSnapshot, DirectHostActiveInfo, MotdSpan, UpnpPortStatus};
+use thk_network::{MotdSpan, VirtualPortClientInfo, VirtualPortHostInfo};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SafeAreaInsets {
@@ -1804,66 +1803,20 @@ fn parse_hex_color(hex: &str) -> Option<Color32> {
     Some(Color32::from_rgb(r, g, b))
 }
 
-pub(crate) fn network_interface_selector_ui(
-    ui: &mut egui::Ui,
-    id_salt: &str,
-    i18n: &thk_core::I18n,
-    snapshot: &ConnectedNetworkSnapshot,
-    selected_ip: &mut Option<std::net::Ipv4Addr>,
-) -> bool {
-    let mut changed = false;
-    let nic_lbl = ui.label(RichText::new(i18n.tr("Mạng kết nối:", "Network:")).strong());
-    let all_label = i18n
-        .tr("Tất cả mạng đang kết nối", "All connected networks")
-        .to_string();
-    let selected_text = match *selected_ip {
-        None => all_label.clone(),
-        Some(ip) => snapshot
-            .interfaces
-            .iter()
-            .find(|entry| entry.ipv4 == ip)
-            .map(|entry| format!("{} ({})", entry.name, entry.ipv4))
-            .unwrap_or_else(|| ip.to_string()),
-    };
-
-    let combo_w = 240.0_f32.min((ui.max_rect().width() - 16.0).max(64.0));
-    let combo_resp = egui::ComboBox::from_id_salt(id_salt)
-        .width(combo_w)
-        .truncate()
-        .selected_text(selected_text)
-        .show_ui(ui, |ui| {
-            if ui.selectable_value(selected_ip, None, &all_label).changed() {
-                changed = true;
-            }
-            for entry in &snapshot.interfaces {
-                let item_label = if entry.is_primary {
-                    format!(
-                        "{} ({}) • {}",
-                        entry.name,
-                        entry.ipv4,
-                        i18n.tr("Chính", "Primary")
-                    )
-                } else {
-                    format!("{} ({})", entry.name, entry.ipv4)
-                };
-                if ui
-                    .selectable_value(selected_ip, Some(entry.ipv4), item_label)
-                    .changed()
-                {
-                    changed = true;
-                }
-            }
-        });
-    combo_resp.response.labelled_by(nic_lbl.id);
-    changed
+pub(crate) fn format_room_code_preview(code: &str) -> String {
+    let chars: Vec<char> = code.chars().collect();
+    if chars.len() <= 28 {
+        return code.to_string();
+    }
+    let head: String = chars.iter().take(14).collect();
+    let tail: String = chars[chars.len() - 8..].iter().collect();
+    format!("{head}…{tail}")
 }
 
-pub(crate) fn render_direct_host_endpoints_ui(
+pub(crate) fn render_virtual_host_active_ui(
     ui: &mut egui::Ui,
     i18n: &thk_core::I18n,
-    info: &DirectHostActiveInfo,
-    public_ping_ms: Option<u32>,
-    ping_color: Option<Color32>,
+    info: &VirtualPortHostInfo,
 ) -> Option<String> {
     let mut copied: Option<String> = None;
 
@@ -1872,150 +1825,104 @@ pub(crate) fn render_direct_host_endpoints_ui(
             ui,
             &format!(
                 "{}: {}",
-                i18n.tr("Người chơi kết nối qua cổng mở", "Connected via port"),
-                info.active_clients
+                i18n.tr("Người chơi đang kết nối", "Active connections"),
+                info.active_streams
+            ),
+            ACCENT_CYAN,
+        );
+        if info.relay_connected {
+            badge(
+                ui,
+                i18n.tr("Sẵn sàng kết nối xuyên mạng", "Ready across networks"),
+                ACCENT_EMERALD,
+            );
+        } else {
+            badge(
+                ui,
+                i18n.tr("Đang kết nối máy chủ chuyển tiếp...", "Connecting relay..."),
+                ACCENT_AMBER,
+            );
+        }
+    });
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(i18n.tr("Mã Phòng:", "Room Code:")).strong());
+        badge(
+            ui,
+            &format_room_code_preview(&info.room_code),
+            ACCENT_EMERALD,
+        );
+        if primary_icon_button(
+            ui,
+            VectorIcon::Copy,
+            i18n.tr("Sao chép Mã Phòng", "Copy Room Code"),
+        )
+        .clicked()
+        {
+            copied = Some(info.room_code.clone());
+        }
+    });
+
+    ui.label(
+        RichText::new(i18n.tr(
+            "Gửi Mã Phòng cho bạn bè dán vào mục Chia sẻ LAN -> Vào Phòng.",
+            "Share this Room Code for friends to paste in LAN Share -> Join Room.",
+        ))
+        .size(11.0)
+        .weak(),
+    );
+
+    copied
+}
+
+pub(crate) fn render_virtual_client_active_ui(
+    ui: &mut egui::Ui,
+    i18n: &thk_core::I18n,
+    info: &VirtualPortClientInfo,
+) -> Option<String> {
+    let mut copied: Option<String> = None;
+
+    ui.horizontal_wrapped(|ui| {
+        badge(
+            ui,
+            &format!(
+                "{}: {}",
+                i18n.tr("Luồng kết nối", "Active streams"),
+                info.active_streams
             ),
             ACCENT_CYAN,
         );
         if info.announcing_lan {
             badge(
                 ui,
-                i18n.tr("Đang phát sóng LAN nội bộ", "LAN discovery active"),
+                i18n.tr("Đang hiện trong Chơi mạng", "Visible in Multiplayer"),
                 ACCENT_BLUE,
-            );
-        }
-        if let Some(ms) = public_ping_ms {
-            badge(
-                ui,
-                &format!("{}: {ms} ms", i18n.tr("Ping cổng mở", "Hosted Port Ping")),
-                ping_color.unwrap_or(ACCENT_EMERALD),
             );
         }
     });
 
-    for (idx, (nic_name, endpoint)) in info.lan_endpoints.iter().enumerate() {
-        ui.push_id(("direct_lan_ep_row", idx), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "{} ({nic_name}):",
-                        i18n.tr("Cùng mạng LAN / VPN", "LAN / VPN")
-                    ))
-                    .strong(),
-                );
-                badge(ui, endpoint, ACCENT_BLUE);
-                let btn_lbl = format!("{} {nic_name}", i18n.tr("Sao chép", "Copy"));
-                if secondary_icon_button(ui, VectorIcon::Copy, &btn_lbl).clicked() {
-                    copied = Some(endpoint.clone());
-                }
-            });
-        });
-    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(i18n.tr("Địa chỉ vào game:", "Game Address:")).strong());
+        badge(ui, &info.local_endpoint, ACCENT_EMERALD);
+        if primary_icon_button(
+            ui,
+            VectorIcon::Copy,
+            i18n.tr("Sao chép địa chỉ", "Copy Address"),
+        )
+        .clicked()
+        {
+            copied = Some(info.local_endpoint.clone());
+        }
+    });
 
-    if let Some(ref v6_endpoint) = info.ipv6_endpoint {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(i18n.tr("Chơi Online trực tiếp (IPv6):", "Direct Online (IPv6):"))
-                    .strong(),
-            );
-            badge(ui, v6_endpoint, ACCENT_EMERALD);
-            if primary_icon_button(
-                ui,
-                VectorIcon::Copy,
-                i18n.tr("Sao chép Online IPv6", "Copy Online IPv6"),
-            )
-            .clicked()
-            {
-                copied = Some(v6_endpoint.clone());
-            }
-        });
-    }
-
-    match &info.upnp_status {
-        UpnpPortStatus::Mapped {
-            external_ip,
-            external_port,
-            gateway_label,
-        } => {
-            let v4_endpoint = format!("{external_ip}:{external_port}");
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(i18n.tr(
-                        "Chơi Online IPv4 (Đã mở trên Modem):",
-                        "Online IPv4 (Router port open):",
-                    ))
-                    .strong(),
-                );
-                badge(ui, &v4_endpoint, ACCENT_EMERALD);
-                badge(ui, gateway_label, ACCENT_CYAN);
-                if primary_icon_button(
-                    ui,
-                    VectorIcon::Copy,
-                    i18n.tr("Sao chép Online IPv4", "Copy Online IPv4"),
-                )
-                .clicked()
-                {
-                    copied = Some(v4_endpoint);
-                }
-            });
-        }
-        UpnpPortStatus::Mapping => {
-            ui.horizontal_wrapped(|ui| {
-                ui.spinner();
-                ui.label(i18n.tr(
-                    "Đang mở cổng tự động trên Modem...",
-                    "Requesting automatic port mapping on router...",
-                ));
-            });
-        }
-        UpnpPortStatus::CarrierGradeNat { wan_ip, .. } => {
-            let note = if i18n.language() == Language::Vi {
-                format!("Mạng nhà mạng CGNAT ({wan_ip}) — kết nối khác mạng qua IPv6 hoặc VPN.")
-            } else {
-                format!("ISP CGNAT ({wan_ip}) — connect across networks via IPv6 or VPN.")
-            };
-            ui.label(RichText::new(note).size(11.5).color(ACCENT_AMBER));
-        }
-        UpnpPortStatus::Unavailable(_) => {
-            if let Some(ref pub_ep) = info.public_ipv4_endpoint {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(i18n.tr("IPv4 Internet:", "Public IPv4:"));
-                    badge(ui, pub_ep, ACCENT_AMBER);
-                    if secondary_icon_button(
-                        ui,
-                        VectorIcon::Copy,
-                        i18n.tr("Sao chép Online IPv4", "Copy Online IPv4"),
-                    )
-                    .clicked()
-                    {
-                        copied = Some(pub_ep.clone());
-                    }
-                });
-            }
-            ui.label(
-                RichText::new(i18n.tr("UPnP đang tắt trên Modem.", "Router UPnP is disabled."))
-                    .size(11.5)
-                    .weak(),
-            );
-        }
-        UpnpPortStatus::Disabled => {
-            if let Some(ref pub_ep) = info.public_ipv4_endpoint {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(i18n.tr("IPv4 Internet:", "Public IPv4:"));
-                    badge(ui, pub_ep, ACCENT_BLUE);
-                    if secondary_icon_button(
-                        ui,
-                        VectorIcon::Copy,
-                        i18n.tr("Sao chép Online IPv4", "Copy Online IPv4"),
-                    )
-                    .clicked()
-                    {
-                        copied = Some(pub_ep.clone());
-                    }
-                });
-            }
-        }
-    }
+    ui.label(
+        RichText::new(i18n.tr(
+            "Mở Minecraft -> Chơi mạng -> chọn phòng hiện sẵn hoặc dán địa chỉ 127.0.0.1 phía trên.",
+            "In Minecraft Multiplayer, pick the room directly or paste the 127.0.0.1 address above.",
+        ))
+        .size(11.0)
+        .weak(),
+    );
 
     copied
 }

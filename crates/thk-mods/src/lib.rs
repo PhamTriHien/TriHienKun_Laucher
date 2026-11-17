@@ -5,6 +5,7 @@ pub mod ftb;
 mod install;
 pub mod matcher;
 pub mod modrinth;
+pub mod optimization;
 pub mod provider;
 pub mod server_pack;
 pub mod spiget;
@@ -24,9 +25,11 @@ pub use matcher::{
     ContentUpdateCandidate, LocalContentItem, LocalWorldInfo, ServerAddonFile,
 };
 pub use modrinth::{
-    ensure_fabric_performance_mods, import_mrpack_archive, install_modrinth_content,
-    install_modrinth_modpack_version, FABRIC_PERF_MOD_IDS,
+    ensure_fabric_performance_mods, get_modrinth_projects_batch, get_modrinth_versions_for_loaders,
+    import_mrpack_archive, install_modrinth_content, install_modrinth_modpack_version,
+    FABRIC_PERF_MOD_IDS,
 };
+pub use optimization::*;
 pub use provider::{
     extract_canonical_version_number, fetch_provider_project, fetch_provider_versions,
     search_provider, DependencyRelation, DependencySpec, GalleryImage, ImportedPackMetadata,

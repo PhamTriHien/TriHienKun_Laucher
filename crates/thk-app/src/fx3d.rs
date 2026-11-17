@@ -1,10 +1,10 @@
-#[cfg(test)]
-use crate::theme::ACCENT_ORANGE;
 use crate::theme::{
-    accent_palette, active_accent_preset, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_EMERALD,
-    BG_CARD_DARK, BG_CARD_ELEVATED_DARK, BG_CARD_LIGHT, BG_SLOT_LIGHT, BORDER_GAME_LIP_LIGHT,
+    accent_palette, active_accent_preset, ACCENT_AMBER, ACCENT_CYAN, ACCENT_EMERALD, BG_CARD_DARK,
+    BG_CARD_ELEVATED_DARK, BG_CARD_LIGHT, BG_SLOT_LIGHT, BORDER_GAME_LIP_LIGHT,
     BORDER_GAME_OUTER_LIGHT, TEXT_INK_LIGHT,
 };
+#[cfg(test)]
+use crate::theme::{ACCENT_BLUE, ACCENT_ORANGE};
 use crate::ui_assets::{paint_nine_slice_button, paint_tilted_ai_icon, UiAssetIcon, UiButtonPlate};
 use egui::{
     pos2, vec2, Align2, Color32, CornerRadius, FontId, Id, Pos2, Rect, Response, Sense, Shape,
@@ -1977,128 +1977,6 @@ pub fn paint_3d_isometric_bars(
             tip_txt,
             FontId::proportional(11.5),
             Color32::WHITE,
-        );
-    }
-}
-
-pub fn paint_3d_tunnel_conduit(
-    ui: &mut Ui,
-    active: bool,
-    connecting: bool,
-    local_label: &str,
-    remote_label: &str,
-) {
-    let desired = vec2(ui.available_width(), 68.0);
-    let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-
-    let t = ui.input(|i| i.time) as f32;
-    if active || connecting {
-        ui.ctx().request_repaint_after(Duration::from_millis(16));
-    }
-
-    let dark = ui.visuals().dark_mode;
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(
-        rect,
-        CornerRadius::same(10),
-        if dark {
-            Color32::from_rgb(20, 29, 44)
-        } else {
-            BG_SLOT_LIGHT
-        },
-    );
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(10),
-        Stroke::new(
-            1.3,
-            if active {
-                ACCENT_EMERALD
-            } else if connecting {
-                ACCENT_AMBER
-            } else if dark {
-                Color32::from_rgba_unmultiplied(100, 116, 139, 110)
-            } else {
-                BORDER_GAME_OUTER_LIGHT
-            },
-        ),
-        StrokeKind::Inside,
-    );
-
-    let node_w = if rect.width() < 236.0 {
-        ((rect.width() - 28.0) * 0.45).clamp(56.0, 96.0)
-    } else {
-        (rect.width() * 0.34).clamp(96.0, 146.0)
-    };
-    let half_nw = node_w * 0.5;
-    let side_pad = if rect.width() < 236.0 { 8.0 } else { 12.0 };
-    let left_node = pos2(rect.left() + half_nw + side_pad, rect.center().y);
-    let right_node = pos2(rect.right() - half_nw - side_pad, rect.center().y);
-    let line_col = if active {
-        Color32::from_rgba_unmultiplied(20, 184, 102, 130)
-    } else if connecting {
-        Color32::from_rgba_unmultiplied(234, 138, 12, 130)
-    } else {
-        Color32::from_rgba_unmultiplied(100, 130, 168, 90)
-    };
-
-    let x_start = left_node.x + half_nw + 4.0;
-    let x_end = right_node.x - half_nw - 4.0;
-    if x_end > x_start + 4.0 {
-        painter.line_segment(
-            [pos2(x_start, left_node.y), pos2(x_end, right_node.y)],
-            Stroke::new(2.4, line_col),
-        );
-    }
-
-    if (active || connecting) && x_end > x_start + 12.0 {
-        for pkt in 0..4 {
-            let u = (t * 0.65 + pkt as f32 * 0.25).fract();
-            let px = x_start + (x_end - x_start) * u;
-            let col = if active { ACCENT_CYAN } else { ACCENT_AMBER };
-            painter.circle_filled(pos2(px, left_node.y), 4.2, col);
-            painter.circle_filled(
-                pos2(px, left_node.y),
-                8.0,
-                Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 52),
-            );
-        }
-    }
-
-    let node_bg = if dark { BG_CARD_DARK } else { BG_CARD_LIGHT };
-    let node_fg = if dark { Color32::WHITE } else { TEXT_INK_LIGHT };
-
-    for (nc, lbl, col) in [
-        (left_node, local_label, ACCENT_BLUE),
-        (
-            right_node,
-            remote_label,
-            if active {
-                ACCENT_EMERALD
-            } else {
-                BORDER_GAME_OUTER_LIGHT
-            },
-        ),
-    ] {
-        let nr = Rect::from_center_size(nc, vec2(node_w, 36.0));
-        painter.rect_filled(nr, CornerRadius::same(8), node_bg);
-        painter.rect_stroke(
-            nr,
-            CornerRadius::same(8),
-            Stroke::new(1.4, col),
-            StrokeKind::Inside,
-        );
-        let node_painter =
-            painter.with_clip_rect(ui.clip_rect().intersect(nr.shrink2(vec2(3.0, 0.0))));
-        node_painter.text(
-            nr.center(),
-            Align2::CENTER_CENTER,
-            lbl,
-            FontId::monospace(11.2),
-            node_fg,
         );
     }
 }

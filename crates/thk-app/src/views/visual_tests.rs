@@ -98,6 +98,16 @@ fn scroll_until_visible(harness: &mut Harness<'_>, label: &str, viewport: Rect) 
     panic!("Action never became fully visible after scrolling: {label}; viewport={viewport:?}; action={:?}", harness.query_by_role_and_label(egui::Role::Button, label).map(|node| node.rect()));
 }
 
+fn ensure_button_scrolled_into_view(harness: &mut Harness<'_>, label: &str, viewport: Rect) {
+    if harness
+        .query_by_role_and_label(egui::Role::Button, label)
+        .is_some_and(|node| viewport.contains_rect(node.rect()))
+    {
+        return;
+    }
+    scroll_until_visible(harness, label, viewport);
+}
+
 #[test]
 fn accounts_pkce_disclosure_handles_accesskit_actions() {
     for language in [Language::Vi, Language::En] {
@@ -816,45 +826,54 @@ fn workspace_panels_and_modals_support_pointer_drag_resize() {
 
 #[test]
 fn server_network_copy_restart_and_console_command_regression() {
+    use thk_network::{VirtualPortHostInfo, VirtualPortHostStatus};
+
     with_isolated_app(Language::Vi, |app| {
         app.settings.setup_completed = true;
         let srv = server_fixture();
         let srv_id = srv.id.clone();
+        let room_code = format!("thk1_{}", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789".repeat(4));
         app.servers.selected_server_id = Some(srv_id.clone());
         app.servers.servers = vec![srv.clone()];
         app.servers.active_tab = ServerTab::Network;
         app.servers
             .server_states
             .insert(srv_id.clone(), ServerRuntimeState::Starting);
-        app.servers.server_tunnels.insert(
+        app.servers.server_virtual_hosts.insert(
             srv_id,
-            TunnelStatus::Running {
+            VirtualPortHostStatus::Running(VirtualPortHostInfo {
                 local_port: 25565,
-                remote_addr: "bore.pub:25435".into(),
-                remote_port: 25435,
-            },
+                room_code: room_code.clone(),
+                node_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                relay_connected: true,
+                active_streams: 2,
+            }),
         );
 
         let restart_lbl = app.i18n.t("server.restart").to_owned();
-        let copy_lbl = app.i18n.tr("Sao chép địa chỉ", "Copy Address").to_owned();
+        let copy_lbl = app
+            .i18n
+            .tr("Sao chép Mã Phòng", "Copy Room Code")
+            .to_owned();
 
         let mut net_harness = harness(1240.0, 820.0, |ui| {
             crate::views::servers::render_servers_view(app, ui);
         });
         net_harness.input_mut().time = None;
 
-        let endpoint_rect = net_harness.get_by_label("bore.pub:25435").rect();
+        let endpoint_rect = net_harness.get_by_label("127.0.0.1:25565").rect();
         assert!(endpoint_rect.width() > 20.0);
-        assert!(
-            net_harness.query_by_label("bore.pub:25435:25435").is_none(),
-            "tunnel endpoint must never duplicate port"
-        );
 
         let restart_rect = net_harness
             .get_by_role_and_label(egui::Role::Button, &restart_lbl)
             .rect();
         assert!(restart_rect.width() > 20.0);
 
+        ensure_button_scrolled_into_view(
+            &mut net_harness,
+            &copy_lbl,
+            Rect::from_min_size(pos2(240.0, 20.0), vec2(960.0, 780.0)),
+        );
         let copy_pos = net_harness
             .get_by_role_and_label(egui::Role::Button, &copy_lbl)
             .rect()
@@ -884,16 +903,18 @@ fn server_network_copy_restart_and_console_command_regression() {
                 modifiers: egui::Modifiers::NONE,
             });
         net_harness.step();
-        let copied =
-            net_harness.output().platform_output.commands.iter().any(
-                |cmd| matches!(cmd, egui::OutputCommand::CopyText(t) if t == "bore.pub:25435"),
-            );
+        let copied = net_harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, egui::OutputCommand::CopyText(t) if t == &room_code));
         drop(net_harness);
 
-        assert!(copied, "Copy Address button must emit CopyText command");
+        assert!(copied, "Copy Room Code button must emit CopyText command");
         assert!(
-            app.toasts.iter().any(|t| t.text.contains("bore.pub:25435")),
-            "Copy Address button must push confirmation toast"
+            app.toasts.iter().any(|t| t.text.contains("thk1_")),
+            "Copy Room Code button must push confirmation toast"
         );
     });
 
@@ -1168,50 +1189,22 @@ fn server_ping_tps_player_config_and_mobile_orientation_regression() {
 }
 
 #[test]
-fn connected_network_direct_host_ui_and_copy_regression() {
-    use std::net::{Ipv4Addr, Ipv6Addr};
-    use thk_network::{
-        ConnectedNetworkSnapshot, DirectHostActiveInfo, DirectHostStatus, NetworkInterfaceEntry,
-        UpnpPortStatus,
-    };
+fn consolidated_online_room_network_and_lan_copy_regression() {
+    use crate::state::VirtualPortUiMode;
+    use std::net::Ipv4Addr;
+    use thk_network::{ConnectedNetworkSnapshot, NetworkInterfaceEntry};
 
     let _render_guard = VISUAL_RENDER_LOCK.lock().expect("visual renderer lock");
     let synthetic_snapshot = ConnectedNetworkSnapshot {
         primary_ipv4: Some(Ipv4Addr::new(192, 168, 1, 5)),
-        interfaces: vec![
-            NetworkInterfaceEntry {
-                name: "Wi-Fi".into(),
-                ipv4: Ipv4Addr::new(192, 168, 1, 5),
-                is_primary: true,
-                is_virtual_hypervisor: false,
-            },
-            NetworkInterfaceEntry {
-                name: "VPN (tun0)".into(),
-                ipv4: Ipv4Addr::new(100, 96, 12, 8),
-                is_primary: false,
-                is_virtual_hypervisor: false,
-            },
-        ],
-        global_ipv6: Some("2001:db8::42".parse::<Ipv6Addr>().unwrap()),
-        public_ipv4: Some(Ipv4Addr::new(198, 51, 100, 77)),
-    };
-    let active_info = DirectHostActiveInfo {
-        local_port: 25565,
-        host_port: 25565,
-        lan_endpoints: vec![
-            ("Wi-Fi".into(), "192.168.1.5:25565".into()),
-            ("VPN (tun0)".into(), "100.96.12.8:25565".into()),
-        ],
-        ipv6_endpoint: Some("[2001:db8::42]:25565".into()),
-        public_ipv4_endpoint: Some("198.51.100.77:25565".into()),
-        upnp_status: UpnpPortStatus::Mapped {
-            external_ip: Ipv4Addr::new(198, 51, 100, 77),
-            external_port: 25565,
-            gateway_label: "IGD Gateway".into(),
-        },
-        announcing_lan: true,
-        bridging_tcp: true,
-        active_clients: 2,
+        interfaces: vec![NetworkInterfaceEntry {
+            name: "Wi-Fi".into(),
+            ipv4: Ipv4Addr::new(192, 168, 1, 5),
+            is_primary: true,
+            is_virtual_hypervisor: false,
+        }],
+        global_ipv6: None,
+        public_ipv4: None,
     };
 
     for language in [Language::Vi, Language::En] {
@@ -1219,28 +1212,34 @@ fn connected_network_direct_host_ui_and_copy_regression() {
             app.settings.setup_completed = true;
             let srv = server_fixture();
             let srv_id = srv.id.clone();
-            app.servers.selected_server_id = Some(srv_id.clone());
+            app.servers.selected_server_id = Some(srv_id);
             app.servers.servers = vec![srv];
             app.servers.active_tab = ServerTab::Network;
             app.servers.network_snapshot = synthetic_snapshot.clone();
-            app.lan_modal.network_snapshot = synthetic_snapshot.clone();
             app.lan_modal.primary_lan_ip = Some("192.168.1.5".into());
-            app.servers
-                .server_direct_hosts
-                .insert(srv_id, DirectHostStatus::Running(active_info.clone()));
 
-            let copy_v6_lbl = app
+            let copy_lan_lbl = app.i18n.tr("Sao chép LAN", "Copy LAN").to_owned();
+            let open_join_lbl = app.i18n.tr("Mở mục Vào Phòng", "Open Join Room").to_owned();
+            let create_room_lbl = app
+                .i18n
+                .tr("Tạo Mã Phòng Online", "Create Online Room Code")
+                .to_owned();
+            let legacy_v6_lbl = app
                 .i18n
                 .tr("Sao chép Online IPv6", "Copy Online IPv6")
                 .to_owned();
-            let copy_v4_lbl = app
+            let legacy_direct_lbl = app
                 .i18n
-                .tr("Sao chép Online IPv4", "Copy Online IPv4")
+                .tr("Mở Port Mạng Hiện Tại", "Open Port on Current Network")
                 .to_owned();
-            let close_lbl = app
+            let legacy_bore_srv_lbl = app
                 .i18n
-                .tr("Đóng Port Mạng", "Close Hosted Port")
+                .tr(
+                    "Mở cổng công khai cho Máy chủ này",
+                    "Open Public Tunnel for This Server",
+                )
                 .to_owned();
+            let legacy_bore_lan_lbl = app.i18n.tr("Mở đường hầm", "Open Tunnel").to_owned();
 
             let mut net_harness = harness(1240.0, 920.0, |ui| {
                 crate::views::servers::render_servers_view(app, ui);
@@ -1248,49 +1247,48 @@ fn connected_network_direct_host_ui_and_copy_regression() {
             });
             net_harness.input_mut().time = None;
 
+            assert!(net_harness.get_by_label("127.0.0.1:25565").rect().width() > 30.0);
+            assert!(net_harness.get_by_label("192.168.1.5:25565").rect().width() > 30.0);
             assert!(
                 net_harness
-                    .get_by_label("[2001:db8::42]:25565")
-                    .rect()
-                    .width()
-                    > 30.0
-            );
-            assert!(
-                net_harness
-                    .get_by_label("198.51.100.77:25565")
-                    .rect()
-                    .width()
-                    > 30.0
-            );
-            assert!(
-                net_harness
-                    .get_by_role_and_label(egui::Role::Button, &copy_v4_lbl)
+                    .get_by_role_and_label(egui::Role::Button, &create_room_lbl)
                     .rect()
                     .width()
                     > 20.0
             );
             assert!(
                 net_harness
-                    .get_by_role_and_label(egui::Role::Button, &close_lbl)
-                    .rect()
-                    .width()
-                    > 20.0
+                    .query_by_role_and_label(egui::Role::Button, &legacy_v6_lbl)
+                    .is_none(),
+                "Duplicate IPv6 direct host button must stay removed"
+            );
+            assert!(
+                net_harness
+                    .query_by_role_and_label(egui::Role::Button, &legacy_direct_lbl)
+                    .is_none(),
+                "Duplicate current-network port host button must stay removed"
+            );
+            assert!(
+                net_harness
+                    .query_by_role_and_label(egui::Role::Button, &legacy_bore_srv_lbl)
+                    .is_none(),
+                "Duplicate bore tunnel button must stay removed"
             );
 
-            let copy_v6_pos = net_harness
-                .get_by_role_and_label(egui::Role::Button, &copy_v6_lbl)
+            let copy_lan_pos = net_harness
+                .get_by_role_and_label(egui::Role::Button, &copy_lan_lbl)
                 .rect()
                 .center();
             net_harness
                 .input_mut()
                 .events
-                .push(egui::Event::PointerMoved(copy_v6_pos));
+                .push(egui::Event::PointerMoved(copy_lan_pos));
             net_harness.run_steps(1);
             net_harness
                 .input_mut()
                 .events
                 .push(egui::Event::PointerButton {
-                    pos: copy_v6_pos,
+                    pos: copy_lan_pos,
                     button: egui::PointerButton::Primary,
                     pressed: true,
                     modifiers: egui::Modifiers::NONE,
@@ -1300,32 +1298,74 @@ fn connected_network_direct_host_ui_and_copy_regression() {
                 .input_mut()
                 .events
                 .push(egui::Event::PointerButton {
-                    pos: copy_v6_pos,
+                    pos: copy_lan_pos,
                     button: egui::PointerButton::Primary,
                     pressed: false,
                     modifiers: egui::Modifiers::NONE,
                 });
             net_harness.step();
-            let copied_v6 = net_harness.output().platform_output.commands.iter().any(
-                |cmd| matches!(cmd, egui::OutputCommand::CopyText(t) if t == "[2001:db8::42]:25565"),
+            let copied_lan = net_harness.output().platform_output.commands.iter().any(
+                |cmd| matches!(cmd, egui::OutputCommand::CopyText(t) if t == "192.168.1.5:25565"),
             );
-            drop(net_harness);
-            assert!(copied_v6, "Copy Online IPv6 must emit CopyText command");
+            assert!(copied_lan, "Copy LAN button must emit CopyText command");
 
-            app.show_lan_modal = true;
-            app.lan_modal.direct_host_status = DirectHostStatus::Running(active_info.clone());
+            let open_join_pos = net_harness
+                .get_by_role_and_label(egui::Role::Button, &open_join_lbl)
+                .rect()
+                .center();
+            net_harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(open_join_pos));
+            net_harness.run_steps(1);
+            net_harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerButton {
+                    pos: open_join_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            net_harness.step();
+            net_harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerButton {
+                    pos: open_join_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            net_harness.step();
+            drop(net_harness);
+
+            assert!(app.show_lan_modal, "Open Join Room must open LAN modal");
+            assert_eq!(
+                app.lan_modal.virtual_mode,
+                VirtualPortUiMode::Join,
+                "Open Join Room must select Join Room tab"
+            );
+            app.lan_modal.primary_lan_ip = Some("192.168.1.5".into());
+
+            let lan_badge_lbl = format!("{}: 192.168.1.5", app.i18n.tr("Mạng nội bộ", "Local LAN"));
             let mut lan_harness = harness(960.0, 760.0, |ui| {
                 crate::views::modals::render_all_modals(app, ui.ctx());
             });
             lan_harness.input_mut().time = None;
+            assert!(lan_harness.get_by_label(&lan_badge_lbl).rect().width() > 30.0);
             assert!(
                 lan_harness
-                    .get_by_label("[2001:db8::42]:25565")
-                    .rect()
-                    .width()
-                    > 30.0
+                    .query_by_role_and_label(egui::Role::Button, &legacy_direct_lbl)
+                    .is_none(),
+                "Unified LAN modal must not render legacy DirectHost card"
             );
-            assert!(lan_harness.get_by_label("192.168.1.5:25565").rect().width() > 30.0);
+            assert!(
+                lan_harness
+                    .query_by_role_and_label(egui::Role::Button, &legacy_bore_lan_lbl)
+                    .is_none(),
+                "Unified LAN modal must not render legacy Bore tunnel card"
+            );
             drop(lan_harness);
         });
     }
@@ -2237,13 +2277,15 @@ fn servers_long_modpack_paths_and_all_tabs_never_overflow_portrait_or_landscape(
             reason: "Automated bot flood".into(),
         }];
         app.servers.addon_kind = ContentKind::Mod;
-        app.servers.server_tunnels.insert(
+        app.servers.server_virtual_hosts.insert(
             srv_id,
-            TunnelStatus::Running {
+            thk_network::VirtualPortHostStatus::Running(thk_network::VirtualPortHostInfo {
                 local_port: 25565,
-                remote_addr: "bore.pub:25435".into(),
-                remote_port: 25435,
-            },
+                room_code: format!("thk1_{}", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789".repeat(4)),
+                node_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                relay_connected: true,
+                active_streams: 2,
+            }),
         );
 
         let all_tabs = [
@@ -4699,4 +4741,852 @@ fn mod_list_virtualized_filtering_unicode_literal_and_empty_queries() {
         );
         drop(harness_after);
     });
+}
+
+fn make_mock_icon_image(primary: egui::Color32, accent: egui::Color32) -> egui::ColorImage {
+    let mut pixels = Vec::with_capacity(16 * 16);
+    for y in 0..16 {
+        for x in 0..16 {
+            let border = x < 2 || y < 2 || x >= 14 || y >= 14;
+            pixels.push(if border { accent } else { primary });
+        }
+    }
+    egui::ColorImage::new([16, 16], pixels)
+}
+
+#[test]
+fn create_modals_render_visible_optimization_suggestions_and_toggle_actions() {
+    use crate::state::{NewServerSourceMode, OptimizationQueryKey};
+    use thk_core::models::{ContentKind, LoaderType, ProviderSource, ServerEngine};
+    use thk_mods::{
+        OptimizationTarget, ProjectSummary, ProjectVersion, ResolvedOptimizationSuggestion,
+        VersionFile,
+    };
+
+    fn seed_mock_textures(
+        app: &mut crate::state::LauncherAppState,
+        ctx: &egui::Context,
+        entries: &[(&str, egui::Color32, egui::Color32)],
+    ) {
+        for &(url, primary, accent) in entries {
+            let key = format!("64:{url}");
+            let tex = ctx.load_texture(
+                key.clone(),
+                make_mock_icon_image(primary, accent),
+                egui::TextureOptions::LINEAR,
+            );
+            app.modpacks.textures.insert(key, tex);
+        }
+    }
+
+    fn make_suggestion(
+        id: &str,
+        title: &str,
+        kind: ContentKind,
+        loader: &str,
+        recommended: bool,
+        version_number: Option<&str>,
+        icon_url: Option<&str>,
+    ) -> ResolvedOptimizationSuggestion {
+        let compatible_version = version_number.map(|ver| ProjectVersion {
+            id: format!("ver-{id}-{ver}"),
+            project_id: id.to_string(),
+            provider: ProviderSource::Modrinth,
+            name: format!("{title} {ver}"),
+            version_number: ver.to_string(),
+            release_channel: "release".to_string(),
+            published_at: None,
+            game_versions: vec!["1.21.4".to_string()],
+            loaders: vec![loader.to_string()],
+            files: vec![VersionFile {
+                url: format!("https://example.invalid/{id}-{ver}.jar"),
+                filename: format!("{id}-{ver}.jar"),
+                size: 1024,
+                sha1: None,
+                sha512: None,
+                primary: true,
+            }],
+            dependencies: Vec::new(),
+            server_pack_file_id: None,
+        });
+        let project_summary = Some(ProjectSummary {
+            provider: ProviderSource::Modrinth,
+            project_id: id.to_string(),
+            slug: id.to_string(),
+            title: title.to_string(),
+            summary: format!("Optimize with {title}"),
+            author: "Modrinth".to_string(),
+            downloads: 100_000,
+            icon_url: icon_url.map(str::to_string),
+            categories: vec!["optimization".to_string()],
+            updated_at: None,
+            content_kind: kind,
+        });
+        ResolvedOptimizationSuggestion {
+            project_id: id.to_string(),
+            slug: id.to_string(),
+            title: title.to_string(),
+            content_kind: kind,
+            summary_vi: format!("Tối ưu {title}"),
+            summary_en: format!("Optimize with {title}"),
+            recommended_by_default: recommended,
+            project_summary,
+            compatible_version,
+            error: None,
+        }
+    }
+
+    let _render_guard = VISUAL_RENDER_LOCK.lock().expect("visual renderer lock");
+
+    let prof_mock_icons = [
+        (
+            "https://cdn.modrinth.com/mock/sodium.png",
+            egui::Color32::from_rgb(38, 166, 255),
+            egui::Color32::from_rgb(16, 92, 180),
+        ),
+        (
+            "https://cdn.modrinth.com/mock/lithium.png",
+            egui::Color32::from_rgb(235, 110, 52),
+            egui::Color32::from_rgb(160, 58, 22),
+        ),
+    ];
+
+    with_isolated_app(Language::Vi, |app| {
+        app.settings.setup_completed = true;
+        app.home.new_draft.name = "Fabric Opt 1.21.4".into();
+        app.home.new_draft.loader = LoaderType::Fabric;
+        app.home.new_draft.game_version = "1.21.4".into();
+        app.home.new_draft.auto_perf_mods = true;
+        let prof_key = OptimizationQueryKey {
+            target: OptimizationTarget::Client(LoaderType::Fabric),
+            game_version: "1.21.4".into(),
+        };
+        app.home.new_draft.optimizations.apply_resolved(
+            &prof_key,
+            Ok(vec![
+                make_suggestion(
+                    "sodium",
+                    "Sodium",
+                    ContentKind::Mod,
+                    "fabric",
+                    true,
+                    Some("mc1.21.4-0.6.13-fabric"),
+                    Some("https://cdn.modrinth.com/mock/sodium.png"),
+                ),
+                make_suggestion(
+                    "lithium",
+                    "Lithium",
+                    ContentKind::Mod,
+                    "fabric",
+                    true,
+                    Some("mc1.21.4-0.14.8-fabric"),
+                    Some("https://cdn.modrinth.com/mock/lithium.png"),
+                ),
+                make_suggestion(
+                    "ferrite-core",
+                    "FerriteCore",
+                    ContentKind::Mod,
+                    "fabric",
+                    true,
+                    Some("7.1.0-fabric"),
+                    None,
+                ),
+                make_suggestion(
+                    "c2me-fabric",
+                    "C2ME",
+                    ContentKind::Mod,
+                    "fabric",
+                    false,
+                    Some("0.3.0+1.21.4"),
+                    None,
+                ),
+                make_suggestion(
+                    "krypton",
+                    "Krypton",
+                    ContentKind::Mod,
+                    "fabric",
+                    false,
+                    None,
+                    None,
+                ),
+            ]),
+        );
+        app.show_new_profile_modal = true;
+
+        let win_title = app
+            .i18n
+            .tr("Tạo Profile Minecraft Mới", "Create New Minecraft Profile")
+            .to_string();
+        let rec_lbl = app.i18n.tr("Mặc định", "Recommended").to_string();
+        let all_lbl = app.i18n.tr("Chọn tất cả", "All").to_string();
+        let none_lbl = app.i18n.tr("Bỏ chọn", "None").to_string();
+
+        {
+            let mut seeded = false;
+            let mut h = harness_scaled(1280.0, 800.0, 1.0, ThemeMode::Dark, |ui| {
+                if !seeded {
+                    seeded = true;
+                    seed_mock_textures(app, ui.ctx(), &prof_mock_icons);
+                }
+                crate::views::render_root_ui(app, ui, None);
+            });
+            h.input_mut().time = None;
+            let modal_rect = h
+                .get_by_role_and_label(egui::Role::Window, &win_title)
+                .rect();
+            assert!(modal_rect.width() >= 540.0 && modal_rect.height() >= 600.0);
+
+            for expected_lbl in [
+                "Đề xuất tối ưu (MC 1.21.4)",
+                "Sodium",
+                "mc1.21.4-0.6.13-fabric",
+                "Lithium",
+            ] {
+                let r = h.get_by_label(expected_lbl).rect();
+                assert!(
+                    r.width() > 20.0 && r.height() > 10.0,
+                    "label '{expected_lbl}' collapsed: {r:?}"
+                );
+                assert!(
+                    modal_rect.contains_rect(r),
+                    "label '{expected_lbl}' clipped outside initial modal viewport: modal={modal_rect:?}, item={r:?}"
+                );
+            }
+            for btn_lbl in [&rec_lbl, &all_lbl, &none_lbl] {
+                let r = h.get_by_role_and_label(egui::Role::Button, btn_lbl).rect();
+                assert!(
+                    modal_rect.contains_rect(r),
+                    "button '{btn_lbl}' escaped modal bounds: modal={modal_rect:?}, btn={r:?}"
+                );
+            }
+
+            h.get_by_role_and_label(egui::Role::Button, &all_lbl)
+                .click();
+            h.run_steps(2);
+        }
+        assert!(app
+            .modpacks
+            .textures
+            .contains_key("64:https://cdn.modrinth.com/mock/sodium.png"));
+        assert_eq!(
+            app.home.new_draft.optimizations.selected_ids.len(),
+            4,
+            "Select All must select all 4 compatible mods and skip unavailable Krypton"
+        );
+
+        {
+            let mut seeded = false;
+            let mut h = harness_scaled(1280.0, 800.0, 1.0, ThemeMode::Dark, |ui| {
+                if !seeded {
+                    seeded = true;
+                    seed_mock_textures(app, ui.ctx(), &prof_mock_icons);
+                }
+                crate::views::render_root_ui(app, ui, None);
+            });
+            h.get_by_role_and_label(egui::Role::Button, &none_lbl)
+                .click();
+            h.run_steps(2);
+        }
+        assert!(app.home.new_draft.optimizations.selected_ids.is_empty());
+
+        {
+            let mut seeded = false;
+            let mut h = harness_scaled(1280.0, 800.0, 1.0, ThemeMode::Dark, |ui| {
+                if !seeded {
+                    seeded = true;
+                    seed_mock_textures(app, ui.ctx(), &prof_mock_icons);
+                }
+                crate::views::render_root_ui(app, ui, None);
+            });
+            h.get_by_role_and_label(egui::Role::Button, &rec_lbl)
+                .click();
+            h.run_steps(2);
+        }
+        assert_eq!(app.home.new_draft.optimizations.selected_ids.len(), 3);
+        assert!(!app
+            .home
+            .new_draft
+            .optimizations
+            .selected_ids
+            .contains("c2me-fabric"));
+    });
+
+    let srv_mock_icons = [(
+        "https://cdn.modrinth.com/mock/chunky.png",
+        egui::Color32::from_rgb(52, 201, 132),
+        egui::Color32::from_rgb(20, 128, 76),
+    )];
+
+    with_isolated_app(Language::En, |app| {
+        app.settings.setup_completed = true;
+        app.servers.new_draft.name = "Paper Opt 1.21.4".into();
+        app.servers.new_draft.source_mode = NewServerSourceMode::StandardEngine;
+        app.servers.new_draft.engine = ServerEngine::Paper;
+        app.servers.new_draft.game_version = "1.21.4".into();
+        let srv_key = OptimizationQueryKey {
+            target: OptimizationTarget::Server {
+                engine: ServerEngine::Paper,
+                mod_loader: None,
+            },
+            game_version: "1.21.4".into(),
+        };
+        app.servers.new_draft.optimizations.apply_resolved(
+            &srv_key,
+            Ok(vec![
+                make_suggestion(
+                    "chunky",
+                    "Chunky",
+                    ContentKind::Plugin,
+                    "paper",
+                    true,
+                    Some("1.4.27"),
+                    Some("https://cdn.modrinth.com/mock/chunky.png"),
+                ),
+                make_suggestion(
+                    "viewdistance",
+                    "ViewDistanceTweaks",
+                    ContentKind::Plugin,
+                    "paper",
+                    false,
+                    Some("1.5.4"),
+                    None,
+                ),
+                make_suggestion(
+                    "villageropt",
+                    "VillagerOptimizer",
+                    ContentKind::Plugin,
+                    "paper",
+                    false,
+                    None,
+                    None,
+                ),
+            ]),
+        );
+        app.show_new_server_modal = true;
+
+        let win_title = app
+            .i18n
+            .tr(
+                "Tạo Máy Chủ Minecraft Cục Bộ",
+                "Create Local Minecraft Server",
+            )
+            .to_string();
+        let rec_lbl = app.i18n.tr("Mặc định", "Recommended").to_string();
+        let all_lbl = app.i18n.tr("Chọn tất cả", "All").to_string();
+        let none_lbl = app.i18n.tr("Bỏ chọn", "None").to_string();
+
+        {
+            let mut seeded = false;
+            let mut h = harness_scaled(1280.0, 800.0, 1.0, ThemeMode::Light, |ui| {
+                if !seeded {
+                    seeded = true;
+                    seed_mock_textures(app, ui.ctx(), &srv_mock_icons);
+                }
+                crate::views::render_root_ui(app, ui, None);
+            });
+            h.input_mut().time = None;
+            let modal_rect = h
+                .get_by_role_and_label(egui::Role::Window, &win_title)
+                .rect();
+            assert!(modal_rect.width() >= 580.0 && modal_rect.height() >= 600.0);
+
+            for expected_lbl in [
+                "Optimization Suggestions (MC 1.21.4)",
+                "Chunky",
+                "1.4.27",
+                "No build for MC 1.21.4",
+            ] {
+                let r = h.get_by_label(expected_lbl).rect();
+                assert!(
+                    r.width() > 20.0 && r.height() > 10.0,
+                    "label '{expected_lbl}' collapsed: {r:?}"
+                );
+                assert!(
+                    modal_rect.contains_rect(r),
+                    "label '{expected_lbl}' clipped outside server modal: modal={modal_rect:?}, item={r:?}"
+                );
+            }
+            for btn_lbl in [&rec_lbl, &all_lbl, &none_lbl] {
+                let r = h.get_by_role_and_label(egui::Role::Button, btn_lbl).rect();
+                assert!(
+                    modal_rect.contains_rect(r),
+                    "button '{btn_lbl}' escaped server modal: modal={modal_rect:?}, btn={r:?}"
+                );
+            }
+
+            h.get_by_role_and_label(egui::Role::Button, &all_lbl)
+                .click();
+            h.run_steps(2);
+        }
+        assert!(app
+            .modpacks
+            .textures
+            .contains_key("64:https://cdn.modrinth.com/mock/chunky.png"));
+        assert_eq!(app.servers.new_draft.optimizations.selected_ids.len(), 2);
+
+        {
+            let mut seeded = false;
+            let mut h = harness_scaled(1280.0, 800.0, 1.0, ThemeMode::Light, |ui| {
+                if !seeded {
+                    seeded = true;
+                    seed_mock_textures(app, ui.ctx(), &srv_mock_icons);
+                }
+                crate::views::render_root_ui(app, ui, None);
+            });
+            h.get_by_role_and_label(egui::Role::Button, &none_lbl)
+                .click();
+            h.run_steps(2);
+        }
+        assert!(app.servers.new_draft.optimizations.selected_ids.is_empty());
+
+        {
+            let mut seeded = false;
+            let mut h = harness_scaled(1280.0, 800.0, 1.0, ThemeMode::Light, |ui| {
+                if !seeded {
+                    seeded = true;
+                    seed_mock_textures(app, ui.ctx(), &srv_mock_icons);
+                }
+                crate::views::render_root_ui(app, ui, None);
+            });
+            h.get_by_role_and_label(egui::Role::Button, &rec_lbl)
+                .click();
+            h.run_steps(2);
+        }
+        assert_eq!(app.servers.new_draft.optimizations.selected_ids.len(), 1);
+        assert!(app
+            .servers
+            .new_draft
+            .optimizations
+            .selected_ids
+            .contains("chunky"));
+    });
+}
+
+#[test]
+fn modpacks_grid_and_gallery_rows_align_without_staircase() {
+    use crate::state::{ActiveSection, ModpackDetailTab};
+    use thk_core::models::{ContentKind, ProviderSource};
+    use thk_mods::{GalleryImage, ProjectDetail, ProjectSummary};
+
+    let _render_guard = VISUAL_RENDER_LOCK.lock().expect("visual renderer lock");
+    with_isolated_app(Language::Vi, |app| {
+        app.settings.setup_completed = true;
+        app.section = ActiveSection::Modpacks;
+        app.modpacks.view_grid = true;
+        app.modpacks.searching = false;
+        app.modpacks.last_error = None;
+        app.modpacks.show_filter_sidebar = true;
+
+        let sample_cards = [
+            (
+                "grid-1",
+                "Fabulously Optimized",
+                "Beautiful graphics, speedy performance and familiar features in a simple package.",
+                19_300_000,
+                vec!["fabric".to_string(), "lightweight".to_string()],
+                "https://cdn.modrinth.com/mock/fo.png",
+            ),
+            (
+                "grid-2",
+                "Zombie Invade 100 Days",
+                "Survive 100 days of zombie apocalypse with custom waves and bosses.",
+                15_300_000,
+                vec!["challenging".to_string(), "combat".to_string()],
+                "https://cdn.modrinth.com/mock/zi.png",
+            ),
+            (
+                "grid-3",
+                "Cobblemon Official Modpack",
+                "The official modpack for Fabric!",
+                11_400_000,
+                vec!["adventure".to_string(), "fabric".to_string()],
+                "https://cdn.modrinth.com/mock/cm.png",
+            ),
+            (
+                "grid-4",
+                "COBBLEVERSE Adventure [Fabric]",
+                "Start a true creature adventure across multiple regions with progression.",
+                7_200_000,
+                vec!["adventure".to_string(), "challenging".to_string()],
+                "https://cdn.modrinth.com/mock/cv.png",
+            ),
+            (
+                "grid-5",
+                "BattleArmory TACZ",
+                "Fast-paced tactical combat modpack with upgraded weapons, armor, bosses and optimization.",
+                3_800_000,
+                vec!["combat".to_string(), "forge".to_string()],
+                "https://cdn.modrinth.com/mock/ba.png",
+            ),
+            (
+                "grid-6",
+                "Better MC [FABRIC] - BMC2",
+                "Version 1.20 proper Vanilla+ modpack.",
+                3_700_000,
+                vec!["adventure".to_string(), "combat".to_string()],
+                "https://cdn.modrinth.com/mock/bm.png",
+            ),
+        ];
+
+        app.modpacks.hits = sample_cards
+            .iter()
+            .map(|(id, title, summary, dl, cats, icon)| ProjectSummary {
+                provider: ProviderSource::Modrinth,
+                project_id: (*id).into(),
+                slug: (*id).into(),
+                title: (*title).into(),
+                summary: (*summary).into(),
+                author: "Creator".into(),
+                downloads: *dl,
+                icon_url: Some((*icon).into()),
+                categories: cats.clone(),
+                updated_at: Some("2026-11-10T00:00:00Z".into()),
+                content_kind: ContentKind::Modpack,
+            })
+            .collect();
+        app.modpacks.total_hits = 19_300;
+
+        let mut grid_seeded = false;
+        let mut h = harness_scaled(1500.0, 860.0, 1.0, ThemeMode::Light, |ui| {
+            if !grid_seeded {
+                grid_seeded = true;
+                for (i, (_, _, _, _, _, url)) in sample_cards.iter().enumerate() {
+                    let key = format!("128:{url}");
+                    let primary = match i % 3 {
+                        0 => crate::theme::ACCENT_EMERALD,
+                        1 => crate::theme::ACCENT_RED,
+                        _ => crate::theme::ACCENT_BLUE,
+                    };
+                    let tex = ui.ctx().load_texture(
+                        key.clone(),
+                        make_mock_icon_image(primary, crate::theme::ACCENT_AMBER),
+                        egui::TextureOptions::LINEAR,
+                    );
+                    app.modpacks.textures.insert(key, tex);
+                }
+            }
+            crate::views::render_root_ui(app, ui, None);
+        });
+        h.input_mut().time = None;
+        h.run_steps(2);
+        let _ = h.render().expect("render modpack grid visual test");
+
+        let row1_rects: Vec<egui::Rect> = [
+            "Fabulously Optimized",
+            "Zombie Invade 100 Days",
+            "Cobblemon Official Modpack",
+        ]
+        .iter()
+        .map(|lbl| h.get_by_label(lbl).rect())
+        .collect();
+        for w in row1_rects.windows(2) {
+            assert!(
+                w[0].left() < w[1].left(),
+                "row 1 cards should go left-to-right: {:?} vs {:?}",
+                w[0],
+                w[1]
+            );
+            assert!(
+                (w[0].top() - w[1].top()).abs() <= 2.0,
+                "row 1 staircase regression detected: {:?} vs {:?}",
+                w[0],
+                w[1]
+            );
+            assert!(!w[0].intersects(w[1]));
+        }
+
+        let row2_rects: Vec<egui::Rect> = [
+            "COBBLEVERSE Adventure [Fabric]",
+            "BattleArmory TACZ",
+            "Better MC [FABRIC] - BMC2",
+        ]
+        .iter()
+        .map(|lbl| h.get_by_label(lbl).rect())
+        .collect();
+        for w in row2_rects.windows(2) {
+            assert!(
+                w[0].left() < w[1].left(),
+                "row 2 cards should go left-to-right: {:?} vs {:?}",
+                w[0],
+                w[1]
+            );
+            assert!(
+                (w[0].top() - w[1].top()).abs() <= 2.0,
+                "row 2 staircase regression detected: {:?} vs {:?}",
+                w[0],
+                w[1]
+            );
+            assert!(!w[0].intersects(w[1]));
+        }
+        assert!(
+            row2_rects[0].top() > row1_rects[0].bottom() + 40.0,
+            "row 2 must sit cleanly below row 1: row1={:?}, row2={:?}",
+            row1_rects[0],
+            row2_rects[0]
+        );
+        drop(h);
+
+        app.modpacks.selected = Some((
+            ProjectDetail {
+                summary: app.modpacks.hits[0].clone(),
+                body_markdown: "Overview body".into(),
+                gallery: vec![
+                    GalleryImage {
+                        url: "https://cdn.modrinth.com/mock/gal-1.png".into(),
+                        title: "Gallery Shot 1".into(),
+                    },
+                    GalleryImage {
+                        url: "https://cdn.modrinth.com/mock/gal-2.png".into(),
+                        title: "Gallery Shot 2".into(),
+                    },
+                    GalleryImage {
+                        url: "https://cdn.modrinth.com/mock/gal-3.png".into(),
+                        title: "Gallery Shot 3".into(),
+                    },
+                ],
+                source_url: None,
+                game_versions: vec!["1.21.4".into()],
+                loaders: vec!["fabric".into()],
+            },
+            Vec::new(),
+        ));
+        app.modpacks.detail_tab = ModpackDetailTab::Gallery;
+
+        let mut gal_seeded = false;
+        let mut h_gal = harness_scaled(1280.0, 820.0, 1.0, ThemeMode::Light, |ui| {
+            if !gal_seeded {
+                gal_seeded = true;
+                for (idx, url) in [
+                    "https://cdn.modrinth.com/mock/gal-1.png",
+                    "https://cdn.modrinth.com/mock/gal-2.png",
+                    "https://cdn.modrinth.com/mock/gal-3.png",
+                ]
+                .iter()
+                .enumerate()
+                {
+                    let key = format!("960:{url}");
+                    let col = if idx == 0 {
+                        crate::theme::ACCENT_CYAN
+                    } else if idx == 1 {
+                        crate::theme::ACCENT_EMERALD
+                    } else {
+                        crate::theme::ACCENT_VIOLET
+                    };
+                    let tex = ui.ctx().load_texture(
+                        key.clone(),
+                        make_mock_icon_image(col, crate::theme::ACCENT_BLUE),
+                        egui::TextureOptions::LINEAR,
+                    );
+                    app.modpacks.textures.insert(key, tex);
+                }
+            }
+            crate::views::render_root_ui(app, ui, None);
+        });
+        h_gal.input_mut().time = None;
+        h_gal.run_steps(2);
+        let _ = h_gal.render().expect("render modpack gallery visual test");
+
+        let g1 = h_gal.get_by_label("Gallery Shot 1").rect();
+        let g2 = h_gal.get_by_label("Gallery Shot 2").rect();
+        let g3 = h_gal.get_by_label("Gallery Shot 3").rect();
+        assert!(g1.left() < g2.left());
+        assert!(
+            (g1.top() - g2.top()).abs() <= 2.0,
+            "gallery row 1 staircase regression detected: {g1:?} vs {g2:?}"
+        );
+        assert!(g3.top() > g1.bottom() + 40.0);
+    });
+}
+
+#[test]
+fn virtual_port_host_and_join_ui_and_copy_regression() {
+    use crate::state::VirtualPortUiMode;
+    use thk_network::{
+        VirtualPortClientInfo, VirtualPortClientStatus, VirtualPortHostInfo, VirtualPortHostStatus,
+    };
+
+    let _render_guard = VISUAL_RENDER_LOCK.lock().expect("visual renderer lock");
+    let full_room_code = format!("thk1_{}", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789".repeat(5));
+
+    let vhost_info = VirtualPortHostInfo {
+        local_port: 25565,
+        room_code: full_room_code.clone(),
+        node_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+        relay_connected: true,
+        active_streams: 3,
+    };
+    let vclient_info = VirtualPortClientInfo {
+        bound_port: 25599,
+        local_endpoint: "127.0.0.1:25599".into(),
+        motd: "Virtual Friend World".into(),
+        remote_node_id: vhost_info.node_id.clone(),
+        announcing_lan: true,
+        active_streams: 1,
+    };
+
+    for language in [Language::Vi, Language::En] {
+        with_isolated_app(language, |app| {
+            app.settings.setup_completed = true;
+            let srv = server_fixture();
+            let srv_id = srv.id.clone();
+            app.servers.selected_server_id = Some(srv_id.clone());
+            app.servers.servers = vec![srv];
+            app.servers.active_tab = ServerTab::Network;
+            app.servers
+                .server_virtual_hosts
+                .insert(srv_id, VirtualPortHostStatus::Running(vhost_info.clone()));
+
+            let copy_code_lbl = app
+                .i18n
+                .tr("Sao chép Mã Phòng", "Copy Room Code")
+                .to_owned();
+            let close_vport_lbl = app.i18n.tr("Đóng Phòng", "Close Room").to_owned();
+            let join_tab_lbl = app.i18n.tr("Vào Phòng", "Join Room").to_owned();
+            let copy_join_ep_lbl = app.i18n.tr("Sao chép địa chỉ", "Copy Address").to_owned();
+
+            let mut srv_harness = harness(1240.0, 920.0, |ui| {
+                crate::views::servers::render_servers_view(app, ui);
+                assert!(ui.min_rect().right() <= 1240.5);
+            });
+            srv_harness.input_mut().time = None;
+            assert!(
+                srv_harness
+                    .get_by_role_and_label(egui::Role::Button, &close_vport_lbl)
+                    .rect()
+                    .width()
+                    > 20.0
+            );
+
+            let copy_btn_pos = srv_harness
+                .get_by_role_and_label(egui::Role::Button, &copy_code_lbl)
+                .rect()
+                .center();
+            srv_harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(copy_btn_pos));
+            srv_harness.run_steps(1);
+            srv_harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerButton {
+                    pos: copy_btn_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            srv_harness.step();
+            srv_harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerButton {
+                    pos: copy_btn_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            srv_harness.step();
+            let copied_full_code =
+                srv_harness.output().platform_output.commands.iter().any(
+                    |cmd| matches!(cmd, egui::OutputCommand::CopyText(t) if t == &full_room_code),
+                );
+            drop(srv_harness);
+            assert!(
+                copied_full_code,
+                "Copy Room Code must copy full ticket even when badge is truncated"
+            );
+
+            app.show_lan_modal = true;
+            app.lan_modal.virtual_mode = VirtualPortUiMode::Host;
+            app.lan_modal.virtual_host_status = VirtualPortHostStatus::Running(vhost_info.clone());
+            app.lan_modal.virtual_client_status =
+                VirtualPortClientStatus::Running(vclient_info.clone());
+
+            let mut lan_narrow = harness(390.0, 820.0, |ui| {
+                crate::views::modals::render_all_modals(app, ui.ctx());
+            });
+            lan_narrow.input_mut().time = None;
+            let host_copy_rect = lan_narrow
+                .get_by_role_and_label(egui::Role::Button, &copy_code_lbl)
+                .rect();
+            assert!(
+                host_copy_rect.right() <= 390.5,
+                "narrow virtual host UI overflows 390pt: {host_copy_rect:?}"
+            );
+            let join_tab_pos = lan_narrow.get_by_label(&join_tab_lbl).rect().center();
+            lan_narrow
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(join_tab_pos));
+            lan_narrow.run_steps(1);
+            lan_narrow
+                .input_mut()
+                .events
+                .push(egui::Event::PointerButton {
+                    pos: join_tab_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            lan_narrow.step();
+            lan_narrow
+                .input_mut()
+                .events
+                .push(egui::Event::PointerButton {
+                    pos: join_tab_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            lan_narrow.step();
+            let ep_badge = lan_narrow.get_by_label("127.0.0.1:25599").rect();
+            assert!(
+                ep_badge.right() <= 390.5,
+                "narrow virtual client endpoint overflows 390pt: {ep_badge:?}"
+            );
+            ensure_button_scrolled_into_view(
+                &mut lan_narrow,
+                &copy_join_ep_lbl,
+                Rect::from_min_size(pos2(20.0, 150.0), vec2(350.0, 520.0)),
+            );
+            let join_copy_pos = lan_narrow
+                .get_by_role_and_label(egui::Role::Button, &copy_join_ep_lbl)
+                .rect()
+                .center();
+            lan_narrow
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(join_copy_pos));
+            lan_narrow.run_steps(1);
+            lan_narrow
+                .input_mut()
+                .events
+                .push(egui::Event::PointerButton {
+                    pos: join_copy_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            lan_narrow.step();
+            lan_narrow
+                .input_mut()
+                .events
+                .push(egui::Event::PointerButton {
+                    pos: join_copy_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            lan_narrow.step();
+            let copied_join_ep = lan_narrow.output().platform_output.commands.iter().any(
+                |cmd| matches!(cmd, egui::OutputCommand::CopyText(t) if t == "127.0.0.1:25599"),
+            );
+            drop(lan_narrow);
+            assert_eq!(app.lan_modal.virtual_mode, VirtualPortUiMode::Join);
+            assert!(
+                copied_join_ep,
+                "Copy Address must emit CopyText(127.0.0.1:25599)"
+            );
+        });
+    }
 }

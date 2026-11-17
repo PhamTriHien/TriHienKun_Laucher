@@ -1,28 +1,34 @@
 use crate::fx3d::{
-    gaming_card_3d, paint_3d_tunnel_conduit, paint_glowing_progress_bar, paint_icon_3d,
+    gaming_card_3d, paint_glowing_progress_bar, paint_icon_3d, sliding_pill_tabs,
     tactile_button_3d, ButtonStyle3d, Icon3dKind, VectorIcon,
 };
-use crate::state::{DeleteTarget, LauncherAppState, NewServerSourceMode};
+use crate::state::{
+    DeleteTarget, LauncherAppState, NewServerSourceMode, OptimizationSuggestionDraft,
+    VirtualPortUiMode,
+};
 use crate::theme::{
     accent_palette, readable_accent_ink, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_EMERALD,
     ACCENT_ORANGE, ACCENT_RED, ACCENT_VIOLET,
 };
 use crate::views::modpacks::{paint_pack_thumbnail, truncate_chars};
 use crate::views::{
-    badge, centered_window_rect, danger_button, danger_icon_button, font_scale_selector,
-    format_bytes, format_project_version_option, java_runtime_mode_selector,
-    network_interface_selector_ui, primary_icon_button, render_direct_host_endpoints_ui,
+    badge, bounded_wrap_label, centered_window_rect, danger_button, danger_icon_button,
+    font_scale_selector, format_bytes, format_project_version_option, java_runtime_mode_selector,
+    primary_icon_button, render_virtual_client_active_ui, render_virtual_host_active_ui,
     secondary_button, secondary_icon_button,
 };
 use egui::{vec2, Color32, Frame, Key, Margin, Order, RichText, ScrollArea};
 use thk_core::models::{
-    AccentPreset, CloseBehavior, Language, LoaderType, ProviderSource, ServerEngine, ThemeMode,
+    AccentPreset, CloseBehavior, ContentKind, Language, LoaderType, ProviderSource, ServerEngine,
+    ThemeMode,
 };
-use thk_core::RecoveryArtifactKind;
+use thk_core::{I18n, RecoveryArtifactKind};
 use thk_java::JavaDistroKind;
 use thk_launcher::CrashFixAction;
-use thk_mods::{ProjectSummary, ServerModpackFormat};
-use thk_network::{DirectHostStatus, TunnelStatus};
+use thk_mods::{
+    target_supports_optimizations, OptimizationTarget, ProjectSummary, ServerModpackFormat,
+};
+use thk_network::{VirtualPortClientStatus, VirtualPortHostStatus};
 
 pub fn render_all_modals(app: &mut LauncherAppState, ctx: &egui::Context) {
     if !app.settings.setup_completed {
@@ -224,7 +230,7 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
         .tr("Tạo Profile Minecraft Mới", "Create New Minecraft Profile")
         .to_string();
     let safe_rect = crate::views::safe_content_rect(ctx);
-    let init_rect = centered_window_rect(ctx, vec2(500.0, 520.0));
+    let init_rect = centered_window_rect(ctx, vec2(570.0, 690.0));
     egui::Window::new(title)
         .id(egui::Id::unique("thk_modal_new_profile"))
         .default_rect(init_rect)
@@ -415,6 +421,31 @@ fn render_new_profile_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                         );
                     }
 
+                    app.ensure_profile_optimization_suggestions(false);
+                    let prof_icon_textures = collect_optimization_icon_textures(app, false);
+                    let prof_gv = app.home.new_draft.game_version.trim().to_string();
+                    let prof_supports_opts = target_supports_optimizations(
+                        OptimizationTarget::Client(app.home.new_draft.loader),
+                    );
+                    ui.add_space(6.0);
+                    let refresh_prof_opts = render_optimization_suggestions_panel(
+                        ui,
+                        &app.i18n,
+                        OptimizationPanelConfig {
+                            id_salt: "new_profile_optimization_suggestions",
+                            mc_version: &prof_gv,
+                            supports_optimizations: prof_supports_opts,
+                            show_kind_badge: false,
+                            empty_unsupported_vi: "Hồ sơ Vanilla thuần không cài thêm mod tối ưu.",
+                            empty_unsupported_en: "Vanilla profiles do not use optimization mods.",
+                        },
+                        &mut app.home.new_draft.optimizations,
+                        &prof_icon_textures,
+                    );
+                    if refresh_prof_opts {
+                        app.ensure_profile_optimization_suggestions(true);
+                    }
+
                     ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(app.i18n.t("profile.ram")).strong());
@@ -498,7 +529,7 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
         )
         .to_string();
     let safe_rect = crate::views::safe_content_rect(ctx);
-    let init_rect = centered_window_rect(ctx, vec2(575.0, 575.0));
+    let init_rect = centered_window_rect(ctx, vec2(610.0, 700.0));
     egui::Window::new(title)
         .id(egui::Id::unique("thk_modal_new_server"))
         .default_rect(init_rect)
@@ -662,6 +693,7 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                             .get(&cur_eng)
                             .cloned()
                             .unwrap_or_default();
+                        let mut ver_editing_active = false;
 
                         ui.horizontal_wrapped(|ui| {
                             let max_row_w = (ui.max_rect().width() - 16.0).max(72.0);
@@ -672,12 +704,15 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                 .strong(),
                             );
                             if eng_vers.is_empty() {
-                                ui.add(
+                                let ver_edit = ui.add(
                                     egui::TextEdit::singleline(
                                         &mut app.servers.new_draft.game_version,
                                     )
                                     .desired_width(140.0_f32.min(max_row_w)),
                                 );
+                                ver_editing_active = ver_edit.has_focus()
+                                    && !ver_edit.lost_focus()
+                                    && !ui.input(|i| i.key_pressed(Key::Enter));
                             } else {
                                 egui::ComboBox::from_id_salt("new_server_ver_combo")
                                     .width(180.0_f32.min(max_row_w))
@@ -700,6 +735,39 @@ fn render_new_server_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                     .range(1024..=65535),
                             );
                         });
+
+                        if !ver_editing_active {
+                            app.ensure_server_optimization_suggestions(false);
+                        }
+                        let srv_icon_textures = collect_optimization_icon_textures(app, true);
+                        let srv_gv = app.servers.new_draft.game_version.trim().to_string();
+                        let srv_mod_loader = (cur_eng == ServerEngine::Arclight)
+                            .then(|| thk_server::jars::arclight_loader_for_mc(&srv_gv));
+                        let srv_target = OptimizationTarget::Server {
+                            engine: cur_eng,
+                            mod_loader: srv_mod_loader,
+                        };
+                        let srv_supports_opts = target_supports_optimizations(srv_target);
+                        let show_kind_badge =
+                            matches!(cur_eng, ServerEngine::Mohist | ServerEngine::Arclight);
+                        ui.add_space(6.0);
+                        let refresh_srv_opts = render_optimization_suggestions_panel(
+                            ui,
+                            &app.i18n,
+                            OptimizationPanelConfig {
+                                id_salt: "new_server_optimization_suggestions",
+                                mc_version: &srv_gv,
+                                supports_optimizations: srv_supports_opts,
+                                show_kind_badge,
+                                empty_unsupported_vi: "Máy chủ Vanilla thuần không hỗ trợ mod/plugin tối ưu.",
+                                empty_unsupported_en: "Vanilla servers do not support optimization mods or plugins.",
+                            },
+                            &mut app.servers.new_draft.optimizations,
+                            &srv_icon_textures,
+                        );
+                        if refresh_srv_opts {
+                            app.ensure_server_optimization_suggestions(true);
+                        }
                     }
                     NewServerSourceMode::CloudModpack => {
                         ui.horizontal_wrapped(|ui| {
@@ -1469,13 +1537,10 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
     let mut open = app.show_lan_modal;
     let title = app
         .i18n
-        .tr(
-            "Chia sẻ Thế giới LAN & Kết nối từ xa",
-            "LAN World Sharing & Remote Tunnel",
-        )
+        .tr("Phòng Chơi LAN & Online", "LAN & Online Room")
         .to_string();
     let safe_rect = crate::views::safe_content_rect(ctx);
-    let init_rect = centered_window_rect(ctx, vec2(600.0, 620.0));
+    let init_rect = centered_window_rect(ctx, vec2(560.0, 460.0));
     egui::Window::new(title)
         .id(egui::Id::unique("thk_modal_lan_share"))
         .default_rect(init_rect)
@@ -1494,444 +1559,373 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                     ui.set_max_width(scroll_w);
                     let mut ask_refresh_net = false;
                     let mut ask_sync_template = false;
-                    let mut ask_toggle_direct = false;
+                    let mut ask_toggle_scanner = false;
+                    let mut ask_toggle_v_host = false;
+                    let mut ask_toggle_v_client = false;
                     let mut copy_target: Option<String> = None;
 
-                    ui.horizontal(|ui| {
-                        paint_icon_3d(ui, 38.0, Icon3dKind::LanRadar, true);
-                        ui.vertical(|ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(
-                                    RichText::new(app.i18n.tr(
-                                        "Mở Port Theo Mạng Đang Kết Nối & Chơi LAN Online",
-                                        "Connected Network Port Host & Online LAN",
-                                    ))
-                                    .size(15.5)
-                                    .strong(),
-                                );
-                                if app.servers.probing_network {
-                                    ui.spinner();
-                                } else if secondary_icon_button(
-                                    ui,
-                                    VectorIcon::Refresh,
-                                    app.i18n.tr("Làm mới mạng", "Refresh Network"),
-                                )
-                                .clicked()
-                                {
-                                    ask_refresh_net = true;
-                                }
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                if let Some(ref ip) = app.lan_modal.primary_lan_ip {
-                                    ui.label(
-                                        RichText::new(app.i18n.tr("Mạng nội bộ:", "Local LAN:"))
-                                            .size(12.0)
-                                            .weak(),
-                                    );
-                                    badge(ui, ip, ACCENT_BLUE);
-                                }
-                                if let Some(v6) = app.lan_modal.network_snapshot.global_ipv6 {
-                                    badge(ui, &format!("IPv6 [{v6}]"), ACCENT_EMERALD);
-                                }
-                            });
-                        });
-                    });
-
-                    ui.add_space(6.0);
-                    gaming_card_3d(
-                        ui,
-                        "lan_scanner_card",
-                        app.lan_modal.scanner_active,
-                        ACCENT_CYAN,
-                        Margin::same(12),
-                        |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(
-                                RichText::new(app.i18n.tr(
-                                    "1. Tự động phát hiện thế giới 'Open to LAN' trên máy này",
-                                    "1. Detect Local 'Open to LAN' Worlds",
-                                ))
-                                .strong(),
-                            );
-                            ui.add_space(6.0);
-                            let auto_direct_lbl = app
-                                .i18n
-                                .tr(
-                                    "Tự động mở Port mạng hiện tại ngay khi phát hiện thế giới LAN",
-                                    "Automatically open port on current network when a local LAN world is detected",
-                                )
-                                .to_string();
-                            if crate::views::wrapped_checkbox(
-                                ui,
-                                &mut app.lan_modal.auto_open_direct_host,
-                                auto_direct_lbl,
-                            )
-                            .changed()
-                            {
-                                ask_sync_template = true;
-                            }
-                            let auto_tun_lbl = app
-                                .i18n
-                                .tr(
-                                    "Tự động mở đường hầm dự phòng bore.pub khi phát hiện thế giới LAN",
-                                    "Automatically open fallback bore.pub tunnel when a local LAN world is detected",
-                                )
-                                .to_string();
-                            crate::views::wrapped_checkbox(
-                                ui,
-                                &mut app.lan_modal.auto_open_tunnel,
-                                auto_tun_lbl,
-                            );
-
-                            ui.horizontal_wrapped(|ui| {
-                                if app.lan_modal.scanner_active {
-                                    if danger_icon_button(
-                                        ui,
-                                        VectorIcon::Stop,
-                                        app.i18n.tr("Dừng quét LAN", "Stop LAN Radar"),
-                                    )
-                                    .clicked()
-                                    {
-                                        app.toggle_lan_scanner();
-                                    }
-                                    ui.spinner();
-                                    ui.label(app.i18n.tr(
-                                        "Đang lắng nghe 'Open to LAN' trong Minecraft...",
-                                        "Listening for 'Open to LAN' in Minecraft...",
-                                    ));
-                                } else if primary_icon_button(
-                                    ui,
-                                    VectorIcon::Globe,
-                                    app.i18n.tr("Bắt đầu quét LAN", "Start LAN Radar"),
-                                )
-                                .clicked()
-                                {
-                                    app.toggle_lan_scanner();
-                                }
-                            });
-
-                            if let Some(ref world) = app.lan_modal.detected_world {
-                                ui.add_space(4.0);
-                                let det_lbl = if app.settings.language == Language::Vi {
-                                    format!(
-                                        "Đã phát hiện: {} ({}:{})",
-                                        world.motd, world.sender_ip, world.port
-                                    )
-                                } else {
-                                    format!(
-                                        "Detected: {} ({}:{})",
-                                        world.motd, world.sender_ip, world.port
-                                    )
-                                };
-                                badge(ui, &det_lbl, ACCENT_EMERALD);
-                            }
-                        },
+                    let v_host_running = matches!(
+                        app.lan_modal.virtual_host_status,
+                        VirtualPortHostStatus::Running(_)
                     );
-
-                    ui.add_space(8.0);
-
-                    let direct_running =
-                        matches!(app.lan_modal.direct_host_status, DirectHostStatus::Running(_));
-                    let direct_starting = matches!(
-                        app.lan_modal.direct_host_status,
-                        DirectHostStatus::Starting { .. }
+                    let v_host_starting = matches!(
+                        app.lan_modal.virtual_host_status,
+                        VirtualPortHostStatus::Starting { .. }
                     );
+                    let v_client_running = matches!(
+                        app.lan_modal.virtual_client_status,
+                        VirtualPortClientStatus::Running(_)
+                    );
+                    let v_client_connecting = matches!(
+                        app.lan_modal.virtual_client_status,
+                        VirtualPortClientStatus::Connecting { .. }
+                    );
+                    let vport_active = v_host_running || v_client_running;
 
                     gaming_card_3d(
                         ui,
-                        "lan_direct_host_card",
-                        direct_running,
+                        "lan_online_room_card",
+                        vport_active,
                         ACCENT_EMERALD,
                         Margin::same(12),
                         |ui| {
                             ui.set_width(ui.available_width());
-                            ui.label(
-                                RichText::new(app.i18n.tr(
-                                    "2. Mở Port Theo Mạng Đang Kết Nối (Chơi LAN & Online)",
-                                    "2. Open Port on Connected Network (LAN & Online)",
-                                ))
-                                .strong(),
-                            );
-                            ui.add_space(6.0);
-
-                            ui.add_enabled_ui(!direct_running && !direct_starting, |ui| {
-                                ui.horizontal_wrapped(|ui| {
-                                    if network_interface_selector_ui(
-                                        ui,
-                                        "lan_direct_bind_nic",
-                                        &app.i18n,
-                                        &app.lan_modal.network_snapshot,
-                                        &mut app.lan_modal.direct_bind_ip,
-                                    ) {
-                                        ask_sync_template = true;
-                                    }
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    let src_lbl = ui.label(
-                                        RichText::new(
-                                            app.i18n.tr("Cổng nội bộ:", "Local Port:"),
-                                        )
-                                        .strong(),
-                                    );
-                                    ui.add(
-                                        egui::TextEdit::singleline(
-                                            &mut app.lan_modal.manual_port_input,
-                                        )
-                                        .hint_text("25565")
-                                        .desired_width(78.0),
-                                    )
-                                    .labelled_by(src_lbl.id);
-
-                                    let dst_lbl = ui.label(
-                                        RichText::new(
-                                            app.i18n.tr("Cổng mở cố định:", "Host Port:"),
-                                        )
-                                        .strong(),
-                                    );
-                                    if ui
-                                        .add(
-                                            egui::TextEdit::singleline(
-                                                &mut app.lan_modal.direct_host_port_input,
-                                            )
-                                            .hint_text("25565")
-                                            .desired_width(78.0),
-                                        )
-                                        .labelled_by(dst_lbl.id)
-                                        .changed()
-                                    {
-                                        ask_sync_template = true;
-                                    }
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    if crate::views::wrapped_checkbox(
-                                        ui,
-                                        &mut app.lan_modal.direct_announce_lan,
-                                        app.i18n.tr(
-                                            "Hiện tự động trong Chơi mạng LAN",
-                                            "Auto-show in Multiplayer LAN",
-                                        ),
-                                    )
-                                    .changed()
-                                    {
-                                        ask_sync_template = true;
-                                    }
-                                    if crate::views::wrapped_checkbox(
-                                        ui,
-                                        &mut app.lan_modal.direct_try_upnp,
-                                        app.i18n.tr(
-                                            "Mở cổng tự động trên Modem",
-                                            "Auto-open router port",
-                                        ),
-                                    )
-                                    .changed()
-                                    {
-                                        ask_sync_template = true;
-                                    }
-                                });
-                            });
-
-                            ui.add_space(6.0);
-                            let direct_status_clone = app.lan_modal.direct_host_status.clone();
-                            match &direct_status_clone {
-                                DirectHostStatus::Idle | DirectHostStatus::Stopped => {
-                                    if primary_icon_button(
-                                        ui,
-                                        VectorIcon::Globe,
-                                        app.i18n.tr(
-                                            "Mở Port Mạng Hiện Tại",
-                                            "Open Port on Current Network",
-                                        ),
-                                    )
-                                    .clicked()
-                                    {
-                                        ask_toggle_direct = true;
-                                    }
-                                }
-                                DirectHostStatus::Starting { host_port, .. } => {
+                            ui.horizontal_wrapped(|ui| {
+                                paint_icon_3d(
+                                    ui,
+                                    34.0,
+                                    Icon3dKind::LanRadar,
+                                    vport_active || app.lan_modal.scanner_active,
+                                );
+                                ui.vertical(|ui| {
                                     ui.horizontal_wrapped(|ui| {
-                                        ui.spinner();
-                                        ui.label(if app.settings.language == Language::Vi {
-                                            format!(
-                                                "Đang mở cổng {host_port} trên mạng đang kết nối..."
-                                            )
-                                        } else {
-                                            format!(
-                                                "Opening port {host_port} on connected network..."
-                                            )
-                                        });
-                                        if danger_icon_button(
+                                        ui.label(
+                                            RichText::new(app.i18n.tr(
+                                                "Tạo Phòng & Vào Phòng Online",
+                                                "Create & Join Online Room",
+                                            ))
+                                            .size(15.0)
+                                            .strong(),
+                                        );
+                                        if let Some(ref ip) = app.lan_modal.primary_lan_ip {
+                                            badge(
+                                                ui,
+                                                &format!(
+                                                    "{}: {ip}",
+                                                    app.i18n.tr("Mạng nội bộ", "Local LAN")
+                                                ),
+                                                ACCENT_BLUE,
+                                            );
+                                        }
+                                        if secondary_icon_button(
                                             ui,
-                                            VectorIcon::Stop,
-                                            app.i18n.t("common.cancel"),
+                                            VectorIcon::Refresh,
+                                            app.i18n.tr("Làm mới mạng", "Refresh Network"),
                                         )
                                         .clicked()
                                         {
-                                            ask_toggle_direct = true;
+                                            ask_refresh_net = true;
                                         }
                                     });
-                                }
-                                DirectHostStatus::Running(info) => {
-                                    if let Some(ep) = render_direct_host_endpoints_ui(
-                                        ui, &app.i18n, info, None, None,
-                                    ) {
-                                        copy_target = Some(ep);
-                                    }
-                                    ui.add_space(4.0);
-                                    if danger_icon_button(
-                                        ui,
-                                        VectorIcon::Stop,
-                                        app.i18n.tr("Đóng Port Mạng", "Close Hosted Port"),
-                                    )
-                                    .clicked()
-                                    {
-                                        ask_toggle_direct = true;
-                                    }
-                                }
-                                DirectHostStatus::Error(err) => {
-                                    ui.label(RichText::new(err).color(ACCENT_RED));
-                                    if primary_icon_button(
-                                        ui,
-                                        VectorIcon::Refresh,
-                                        app.i18n.tr(
-                                            "Mở Port Mạng Hiện Tại",
-                                            "Open Port on Current Network",
-                                        ),
-                                    )
-                                    .clicked()
-                                    {
-                                        ask_toggle_direct = true;
-                                    }
-                                }
-                            }
-                        },
-                    );
-
-                    ui.add_space(8.0);
-
-                    let tun_running =
-                        matches!(app.lan_modal.tunnel_status, TunnelStatus::Running { .. });
-                    let tun_connecting =
-                        matches!(app.lan_modal.tunnel_status, TunnelStatus::Connecting { .. });
-                    let local_lbl = format!("127.0.0.1:{}", app.lan_modal.manual_port_input.trim());
-                    let remote_lbl = match &app.lan_modal.tunnel_status {
-                        st @ TunnelStatus::Running { .. } => st
-                            .public_endpoint()
-                            .unwrap_or_else(|| "bore.pub".to_string()),
-                        TunnelStatus::Connecting { .. } => "bore.pub (...)".to_string(),
-                        _ => "bore.pub (idle)".to_string(),
-                    };
-
-                    gaming_card_3d(
-                        ui,
-                        "lan_manual_bore_card",
-                        tun_running,
-                        ACCENT_VIOLET,
-                        Margin::same(12),
-                        |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(
-                                RichText::new(app.i18n.tr(
-                                    "3. Đường hầm Công khai Dự phòng (bore.pub)",
-                                    "3. Fallback Public Bore Tunnel (bore.pub)",
-                                ))
-                                .strong(),
-                            );
-                            ui.add_space(4.0);
-                            paint_3d_tunnel_conduit(
-                                ui,
-                                tun_running,
-                                tun_connecting,
-                                &local_lbl,
-                                &remote_lbl,
-                            );
-                            ui.add_space(6.0);
-
-                            ui.horizontal_wrapped(|ui| {
-                                let bore_port_lbl =
-                                    ui.label(app.i18n.tr("Cổng nội bộ:", "Local Port:"));
-                                ui.add(
-                                    egui::TextEdit::singleline(
-                                        &mut app.lan_modal.manual_port_input,
-                                    )
-                                    .hint_text("25565")
-                                    .desired_width(90.0),
-                                )
-                                .labelled_by(bore_port_lbl.id);
-                                if primary_icon_button(
-                                    ui,
-                                    VectorIcon::Globe,
-                                    app.i18n.tr("Mở bore.pub", "Open bore.pub"),
-                                )
-                                .clicked()
-                                {
-                                    app.start_manual_bore_tunnel();
-                                }
-                                if (tun_running || tun_connecting)
-                                    && danger_icon_button(
-                                        ui,
-                                        VectorIcon::Stop,
-                                        app.i18n.tr("Đóng cổng", "Close Tunnel"),
-                                    )
-                                    .clicked()
-                                {
-                                    app.lan_coordinator.stop_tunnel();
-                                    app.lan_modal.tunnel_status = TunnelStatus::Stopped;
-                                }
+                                });
                             });
 
                             ui.add_space(6.0);
-                            match &app.lan_modal.tunnel_status {
-                                TunnelStatus::Idle | TunnelStatus::Stopped => {
-                                    ui.label(
-                                        RichText::new(app.i18n.tr(
-                                            "Trạng thái: Chưa mở đường hầm.",
-                                            "Status: Tunnel idle.",
-                                        ))
-                                        .weak(),
-                                    );
-                                }
-                                TunnelStatus::Connecting { local_port } => {
-                                    ui.horizontal(|ui| {
-                                        ui.spinner();
-                                        let txt = if app.settings.language == Language::Vi {
-                                            format!("Đang kết nối cổng {local_port} tới bore.pub...")
+                            let vtabs = [
+                                (
+                                    VirtualPortUiMode::Host,
+                                    VectorIcon::Globe,
+                                    app.i18n.tr("Tạo Phòng", "Host Room").to_string(),
+                                ),
+                                (
+                                    VirtualPortUiMode::Join,
+                                    VectorIcon::Play,
+                                    app.i18n.tr("Vào Phòng", "Join Room").to_string(),
+                                ),
+                            ];
+                            if let Some(next_mode) = sliding_pill_tabs(
+                                ui,
+                                "lan_vport_mode_tabs",
+                                &vtabs,
+                                app.lan_modal.virtual_mode,
+                            ) {
+                                app.click_sfx();
+                                app.lan_modal.virtual_mode = next_mode;
+                            }
+                            ui.add_space(6.0);
+
+                            match app.lan_modal.virtual_mode {
+                                VirtualPortUiMode::Host => {
+                                    ui.horizontal_wrapped(|ui| {
+                                        if app.lan_modal.scanner_active {
+                                            if danger_icon_button(
+                                                ui,
+                                                VectorIcon::Stop,
+                                                app.i18n.tr("Dừng quét LAN", "Stop LAN Radar"),
+                                            )
+                                            .clicked()
+                                            {
+                                                ask_toggle_scanner = true;
+                                            }
+                                            ui.spinner();
+                                        } else if secondary_icon_button(
+                                            ui,
+                                            VectorIcon::Globe,
+                                            app.i18n.tr("Bắt đầu quét LAN", "Start LAN Radar"),
+                                        )
+                                        .clicked()
+                                        {
+                                            ask_toggle_scanner = true;
+                                        }
+                                        let auto_vport_lbl = app
+                                            .i18n
+                                            .tr(
+                                                "Tự tạo Mã Phòng khi mở Open to LAN",
+                                                "Auto-create Room Code on Open to LAN",
+                                            )
+                                            .to_string();
+                                        if crate::views::wrapped_checkbox(
+                                            ui,
+                                            &mut app.lan_modal.auto_open_virtual_host,
+                                            auto_vport_lbl,
+                                        )
+                                        .changed()
+                                        {
+                                            ask_sync_template = true;
+                                        }
+                                    });
+                                    if let Some(ref world) = app.lan_modal.detected_world {
+                                        ui.add_space(4.0);
+                                        let det_lbl = if app.settings.language == Language::Vi {
+                                            format!(
+                                                "Đã phát hiện: {} ({}:{})",
+                                                world.motd, world.sender_ip, world.port
+                                            )
                                         } else {
                                             format!(
-                                                "Connecting local port {local_port} to bore.pub..."
+                                                "Detected: {} ({}:{})",
+                                                world.motd, world.sender_ip, world.port
                                             )
                                         };
-                                        ui.label(txt);
-                                    });
-                                }
-                                st @ TunnelStatus::Running { local_port, .. } => {
-                                    let endpoint = st
-                                        .public_endpoint()
-                                        .unwrap_or_else(|| "bore.pub".to_string());
-                                    let local_port = *local_port;
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(app.i18n.tr(
-                                            "Gửi địa chỉ này cho bạn bè:",
-                                            "Share this address with friends:",
-                                        ));
-                                        badge(ui, &endpoint, ACCENT_EMERALD);
-                                        if primary_icon_button(
-                                            ui,
-                                            VectorIcon::Copy,
-                                            app.i18n.tr("Sao chép", "Copy"),
-                                        )
-                                        .clicked()
-                                        {
-                                            copy_target = Some(endpoint);
+                                        badge(ui, &det_lbl, ACCENT_EMERALD);
+                                    }
+
+                                    ui.add_space(4.0);
+                                    ui.separator();
+                                    ui.add_space(4.0);
+
+                                    let st_clone = app.lan_modal.virtual_host_status.clone();
+                                    match &st_clone {
+                                        VirtualPortHostStatus::Idle
+                                        | VirtualPortHostStatus::Stopped => {
+                                            ui.horizontal_wrapped(|ui| {
+                                                let port_lbl = ui.label(
+                                                    RichText::new(app.i18n.tr(
+                                                        "Cổng nội bộ:",
+                                                        "Local Port:",
+                                                    ))
+                                                    .strong(),
+                                                );
+                                                ui.add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut app.lan_modal.manual_port_input,
+                                                    )
+                                                    .id_salt("lan_vhost_local_port")
+                                                    .hint_text("25565")
+                                                    .desired_width(78.0),
+                                                )
+                                                .labelled_by(port_lbl.id);
+                                                if primary_icon_button(
+                                                    ui,
+                                                    VectorIcon::Globe,
+                                                    app.i18n.tr(
+                                                        "Tạo Mã Phòng",
+                                                        "Create Room Code",
+                                                    ),
+                                                )
+                                                .clicked()
+                                                {
+                                                    ask_toggle_v_host = true;
+                                                }
+                                            });
                                         }
-                                    });
-                                    ui.label(
-                                        RichText::new(format!("127.0.0.1:{local_port}"))
-                                            .size(11.0)
-                                            .weak(),
-                                    );
+                                        VirtualPortHostStatus::Starting { local_port } => {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.spinner();
+                                                ui.label(if app.settings.language == Language::Vi {
+                                                    format!("Đang tạo Mã Phòng cho cổng {local_port}...")
+                                                } else {
+                                                    format!("Creating Room Code for port {local_port}...")
+                                                });
+                                                if danger_icon_button(
+                                                    ui,
+                                                    VectorIcon::Stop,
+                                                    app.i18n.t("common.cancel"),
+                                                )
+                                                .clicked()
+                                                {
+                                                    ask_toggle_v_host = true;
+                                                }
+                                            });
+                                        }
+                                        VirtualPortHostStatus::Running(info) => {
+                                            if let Some(code) = render_virtual_host_active_ui(
+                                                ui, &app.i18n, info,
+                                            ) {
+                                                copy_target = Some(code);
+                                            }
+                                            ui.add_space(4.0);
+                                            if danger_icon_button(
+                                                ui,
+                                                VectorIcon::Stop,
+                                                app.i18n.tr("Đóng Phòng", "Close Room"),
+                                            )
+                                            .clicked()
+                                            {
+                                                ask_toggle_v_host = true;
+                                            }
+                                        }
+                                        VirtualPortHostStatus::Error(err) => {
+                                            ui.label(RichText::new(err).color(ACCENT_RED));
+                                            if primary_icon_button(
+                                                ui,
+                                                VectorIcon::Refresh,
+                                                app.i18n.tr(
+                                                    "Tạo lại Mã Phòng",
+                                                    "Retry Room Code",
+                                                ),
+                                            )
+                                            .clicked()
+                                            {
+                                                ask_toggle_v_host = true;
+                                            }
+                                        }
+                                    }
+                                    let _ = v_host_running || v_host_starting;
                                 }
-                                TunnelStatus::Error(err) => {
-                                    ui.label(RichText::new(err).color(ACCENT_RED));
+                                VirtualPortUiMode::Join => {
+                                    let st_clone = app.lan_modal.virtual_client_status.clone();
+                                    match &st_clone {
+                                        VirtualPortClientStatus::Idle
+                                        | VirtualPortClientStatus::Stopped => {
+                                            ui.horizontal_wrapped(|ui| {
+                                                let code_lbl = ui.label(
+                                                    RichText::new(
+                                                        app.i18n.tr("Mã Phòng:", "Room Code:"),
+                                                    )
+                                                    .strong(),
+                                                );
+                                                let code_w = (ui.available_width() - 24.0)
+                                                    .clamp(140.0, 340.0);
+                                                ui.add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut app.lan_modal.virtual_join_code_input,
+                                                    )
+                                                    .id_salt("lan_vjoin_code")
+                                                    .hint_text(app.i18n.tr(
+                                                        "Dán Mã Phòng thk1_...",
+                                                        "Paste thk1_... Room Code",
+                                                    ))
+                                                    .desired_width(code_w),
+                                                )
+                                                .labelled_by(code_lbl.id);
+                                                if !app.lan_modal.virtual_join_code_input.is_empty()
+                                                    && secondary_icon_button(
+                                                        ui,
+                                                        VectorIcon::Trash,
+                                                        app.i18n.tr("Xóa", "Clear"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    app.lan_modal.virtual_join_code_input.clear();
+                                                }
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                let join_port_lbl = ui.label(
+                                                    RichText::new(app.i18n.tr(
+                                                        "Cổng mở trên máy:",
+                                                        "Local Bind Port:",
+                                                    ))
+                                                    .strong(),
+                                                );
+                                                ui.add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut app.lan_modal.virtual_join_port_input,
+                                                    )
+                                                    .id_salt("lan_vjoin_port")
+                                                    .hint_text(app.i18n.tr("Tự chọn", "Auto"))
+                                                    .desired_width(78.0),
+                                                )
+                                                .labelled_by(join_port_lbl.id);
+                                                crate::views::wrapped_checkbox(
+                                                    ui,
+                                                    &mut app.lan_modal.virtual_join_announce_lan,
+                                                    app.i18n.tr(
+                                                        "Hiện tự động trong Chơi mạng",
+                                                        "Auto-show in Multiplayer",
+                                                    ),
+                                                );
+                                            });
+                                            ui.add_space(4.0);
+                                            if primary_icon_button(
+                                                ui,
+                                                VectorIcon::Play,
+                                                app.i18n.tr("Vào Phòng Ngay", "Connect Room"),
+                                            )
+                                            .clicked()
+                                            {
+                                                ask_toggle_v_client = true;
+                                            }
+                                        }
+                                        VirtualPortClientStatus::Connecting { .. } => {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.spinner();
+                                                ui.label(app.i18n.tr(
+                                                    "Đang kết nối tới phòng của bạn bè...",
+                                                    "Connecting to friend's room...",
+                                                ));
+                                                if danger_icon_button(
+                                                    ui,
+                                                    VectorIcon::Stop,
+                                                    app.i18n.t("common.cancel"),
+                                                )
+                                                .clicked()
+                                                {
+                                                    ask_toggle_v_client = true;
+                                                }
+                                            });
+                                        }
+                                        VirtualPortClientStatus::Running(info) => {
+                                            if let Some(ep) = render_virtual_client_active_ui(
+                                                ui, &app.i18n, info,
+                                            ) {
+                                                copy_target = Some(ep);
+                                            }
+                                            ui.add_space(4.0);
+                                            if danger_icon_button(
+                                                ui,
+                                                VectorIcon::Stop,
+                                                app.i18n.tr("Rời Phòng", "Leave Room"),
+                                            )
+                                            .clicked()
+                                            {
+                                                ask_toggle_v_client = true;
+                                            }
+                                        }
+                                        VirtualPortClientStatus::Error(err) => {
+                                            ui.label(RichText::new(err).color(ACCENT_RED));
+                                            if primary_icon_button(
+                                                ui,
+                                                VectorIcon::Refresh,
+                                                app.i18n.tr("Kết nối lại", "Reconnect"),
+                                            )
+                                            .clicked()
+                                            {
+                                                ask_toggle_v_client = true;
+                                            }
+                                        }
+                                    }
+                                    let _ = v_client_running || v_client_connecting;
                                 }
                             }
                         },
@@ -1941,12 +1935,20 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                         app.click_sfx();
                         app.refresh_connected_network_snapshot();
                     }
-                    if ask_sync_template && app.lan_modal.scanner_active {
+                    if ask_sync_template {
                         app.sync_lan_auto_host_template();
                     }
-                    if ask_toggle_direct {
+                    if ask_toggle_scanner {
                         app.click_sfx();
-                        app.toggle_lan_direct_host();
+                        app.toggle_lan_scanner();
+                    }
+                    if ask_toggle_v_host {
+                        app.click_sfx();
+                        app.toggle_lan_virtual_host();
+                    }
+                    if ask_toggle_v_client {
+                        app.click_sfx();
+                        app.toggle_lan_virtual_client();
                     }
                     if let Some(txt) = copy_target {
                         app.copy_text_with_toast(ui.ctx(), txt);
@@ -3646,4 +3648,270 @@ fn render_disk_pack_import_modal(app: &mut LauncherAppState, ctx: &egui::Context
         app.click_sfx();
         app.disk_pack_modal = None;
     }
+}
+
+fn collect_optimization_icon_textures(
+    app: &mut LauncherAppState,
+    is_server: bool,
+) -> Vec<Option<egui::TextureHandle>> {
+    let icon_urls: Vec<Option<String>> = if is_server {
+        &app.servers.new_draft.optimizations.suggestions
+    } else {
+        &app.home.new_draft.optimizations.suggestions
+    }
+    .iter()
+    .map(|item| {
+        item.project_summary
+            .as_ref()
+            .and_then(|s| s.icon_url.clone())
+    })
+    .collect();
+    icon_urls
+        .into_iter()
+        .map(|url| url.and_then(|u| app.request_modpack_texture(&u, 64)))
+        .collect()
+}
+
+struct OptimizationPanelConfig<'a> {
+    id_salt: &'static str,
+    mc_version: &'a str,
+    supports_optimizations: bool,
+    show_kind_badge: bool,
+    empty_unsupported_vi: &'a str,
+    empty_unsupported_en: &'a str,
+}
+
+fn render_optimization_suggestions_panel(
+    ui: &mut egui::Ui,
+    i18n: &I18n,
+    cfg: OptimizationPanelConfig<'_>,
+    draft: &mut OptimizationSuggestionDraft,
+    icon_textures: &[Option<egui::TextureHandle>],
+) -> bool {
+    if !cfg.supports_optimizations {
+        bounded_wrap_label(
+            ui,
+            RichText::new(i18n.tr(cfg.empty_unsupported_vi, cfg.empty_unsupported_en))
+                .size(11.5)
+                .weak(),
+            ui.available_width(),
+        );
+        return false;
+    }
+    let mc_ver = cfg.mc_version.trim();
+    if mc_ver.is_empty() {
+        bounded_wrap_label(
+            ui,
+            RichText::new(i18n.tr(
+                "Nhập phiên bản Minecraft để xem gợi ý tối ưu.",
+                "Enter a Minecraft version to view optimization suggestions.",
+            ))
+            .size(11.5)
+            .weak(),
+            ui.available_width(),
+        );
+        return false;
+    }
+
+    gaming_card_3d(
+        ui,
+        cfg.id_salt,
+        false,
+        ACCENT_EMERALD,
+        Margin::symmetric(10, 8),
+        |ui| {
+            ui.set_width(ui.available_width());
+            let dark = ui.visuals().dark_mode;
+            let mut refresh_clicked = false;
+
+            ui.horizontal_wrapped(|ui| {
+                let title = if i18n.language() == Language::Vi {
+                    format!("Đề xuất tối ưu (MC {mc_ver})")
+                } else {
+                    format!("Optimization Suggestions (MC {mc_ver})")
+                };
+                ui.label(RichText::new(title).strong().size(13.0));
+                if !draft.suggestions.is_empty() {
+                    let compatible_count = draft
+                        .suggestions
+                        .iter()
+                        .filter(|s| s.compatible_version.is_some())
+                        .count();
+                    let selected_count = draft
+                        .suggestions
+                        .iter()
+                        .filter(|s| {
+                            s.compatible_version.is_some()
+                                && draft.selected_ids.contains(&s.project_id)
+                        })
+                        .count();
+                    badge(
+                        ui,
+                        &format!("{selected_count}/{compatible_count}"),
+                        ACCENT_EMERALD,
+                    );
+                }
+                if draft.loading && !draft.suggestions.is_empty() {
+                    ui.spinner();
+                }
+                ui.add_enabled_ui(!draft.loading, |ui| {
+                    if secondary_icon_button(ui, VectorIcon::Refresh, i18n.tr("Làm mới", "Refresh"))
+                        .clicked()
+                    {
+                        refresh_clicked = true;
+                    }
+                });
+            });
+
+            if !draft.suggestions.is_empty() {
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(|ui| {
+                    if secondary_button(ui, i18n.tr("Mặc định", "Recommended")).clicked() {
+                        draft.select_recommended();
+                    }
+                    if secondary_button(ui, i18n.tr("Chọn tất cả", "All")).clicked() {
+                        draft.select_all_compatible();
+                    }
+                    if secondary_button(ui, i18n.tr("Bỏ chọn", "None")).clicked() {
+                        draft.select_none();
+                    }
+                });
+            }
+
+            if draft.loading && draft.suggestions.is_empty() {
+                ui.add_space(4.0);
+                let loading_text = if i18n.language() == Language::Vi {
+                    format!("Đang tìm phiên bản tương thích cho MC {mc_ver}...")
+                } else {
+                    format!("Finding compatible builds for MC {mc_ver}...")
+                };
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    bounded_wrap_label(
+                        ui,
+                        RichText::new(loading_text).size(12.0).weak(),
+                        ui.available_width(),
+                    );
+                });
+            }
+
+            if let Some(err) = &draft.error {
+                ui.add_space(4.0);
+                bounded_wrap_label(
+                    ui,
+                    RichText::new(err)
+                        .size(11.5)
+                        .color(readable_accent_ink(ACCENT_RED, dark)),
+                    ui.available_width(),
+                );
+                ui.add_space(2.0);
+                if secondary_button(ui, i18n.tr("Thử lại", "Retry")).clicked() {
+                    refresh_clicked = true;
+                }
+            }
+
+            if !draft.suggestions.is_empty() {
+                let mut toggles: Vec<(String, bool)> = Vec::new();
+                for (idx, item) in draft.suggestions.iter().enumerate() {
+                    ui.add_space(4.0);
+                    let compatible = item.compatible_version.is_some();
+                    let mut checked = compatible && draft.selected_ids.contains(&item.project_id);
+                    let tex_opt = icon_textures.get(idx).and_then(|t| t.as_ref());
+                    let icon_accent = if !compatible || item.error.is_some() {
+                        ACCENT_AMBER
+                    } else if checked {
+                        ACCENT_EMERALD
+                    } else {
+                        ACCENT_CYAN
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        paint_pack_thumbnail(ui, tex_opt, 28.0, icon_accent, checked && compatible);
+                        let content_w = ui.available_width().max(36.0);
+                        ui.vertical(|ui| {
+                            ui.set_width(content_w);
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.horizontal_wrapped(|ui| {
+                                ui.add_enabled_ui(compatible, |ui| {
+                                    if crate::views::wrapped_checkbox(ui, &mut checked, &item.title)
+                                        .changed()
+                                    {
+                                        toggles.push((item.project_id.clone(), checked));
+                                    }
+                                });
+                                if let Some(ver) = &item.compatible_version {
+                                    badge(ui, &ver.canonical_version_label(), ACCENT_CYAN);
+                                    if ver.release_channel.eq_ignore_ascii_case("beta") {
+                                        badge(ui, "Beta", ACCENT_AMBER);
+                                    } else if ver.release_channel.eq_ignore_ascii_case("alpha") {
+                                        badge(ui, "Alpha", ACCENT_AMBER);
+                                    }
+                                } else if item.error.is_some() {
+                                    badge(
+                                        ui,
+                                        i18n.tr("Không thể kiểm tra", "Unavailable"),
+                                        ACCENT_RED,
+                                    );
+                                } else {
+                                    let unavail = if i18n.language() == Language::Vi {
+                                        format!("Chưa có cho MC {mc_ver}")
+                                    } else {
+                                        format!("No build for MC {mc_ver}")
+                                    };
+                                    badge(ui, &unavail, ACCENT_AMBER);
+                                }
+                                if cfg.show_kind_badge {
+                                    badge(
+                                        ui,
+                                        if item.content_kind == ContentKind::Plugin {
+                                            "plugins/"
+                                        } else {
+                                            "mods/"
+                                        },
+                                        ACCENT_BLUE,
+                                    );
+                                }
+                            });
+
+                            let summary = if i18n.language() == Language::Vi {
+                                &item.summary_vi
+                            } else {
+                                &item.summary_en
+                            };
+                            bounded_wrap_label(
+                                ui,
+                                RichText::new(summary).size(11.0).weak(),
+                                ui.available_width(),
+                            );
+                            if let Some(item_err) = &item.error {
+                                bounded_wrap_label(
+                                    ui,
+                                    RichText::new(item_err)
+                                        .size(10.5)
+                                        .color(readable_accent_ink(ACCENT_RED, dark)),
+                                    ui.available_width(),
+                                );
+                            }
+                        });
+                    });
+                }
+                for (project_id, checked) in toggles {
+                    draft.set_checked(&project_id, checked);
+                }
+            } else if !draft.loading && draft.error.is_none() {
+                ui.add_space(4.0);
+                bounded_wrap_label(
+                    ui,
+                    RichText::new(i18n.tr("Chưa có đề xuất nào.", "No suggestions loaded."))
+                        .size(11.5)
+                        .weak(),
+                    ui.available_width(),
+                );
+            }
+
+            refresh_clicked
+        },
+    )
+    .0
 }

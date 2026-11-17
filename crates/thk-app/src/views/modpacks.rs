@@ -857,21 +857,10 @@ fn render_results_workspace(app: &mut LauncherAppState, ui: &mut egui::Ui) {
             1
         };
         let gap = 10.0;
-        let col_w = (avail_w - gap * (cols.saturating_sub(1) as f32)) / (cols as f32);
 
         for row_hits in hits.chunks(cols) {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                for hit in row_hits {
-                    ui.allocate_ui_with_layout(
-                        vec2(col_w, 0.0),
-                        Layout::top_down(Align::LEFT),
-                        |ui| {
-                            ui.set_max_width(col_w);
-                            render_showcase_grid_card(app, ui, hit, col_w, prov_col);
-                        },
-                    );
-                }
+            render_top_aligned_grid_row(ui, cols, gap, row_hits.len(), |cell_ui, idx, cell_w| {
+                render_showcase_grid_card(app, cell_ui, &row_hits[idx], cell_w, prov_col);
             });
             ui.add_space(8.0);
         }
@@ -885,6 +874,45 @@ fn render_results_workspace(app: &mut LauncherAppState, ui: &mut egui::Ui) {
     ui.add_space(6.0);
     render_pagination_footer(app, ui, hits.len(), total_hits, total_pages, prov_col);
     ui.add_space(10.0);
+}
+
+fn render_top_aligned_grid_row(
+    ui: &mut egui::Ui,
+    cols: usize,
+    gap: f32,
+    row_len: usize,
+    mut render_cell: impl FnMut(&mut egui::Ui, usize, f32),
+) {
+    let cols = cols.max(1);
+    let count = row_len.min(cols);
+    if count == 0 {
+        return;
+    }
+
+    let avail_w = ui.available_width();
+    if cols == 1 {
+        let cell_w = avail_w.max(1.0);
+        for idx in 0..count {
+            render_cell(ui, idx, cell_w);
+        }
+        return;
+    }
+
+    let orig_spacing_x = ui.spacing().item_spacing.x;
+    let col_w = ((avail_w - gap * (cols.saturating_sub(1) as f32)) / (cols as f32)).max(120.0);
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        ui.columns(cols, |cols_ui| {
+            for (idx, col_ui) in cols_ui.iter_mut().take(count).enumerate() {
+                col_ui.spacing_mut().item_spacing.x = orig_spacing_x;
+                col_ui.vertical(|cell_ui| {
+                    cell_ui.set_width(col_w);
+                    cell_ui.set_max_width(col_w);
+                    render_cell(cell_ui, idx, col_w);
+                });
+            }
+        });
+    });
 }
 
 fn render_showcase_grid_card(
@@ -935,9 +963,11 @@ pub(super) fn project_grid_card_ui(
 
                 if let Some(tex) = texture {
                     let full_r = ui.max_rect();
-                    let glow_r = Rect::from_min_max(
-                        pos2(full_r.right() - full_r.width() * 0.36, full_r.top()),
-                        full_r.max,
+                    let glow_w = (full_r.width() * 0.36).max(48.0);
+                    let glow_h = glow_w.min(124.0);
+                    let glow_r = Rect::from_min_size(
+                        pos2(full_r.right() - glow_w, full_r.top()),
+                        vec2(glow_w, glow_h),
                     );
                     paint_cover_texture(
                         ui.painter(),
@@ -992,7 +1022,11 @@ pub(super) fn project_grid_card_ui(
                 } else {
                     truncate_chars(&hit.summary, desc_limit)
                 };
-                ui.label(RichText::new(summary_line).size(11.8).weak());
+                let summary_resp = ui.label(RichText::new(summary_line).size(11.8).weak());
+                let summary_pad = (32.0 - summary_resp.rect.height()).max(0.0);
+                if summary_pad > 0.0 {
+                    ui.add_space(summary_pad);
+                }
 
                 ui.horizontal_wrapped(|ui| {
                     for cat in hit.categories.iter().take(2) {
@@ -1882,86 +1916,74 @@ fn render_detail_gallery_tab(
     let avail_w = ui.available_width();
     let cols: usize = if avail_w >= 620.0 { 2 } else { 1 };
     let gap = 12.0;
-    let col_w = ((avail_w - gap * (cols.saturating_sub(1) as f32)) / (cols as f32)).max(140.0);
-    let img_h = ((col_w - 20.0) * 9.0 / 16.0).clamp(120.0, 260.0);
 
     let mut clicked_idx: Option<usize> = None;
 
     for (chunk_i, row_imgs) in detail.gallery.chunks(cols).enumerate() {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            for (local_i, img) in row_imgs.iter().enumerate() {
-                let global_idx = chunk_i * cols + local_i;
-                let tex_opt = app.request_modpack_texture(&img.url, 960);
+        render_top_aligned_grid_row(ui, cols, gap, row_imgs.len(), |cell_ui, local_i, cell_w| {
+            let global_idx = chunk_i * cols + local_i;
+            let img = &row_imgs[local_i];
+            let tex_opt = app.request_modpack_texture(&img.url, 960);
+            let inner_w = (cell_w - 20.0).max(120.0);
+            let img_h = (inner_w * 9.0 / 16.0).clamp(120.0, 260.0);
 
-                ui.allocate_ui_with_layout(vec2(col_w, 0.0), Layout::top_down(Align::LEFT), |ui| {
-                    ui.set_max_width(col_w);
-                    let (_, resp) = gaming_card_3d(
-                        ui,
-                        ("mp_gallery_card", global_idx),
-                        false,
-                        p_col,
-                        Margin::same(10),
-                        |ui| {
-                            let inner_w = (col_w - 20.0).max(120.0);
-                            let (img_rect, _) =
-                                ui.allocate_exact_size(vec2(inner_w, img_h), Sense::hover());
-                            let slot_bg = if ui.visuals().dark_mode {
-                                Color32::from_rgb(20, 29, 44)
-                            } else {
-                                BG_SLOT_LIGHT
-                            };
-                            ui.painter()
-                                .rect_filled(img_rect, CornerRadius::same(8), slot_bg);
-                            if let Some(ref tex) = tex_opt {
-                                paint_cover_texture(
-                                    ui.painter(),
-                                    img_rect,
-                                    tex,
-                                    CornerRadius::same(8),
-                                    Color32::WHITE,
-                                );
-                            } else {
-                                let c_rect =
-                                    Rect::from_center_size(img_rect.center(), vec2(26.0, 26.0));
-                                paint_vector_icon(ui.painter(), c_rect, VectorIcon::Image, p_col);
-                            }
-                            ui.painter().rect_stroke(
-                                img_rect,
-                                CornerRadius::same(8),
-                                Stroke::new(
-                                    1.0,
-                                    Color32::from_rgba_unmultiplied(
-                                        p_col.r(),
-                                        p_col.g(),
-                                        p_col.b(),
-                                        95,
-                                    ),
-                                ),
-                                StrokeKind::Inside,
-                            );
-
-                            ui.add_space(4.0);
-                            let caption = if img.title.trim().is_empty() {
-                                format!(
-                                    "{} #{}",
-                                    app.i18n.tr("Ảnh chụp màn hình", "Screenshot"),
-                                    global_idx + 1
-                                )
-                            } else {
-                                truncate_chars(&img.title, 48)
-                            };
-                            ui.label(RichText::new(caption).size(12.0).strong());
-                        },
-                    );
-                    if resp
-                        .interact(Sense::click())
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        clicked_idx = Some(global_idx);
+            let (_, resp) = gaming_card_3d(
+                cell_ui,
+                ("mp_gallery_card", global_idx),
+                false,
+                p_col,
+                Margin::same(10),
+                |ui| {
+                    let (img_rect, _) =
+                        ui.allocate_exact_size(vec2(inner_w, img_h), Sense::hover());
+                    let slot_bg = if ui.visuals().dark_mode {
+                        Color32::from_rgb(20, 29, 44)
+                    } else {
+                        BG_SLOT_LIGHT
+                    };
+                    ui.painter()
+                        .rect_filled(img_rect, CornerRadius::same(8), slot_bg);
+                    if let Some(ref tex) = tex_opt {
+                        paint_cover_texture(
+                            ui.painter(),
+                            img_rect,
+                            tex,
+                            CornerRadius::same(8),
+                            Color32::WHITE,
+                        );
+                    } else {
+                        let c_rect = Rect::from_center_size(img_rect.center(), vec2(26.0, 26.0));
+                        paint_vector_icon(ui.painter(), c_rect, VectorIcon::Image, p_col);
                     }
-                });
+                    ui.painter().rect_stroke(
+                        img_rect,
+                        CornerRadius::same(8),
+                        Stroke::new(
+                            1.0,
+                            Color32::from_rgba_unmultiplied(p_col.r(), p_col.g(), p_col.b(), 95),
+                        ),
+                        StrokeKind::Inside,
+                    );
+
+                    ui.add_space(4.0);
+                    let caption = if img.title.trim().is_empty() {
+                        format!(
+                            "{} #{}",
+                            app.i18n.tr("Ảnh chụp màn hình", "Screenshot"),
+                            global_idx + 1
+                        )
+                    } else {
+                        truncate_chars(&img.title, 48)
+                    };
+                    ui.label(RichText::new(caption).size(12.0).strong());
+                },
+            );
+            if resp
+                .interact(Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                clicked_idx = Some(global_idx);
             }
         });
         ui.add_space(10.0);

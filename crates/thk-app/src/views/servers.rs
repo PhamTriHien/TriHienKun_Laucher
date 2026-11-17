@@ -1,15 +1,15 @@
 use crate::fx3d::{
-    gaming_card_3d, paint_3d_tunnel_conduit, paint_glowing_progress_bar, paint_icon_3d,
-    sliding_pill_tabs, tactile_button_3d, ButtonStyle3d, Icon3dKind, VectorIcon,
+    gaming_card_3d, paint_glowing_progress_bar, paint_icon_3d, sliding_pill_tabs,
+    tactile_button_3d, ButtonStyle3d, Icon3dKind, VectorIcon,
 };
-use crate::state::{LauncherAppState, ServerTab};
+use crate::state::{LauncherAppState, ServerTab, VirtualPortUiMode};
 use crate::theme::{
     readable_accent_ink, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_EMERALD, ACCENT_RED,
     ACCENT_VIOLET, BG_SLOT_LIGHT, BORDER_GAME_OUTER_LIGHT, TEXT_INK_LIGHT,
 };
 use crate::views::{
-    badge, danger_icon_button, format_bytes, format_duration_hms, network_interface_selector_ui,
-    primary_icon_button, render_direct_host_endpoints_ui, secondary_button, secondary_icon_button,
+    badge, danger_icon_button, format_bytes, format_duration_hms, primary_icon_button,
+    render_virtual_host_active_ui, secondary_button, secondary_icon_button,
 };
 use egui::{
     pos2, vec2, Color32, CornerRadius, Frame, Margin, Rect, RichText, ScrollArea, Sense, Stroke,
@@ -18,7 +18,7 @@ use egui::{
 use std::collections::{BTreeMap, HashSet};
 use thk_core::models::{ContentKind, Language, ManagedServer, ProviderSource};
 use thk_core::I18n;
-use thk_network::{DirectHostStatus, TunnelStatus};
+use thk_network::VirtualPortHostStatus;
 use thk_server::{
     resolve_effective_server_port, CpuHardwareInfo, ServerResourceStats, ServerRuntimeState,
 };
@@ -4119,24 +4119,24 @@ fn render_tab_network(
             .or_else(|| app.lan_modal.primary_lan_ip.clone())
             .map(|ip| format!("{ip}:{effective_port}"));
 
-        let direct_status = app
+        let vhost_status = app
             .servers
-            .server_direct_hosts
+            .server_virtual_hosts
             .get(&srv.id)
             .cloned()
-            .unwrap_or_else(|| app.server_supervisor.server_direct_host_status(&srv.id));
-        let direct_running = matches!(direct_status, DirectHostStatus::Running(_));
-        let direct_starting = matches!(direct_status, DirectHostStatus::Starting { .. });
+            .unwrap_or_else(|| app.server_supervisor.server_virtual_host_status(&srv.id));
+        let vhost_running = matches!(vhost_status, VirtualPortHostStatus::Running(_));
 
         let mut ask_refresh_net = false;
-        let mut ask_toggle_direct = false;
+        let mut ask_open_join_modal = false;
+        let mut ask_toggle_virtual_host = false;
         let mut copy_target: Option<String> = None;
 
         gaming_card_3d(
             ui,
-            "srv_local_lan_card",
-            direct_running,
-            if direct_running {
+            "srv_online_room_card",
+            vhost_running,
+            if vhost_running {
                 ACCENT_EMERALD
             } else {
                 ACCENT_CYAN
@@ -4146,16 +4146,14 @@ fn render_tab_network(
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
                     ui.heading(
-                        RichText::new(app.i18n.tr(
-                            "Mở Port Theo Mạng Đang Kết Nối (LAN & Online)",
-                            "Host Port on Connected Network (LAN & Online)",
-                        ))
+                        RichText::new(
+                            app.i18n
+                                .tr("Kết nối Mạng & Phòng Online", "Network & Online Room"),
+                        )
                         .size(16.0)
                         .strong(),
                     );
-                    if app.servers.probing_network {
-                        ui.spinner();
-                    } else if secondary_icon_button(
+                    if secondary_icon_button(
                         ui,
                         VectorIcon::Refresh,
                         app.i18n.tr("Làm mới mạng", "Refresh Network"),
@@ -4164,8 +4162,17 @@ fn render_tab_network(
                     {
                         ask_refresh_net = true;
                     }
+                    if secondary_icon_button(
+                        ui,
+                        VectorIcon::Play,
+                        app.i18n.tr("Mở mục Vào Phòng", "Open Join Room"),
+                    )
+                    .clicked()
+                    {
+                        ask_open_join_modal = true;
+                    }
                 });
-                ui.add_space(4.0);
+                ui.add_space(6.0);
 
                 ui.horizontal_wrapped(|ui| {
                     ui.label(app.i18n.tr("Địa chỉ trên máy này:", "Loopback Address:"));
@@ -4188,9 +4195,6 @@ fn render_tab_network(
                             copy_target = Some(lan.clone());
                         }
                     }
-                    if let Some(v6) = app.servers.network_snapshot.global_ipv6 {
-                        badge(ui, &format!("IPv6 [{v6}]"), ACCENT_CYAN);
-                    }
                     if let Some(local_ms) = live_stats.local_ping_ms {
                         badge(
                             ui,
@@ -4207,110 +4211,77 @@ fn render_tab_network(
                 });
 
                 ui.add_space(6.0);
-                ui.add_enabled_ui(!direct_running && !direct_starting, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        network_interface_selector_ui(
-                            ui,
-                            "srv_direct_bind_nic",
-                            &app.i18n,
-                            &app.servers.network_snapshot,
-                            &mut app.servers.direct_bind_ip,
-                        );
-                        let port_lbl =
-                            ui.label(RichText::new(app.i18n.tr("Cổng mở:", "Host Port:")).strong());
-                        ui.add(
-                            egui::TextEdit::singleline(&mut app.servers.direct_host_port_input)
-                                .hint_text("25565")
-                                .desired_width(78.0),
-                        )
-                        .labelled_by(port_lbl.id);
-                        crate::views::wrapped_checkbox(
-                            ui,
-                            &mut app.servers.direct_announce_lan,
-                            app.i18n.tr(
-                                "Hiện tự động trong Chơi mạng LAN",
-                                "Auto-show in Multiplayer LAN",
-                            ),
-                        );
-                        crate::views::wrapped_checkbox(
-                            ui,
-                            &mut app.servers.direct_try_upnp,
-                            app.i18n
-                                .tr("Mở cổng tự động trên Modem", "Auto-open router port"),
-                        );
-                    });
-                });
-
+                ui.separator();
                 ui.add_space(6.0);
-                match &direct_status {
-                    DirectHostStatus::Idle | DirectHostStatus::Stopped => {
+
+                match &vhost_status {
+                    VirtualPortHostStatus::Idle | VirtualPortHostStatus::Stopped => {
                         if primary_icon_button(
                             ui,
                             VectorIcon::Globe,
                             app.i18n
-                                .tr("Mở Port Mạng Hiện Tại", "Open Port on Current Network"),
+                                .tr("Tạo Mã Phòng Online", "Create Online Room Code"),
                         )
                         .clicked()
                         {
-                            ask_toggle_direct = true;
+                            ask_toggle_virtual_host = true;
                         }
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(app.i18n.tr(
+                                "Tạo Mã Phòng để bạn bè khác mạng kết nối vào từ xa mà không cần mở cổng Modem.",
+                                "Create a Room Code so cross-network friends can join without router setup.",
+                            ))
+                            .size(11.5)
+                            .weak(),
+                        );
                     }
-                    DirectHostStatus::Starting { host_port, .. } => {
+                    VirtualPortHostStatus::Starting { local_port } => {
                         ui.horizontal_wrapped(|ui| {
                             ui.spinner();
                             ui.label(if app.settings.language == Language::Vi {
-                                format!("Đang mở cổng {host_port} trên mạng đang kết nối...")
+                                format!("Đang tạo Mã Phòng cho cổng {local_port}...")
                             } else {
-                                format!("Opening port {host_port} on connected network...")
+                                format!("Creating Room Code for port {local_port}...")
                             });
                             if danger_icon_button(ui, VectorIcon::Stop, app.i18n.t("common.cancel"))
                                 .clicked()
                             {
-                                ask_toggle_direct = true;
+                                ask_toggle_virtual_host = true;
                             }
                         });
                     }
-                    DirectHostStatus::Running(info) => {
-                        let host_ping_col = live_stats
-                            .public_ping_ms
-                            .map(|ms| ping_badge_color(ms, true));
-                        if let Some(ep) = render_direct_host_endpoints_ui(
-                            ui,
-                            &app.i18n,
-                            info,
-                            live_stats.public_ping_ms,
-                            host_ping_col,
-                        ) {
-                            copy_target = Some(ep);
+                    VirtualPortHostStatus::Running(info) => {
+                        if let Some(code) = render_virtual_host_active_ui(ui, &app.i18n, info) {
+                            copy_target = Some(code);
                         }
                         ui.add_space(4.0);
                         if danger_icon_button(
                             ui,
                             VectorIcon::Stop,
-                            app.i18n.tr("Đóng Port Mạng", "Close Hosted Port"),
+                            app.i18n.tr("Đóng Phòng", "Close Room"),
                         )
                         .clicked()
                         {
-                            ask_toggle_direct = true;
+                            ask_toggle_virtual_host = true;
                         }
                     }
-                    DirectHostStatus::Error(err) => {
+                    VirtualPortHostStatus::Error(err) => {
                         ui.label(
                             RichText::new(format!(
                                 "{}: {err}",
-                                app.i18n.tr("Không mở được cổng", "Port Host Error")
+                                app.i18n.tr("Lỗi Phòng Online", "Online Room Error")
                             ))
                             .color(ACCENT_RED),
                         );
                         if primary_icon_button(
                             ui,
                             VectorIcon::Refresh,
-                            app.i18n
-                                .tr("Mở Port Mạng Hiện Tại", "Open Port on Current Network"),
+                            app.i18n.tr("Tạo lại Mã Phòng", "Retry Room Code"),
                         )
                         .clicked()
                         {
-                            ask_toggle_direct = true;
+                            ask_toggle_virtual_host = true;
                         }
                     }
                 }
@@ -4321,165 +4292,18 @@ fn render_tab_network(
             app.click_sfx();
             app.refresh_connected_network_snapshot();
         }
-        if ask_toggle_direct {
+        if ask_open_join_modal {
             app.click_sfx();
-            app.toggle_selected_server_direct_host();
+            app.lan_modal.virtual_mode = VirtualPortUiMode::Join;
+            app.open_lan_share_modal();
+        }
+        if ask_toggle_virtual_host {
+            app.click_sfx();
+            app.toggle_selected_server_virtual_host();
         }
         if let Some(txt) = copy_target {
             app.copy_text_with_toast(ui.ctx(), txt);
         }
-
-        ui.add_space(10.0);
-
-        let tunnel_status = app
-            .servers
-            .server_tunnels
-            .get(&srv.id)
-            .cloned()
-            .unwrap_or_else(|| app.server_supervisor.server_tunnel_status(&srv.id));
-
-        let is_running = matches!(tunnel_status, TunnelStatus::Running { .. });
-        let is_connecting = matches!(tunnel_status, TunnelStatus::Connecting { .. });
-        let remote_lbl = match &tunnel_status {
-            st @ TunnelStatus::Running { .. } => st
-                .public_endpoint()
-                .unwrap_or_else(|| "bore.pub".to_string()),
-            TunnelStatus::Connecting { .. } => "bore.pub (...)".to_string(),
-            _ => "bore.pub (idle)".to_string(),
-        };
-
-        gaming_card_3d(
-            ui,
-            "srv_bore_tunnel_card",
-            is_running,
-            ACCENT_EMERALD,
-            Margin::same(14),
-            |ui| {
-                ui.set_width(ui.available_width());
-                ui.heading(
-                    RichText::new(app.i18n.tr(
-                        "Đường hầm Công khai Dự phòng (bore.pub)",
-                        "Fallback Public Tunnel (bore.pub)",
-                    ))
-                    .size(16.0)
-                    .strong(),
-                );
-                ui.add_space(8.0);
-                paint_3d_tunnel_conduit(ui, is_running, is_connecting, &local_addr, &remote_lbl);
-                ui.add_space(8.0);
-
-                match tunnel_status {
-                    TunnelStatus::Idle | TunnelStatus::Stopped => {
-                        if primary_icon_button(
-                            ui,
-                            VectorIcon::Globe,
-                            app.i18n.tr(
-                                "Mở cổng công khai cho Máy chủ này",
-                                "Open Public Tunnel for This Server",
-                            ),
-                        )
-                        .clicked()
-                        {
-                            app.toggle_selected_server_tunnel();
-                        }
-                    }
-                    TunnelStatus::Connecting { local_port } => {
-                        ui.horizontal_wrapped(|ui| {
-                                ui.spinner();
-                                ui.label(if app.settings.language == Language::Vi {
-                                    format!(
-                                        "Đang thiết lập kết nối từ cổng nội bộ {local_port} tới bore.pub..."
-                                    )
-                                } else {
-                                    format!("Connecting local port {local_port} to bore.pub...")
-                                });
-                                if danger_icon_button(
-                                    ui,
-                                    VectorIcon::Stop,
-                                    app.i18n.t("common.cancel"),
-                                )
-                                .clicked()
-                                {
-                                    app.toggle_selected_server_tunnel();
-                                }
-                            });
-                    }
-                    ref st @ TunnelStatus::Running { local_port, .. } => {
-                        let public_endpoint = st
-                            .public_endpoint()
-                            .unwrap_or_else(|| "bore.pub".to_string());
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(
-                                RichText::new(
-                                    app.i18n.tr("Địa chỉ công khai:", "Public Endpoint:"),
-                                )
-                                .strong(),
-                            );
-                            badge(ui, &public_endpoint, ACCENT_EMERALD);
-                            if let Some(pub_ms) = live_stats.public_ping_ms {
-                                badge(
-                                    ui,
-                                    &format!(
-                                        "{}: {pub_ms} ms",
-                                        app.i18n.tr("Ping công khai", "Public Ping")
-                                    ),
-                                    ping_badge_color(pub_ms, true),
-                                );
-                            }
-                            if primary_icon_button(
-                                ui,
-                                VectorIcon::Copy,
-                                app.i18n.tr("Sao chép địa chỉ", "Copy Address"),
-                            )
-                            .clicked()
-                            {
-                                app.copy_text_with_toast(ui.ctx(), public_endpoint.clone());
-                            }
-                            if danger_icon_button(
-                                ui,
-                                VectorIcon::Stop,
-                                app.i18n.tr("Đóng cổng", "Close Tunnel"),
-                            )
-                            .clicked()
-                            {
-                                app.toggle_selected_server_tunnel();
-                            }
-                        });
-                        ui.label(
-                                RichText::new(if app.settings.language == Language::Vi {
-                                    format!(
-                                        "Đang chuyển tiếp từ {public_endpoint} → 127.0.0.1:{local_port}"
-                                    )
-                                } else {
-                                    format!(
-                                        "Forwarding from {public_endpoint} → 127.0.0.1:{local_port}"
-                                    )
-                                })
-                                .size(11.5)
-                                .weak(),
-                            );
-                    }
-                    TunnelStatus::Error(err) => {
-                        ui.label(
-                            RichText::new(format!(
-                                "{}: {err}",
-                                app.i18n.tr("Lỗi kết nối", "Tunnel Error")
-                            ))
-                            .color(ACCENT_RED),
-                        );
-                        if primary_icon_button(
-                            ui,
-                            VectorIcon::Refresh,
-                            app.i18n.tr("Thử kết nối lại", "Reconnect"),
-                        )
-                        .clicked()
-                        {
-                            app.toggle_selected_server_tunnel();
-                        }
-                    }
-                }
-            },
-        );
 
         ui.add_space(10.0);
 

@@ -460,40 +460,7 @@ where
         ServerEngine::Arclight => {
             let releases: Vec<GithubReleaseItem> =
                 downloader.get_json(ARCLIGHT_RELEASES_URL).await?;
-            let needle = format!("-{clean_mc}-");
-            let mut chosen: Option<GithubAssetItem> = None;
-            for rel in releases {
-                let mut candidates: Vec<GithubAssetItem> = rel
-                    .assets
-                    .into_iter()
-                    .filter(|a| a.name.ends_with(".jar") && a.name.contains(&needle))
-                    .collect();
-                if !candidates.is_empty() {
-                    candidates.sort_by_key(|a| {
-                        if a.name.contains("neoforge") {
-                            0
-                        } else if a.name.contains("forge") {
-                            1
-                        } else {
-                            2
-                        }
-                    });
-                    chosen = Some(candidates.remove(0));
-                    break;
-                }
-            }
-            let asset = chosen.ok_or_else(|| {
-                ThkError::Loader(format!(
-                    "No Arclight release JAR found for Minecraft {clean_mc}"
-                ))
-            })?;
-            let arclight_loader = if asset.name.contains("neoforge") {
-                "neoforge"
-            } else if asset.name.contains("fabric") {
-                "fabric"
-            } else {
-                "forge"
-            };
+            let (asset, arclight_loader) = select_arclight_release_asset(releases, clean_mc)?;
             let jar_name = format!("arclight-{clean_mc}.jar");
             let dest = SafePath::resolve_child(server_dir, &jar_name)?;
             let mut task = DownloadTask::new(asset.browser_download_url, dest);
@@ -579,20 +546,74 @@ pub fn detect_arclight_loader(server_dir: &Path, mc_version: &str) -> LoaderType
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
             if name.starts_with("arclight-") && name.ends_with(".jar") {
-                if name.contains("neoforge") {
-                    return LoaderType::NeoForge;
-                }
-                if name.contains("fabric") {
-                    return LoaderType::Fabric;
-                }
-                if name.contains("forge") {
-                    return LoaderType::Forge;
+                if let Some(loader) = classify_arclight_jar_loader(&name) {
+                    return loader;
                 }
             }
         }
     }
 
+    arclight_loader_for_mc(mc_version)
+}
+
+fn classify_arclight_jar_loader(asset_name: &str) -> Option<LoaderType> {
+    let lower = asset_name.to_ascii_lowercase();
+    if lower.contains("-neoforge-") {
+        Some(LoaderType::NeoForge)
+    } else if lower.contains("-fabric-") {
+        Some(LoaderType::Fabric)
+    } else if lower.contains("-forge-") {
+        Some(LoaderType::Forge)
+    } else if lower.contains("neoforge") {
+        Some(LoaderType::NeoForge)
+    } else if lower.contains("fabric") {
+        Some(LoaderType::Fabric)
+    } else if lower.contains("forge") {
+        Some(LoaderType::Forge)
+    } else {
+        None
+    }
+}
+
+fn arclight_asset_rank(asset_name: &str, preferred_loader: LoaderType) -> u8 {
+    match classify_arclight_jar_loader(asset_name) {
+        Some(loader) if loader == preferred_loader => 0,
+        Some(LoaderType::NeoForge) => 1,
+        Some(LoaderType::Forge) | None => 2,
+        Some(LoaderType::Fabric) => 3,
+        Some(_) => 4,
+    }
+}
+
+fn select_arclight_release_asset(
+    releases: Vec<GithubReleaseItem>,
+    clean_mc: &str,
+) -> ThkResult<(GithubAssetItem, &'static str)> {
+    let preferred_loader = arclight_loader_for_mc(clean_mc);
+    let needle = format!("-{clean_mc}-");
+    for rel in releases {
+        let mut candidates: Vec<GithubAssetItem> = rel
+            .assets
+            .into_iter()
+            .filter(|a| a.name.ends_with(".jar") && a.name.contains(&needle))
+            .collect();
+        if !candidates.is_empty() {
+            candidates.sort_by_key(|a| arclight_asset_rank(&a.name, preferred_loader));
+            let asset = candidates.remove(0);
+            let arclight_loader = classify_arclight_jar_loader(&asset.name)
+                .unwrap_or(LoaderType::Forge)
+                .as_str();
+            return Ok((asset, arclight_loader));
+        }
+    }
+    Err(ThkError::Loader(format!(
+        "No Arclight release JAR found for Minecraft {clean_mc}"
+    )))
+}
+
+pub fn arclight_loader_for_mc(mc_version: &str) -> LoaderType {
     let parts: Vec<u32> = mc_version
+        .trim()
         .split('.')
         .filter_map(|p| p.parse::<u32>().ok())
         .collect();
@@ -1042,5 +1063,82 @@ mod paper_tests {
             pick_best_sponge_version(&map).as_deref(),
             Some("1.21.4-14.0.0-RC10")
         );
+    }
+
+    #[test]
+    fn arclight_loader_for_mc_maps_versions_and_detect_fallback() {
+        assert_eq!(arclight_loader_for_mc("1.20.1"), LoaderType::Forge);
+        assert_eq!(arclight_loader_for_mc("1.21"), LoaderType::NeoForge);
+        assert_eq!(arclight_loader_for_mc("1.21.1"), LoaderType::NeoForge);
+        assert_eq!(arclight_loader_for_mc("1.21.4"), LoaderType::Fabric);
+        assert_eq!(arclight_loader_for_mc("26.1"), LoaderType::Fabric);
+
+        let missing_dir =
+            std::env::temp_dir().join(format!("thk-arc-fallback-{}", uuid::Uuid::new_v4()));
+        assert_eq!(
+            detect_arclight_loader(&missing_dir, "1.21.4"),
+            LoaderType::Fabric
+        );
+        assert_eq!(
+            detect_arclight_loader(&missing_dir, "1.21.1"),
+            LoaderType::NeoForge
+        );
+        assert_eq!(
+            detect_arclight_loader(&missing_dir, "1.20.1"),
+            LoaderType::Forge
+        );
+    }
+
+    #[test]
+    fn arclight_release_asset_selection_aligns_with_preferred_loader() {
+        let make_rel = |names: &[&str]| {
+            vec![GithubReleaseItem {
+                assets: names
+                    .iter()
+                    .map(|name| GithubAssetItem {
+                        name: (*name).to_string(),
+                        browser_download_url: format!("https://example.invalid/{name}"),
+                        size: Some(128),
+                    })
+                    .collect(),
+            }]
+        };
+
+        let rel_1214 = make_rel(&[
+            "arclight-forge-1.21.4-1.0.0.jar",
+            "arclight-neoforge-1.21.4-1.0.0.jar",
+            "arclight-fabric-1.21.4-1.0.0.jar",
+        ]);
+        let (chosen_1214, ldr_1214) = select_arclight_release_asset(rel_1214, "1.21.4").unwrap();
+        assert_eq!(chosen_1214.name, "arclight-fabric-1.21.4-1.0.0.jar");
+        assert_eq!(ldr_1214, "fabric");
+
+        let rel_1211 = make_rel(&[
+            "arclight-fabric-1.21.1-1.0.0.jar",
+            "arclight-forge-1.21.1-1.0.0.jar",
+            "arclight-neoforge-1.21.1-1.0.0.jar",
+        ]);
+        let (chosen_1211, ldr_1211) = select_arclight_release_asset(rel_1211, "1.21.1").unwrap();
+        assert_eq!(chosen_1211.name, "arclight-neoforge-1.21.1-1.0.0.jar");
+        assert_eq!(ldr_1211, "neoforge");
+
+        let rel_1201 = make_rel(&[
+            "arclight-neoforge-1.20.1-1.0.0.jar",
+            "arclight-fabric-1.20.1-1.0.0.jar",
+            "arclight-forge-1.20.1-1.0.0.jar",
+        ]);
+        let (chosen_1201, ldr_1201) = select_arclight_release_asset(rel_1201, "1.20.1").unwrap();
+        assert_eq!(chosen_1201.name, "arclight-forge-1.20.1-1.0.0.jar");
+        assert_eq!(ldr_1201, "forge");
+
+        // Fallback order when preferred loader asset is absent for 1.21.4 (neoforge > forge).
+        let rel_1214_fallback = make_rel(&[
+            "arclight-forge-1.21.4-1.0.0.jar",
+            "arclight-neoforge-1.21.4-1.0.0.jar",
+        ]);
+        let (chosen_fb, ldr_fb) =
+            select_arclight_release_asset(rel_1214_fallback, "1.21.4").unwrap();
+        assert_eq!(chosen_fb.name, "arclight-neoforge-1.21.4-1.0.0.jar");
+        assert_eq!(ldr_fb, "neoforge");
     }
 }

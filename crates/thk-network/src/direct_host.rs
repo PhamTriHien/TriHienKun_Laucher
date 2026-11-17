@@ -810,7 +810,7 @@ fn bind_tcp_v6_only_listener(port: u16) -> std::io::Result<TcpListener> {
     TcpListener::from_std(sock.into())
 }
 
-async fn is_tcp_addr_reachable(addr: SocketAddr, wait: Duration) -> bool {
+pub(crate) async fn is_tcp_addr_reachable(addr: SocketAddr, wait: Duration) -> bool {
     timeout(wait, TcpStream::connect(addr))
         .await
         .map(|r| r.is_ok())
@@ -903,7 +903,7 @@ fn spawn_tcp_bridge_worker(
     });
 }
 
-fn send_lan_multicast_frame(payload: &[u8], interfaces: &[Ipv4Addr]) {
+pub(crate) fn send_lan_multicast_frame(payload: &[u8], interfaces: &[Ipv4Addr]) {
     let dest = SocketAddrV4::new(MC_LAN_MULTICAST_GROUP, MC_LAN_MULTICAST_PORT);
     if interfaces.is_empty() {
         if let Ok(sock) = StdUdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
