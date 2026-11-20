@@ -1216,14 +1216,24 @@ fn consolidated_online_room_network_and_lan_copy_regression() {
             app.servers.servers = vec![srv];
             app.servers.active_tab = ServerTab::Network;
             app.servers.network_snapshot = synthetic_snapshot.clone();
+            app.sync_selected_server_room_config();
+            let expected_perm_code = app
+                .selected_server_permanent_room_code()
+                .expect("permanent room code")
+                .0;
             app.lan_modal.primary_lan_ip = Some("192.168.1.5".into());
 
             let copy_lan_lbl = app.i18n.tr("Sao chép LAN", "Copy LAN").to_owned();
             let open_join_lbl = app.i18n.tr("Mở mục Vào Phòng", "Open Join Room").to_owned();
-            let create_room_lbl = app
+            let open_room_lbl = app
                 .i18n
-                .tr("Tạo Mã Phòng Online", "Create Online Room Code")
+                .tr("Mở Phòng Online", "Open Online Room")
                 .to_owned();
+            let copy_room_lbl = app
+                .i18n
+                .tr("Sao chép Mã Phòng", "Copy Room Code")
+                .to_owned();
+            let new_code_lbl = app.i18n.tr("Đổi mã mới", "New Code").to_owned();
             let legacy_v6_lbl = app
                 .i18n
                 .tr("Sao chép Online IPv6", "Copy Online IPv6")
@@ -1251,7 +1261,14 @@ fn consolidated_online_room_network_and_lan_copy_regression() {
             assert!(net_harness.get_by_label("192.168.1.5:25565").rect().width() > 30.0);
             assert!(
                 net_harness
-                    .get_by_role_and_label(egui::Role::Button, &create_room_lbl)
+                    .get_by_role_and_label(egui::Role::Button, &open_room_lbl)
+                    .rect()
+                    .width()
+                    > 20.0
+            );
+            assert!(
+                net_harness
+                    .get_by_role_and_label(egui::Role::Button, &new_code_lbl)
                     .rect()
                     .width()
                     > 20.0
@@ -1273,6 +1290,43 @@ fn consolidated_online_room_network_and_lan_copy_regression() {
                     .query_by_role_and_label(egui::Role::Button, &legacy_bore_srv_lbl)
                     .is_none(),
                 "Duplicate bore tunnel button must stay removed"
+            );
+
+            let copy_room_pos = net_harness
+                .get_by_role_and_label(egui::Role::Button, &copy_room_lbl)
+                .rect()
+                .center();
+            net_harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerMoved(copy_room_pos));
+            net_harness.run_steps(1);
+            net_harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerButton {
+                    pos: copy_room_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            net_harness.step();
+            net_harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerButton {
+                    pos: copy_room_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            net_harness.step();
+            let copied_room = net_harness.output().platform_output.commands.iter().any(
+                |cmd| matches!(cmd, egui::OutputCommand::CopyText(t) if t == &expected_perm_code && t.starts_with("thk1_")),
+            );
+            assert!(
+                copied_room,
+                "Permanent Room Code Copy button must emit CopyText(thk1_...) command"
             );
 
             let copy_lan_pos = net_harness

@@ -6,6 +6,7 @@ use crate::updater::{
 };
 use chrono::Utc;
 use egui_commonmark::CommonMarkCache;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -56,7 +57,8 @@ use thk_mods::{
     ServerModpackInspection,
 };
 use thk_network::{
-    detect_local_network_snapshot, detect_primary_lan_ipv4, ping_minecraft_server,
+    derive_permanent_room_code, detect_local_network_snapshot, detect_primary_lan_ipv4,
+    generate_virtual_room_secret_key, parse_virtual_room_secret_key, ping_minecraft_server,
     ConnectedNetworkSnapshot, DiscordPresenceState, DiscordRpcService, LanShareCoordinator,
     LanTunnelEvent, LanWorldAnnouncement, ServerStatusPing, VirtualPortClientStatus,
     VirtualPortHostStatus,
@@ -91,6 +93,23 @@ pub enum ActiveSection {
     Modpacks,
     Servers,
     Accounts,
+}
+
+/// Persistent per-server Online Room identity and auto-open configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerVirtualRoomConfig {
+    pub secret_key_b64: String,
+    pub auto_open_on_start: bool,
+}
+
+impl Default for ServerVirtualRoomConfig {
+    fn default() -> Self {
+        Self {
+            secret_key_b64: generate_virtual_room_secret_key(),
+            auto_open_on_start: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -925,6 +944,7 @@ pub struct ServersViewState {
     pub server_stats: HashMap<String, ServerResourceStats>,
     pub server_states: HashMap<String, ServerRuntimeState>,
     pub server_virtual_hosts: HashMap<String, VirtualPortHostStatus>,
+    pub server_room_configs: HashMap<String, ServerVirtualRoomConfig>,
     pub network_snapshot: ConnectedNetworkSnapshot,
     pub current_rel_dir: String,
     pub dir_entries: Vec<ServerFileEntry>,
@@ -987,6 +1007,7 @@ impl Default for ServersViewState {
             server_stats: HashMap::new(),
             server_states: HashMap::new(),
             server_virtual_hosts: HashMap::new(),
+            server_room_configs: HashMap::new(),
             network_snapshot: detect_local_network_snapshot(),
             current_rel_dir: String::new(),
             dir_entries: Vec::new(),
@@ -1362,6 +1383,11 @@ impl LauncherAppState {
         let servers_list = db.list_servers().unwrap_or_default();
         let selected_server_id = servers_list.first().map(|s| s.id.clone());
         let bookmarks = db.list_bookmarks().unwrap_or_default();
+        let last_join_room_code = db
+            .get_kv("lan_last_join_room_code")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let mobile_controls =
             thk_core::mobile_controls::MobileControlLayout::load_or_default(&paths.root);
 
@@ -1428,7 +1454,10 @@ impl LauncherAppState {
                 ..AccountsViewState::default()
             },
             java_modal: JavaModalState::default(),
-            lan_modal: LanModalState::default(),
+            lan_modal: LanModalState {
+                virtual_join_code_input: last_join_room_code,
+                ..LanModalState::default()
+            },
             updater: UpdaterViewState::default(),
             detached: DetachedWindowsState::default(),
             mobile_controls,
@@ -1447,6 +1476,7 @@ impl LauncherAppState {
         app.sync_profile_edit_draft();
         app.sync_server_edit_draft();
         app.sync_selected_server_ftp_config();
+        app.sync_selected_server_room_config();
         app.refresh_mojang_versions();
         app.refresh_selected_profile_tabs();
         app.refresh_selected_server_tabs();
@@ -2188,6 +2218,7 @@ impl LauncherAppState {
         self.servers.addon_selected = None;
         self.sync_server_edit_draft();
         self.sync_selected_server_ftp_config();
+        self.sync_selected_server_room_config();
         self.refresh_selected_server_tabs();
     }
 
@@ -2524,17 +2555,24 @@ impl LauncherAppState {
                     return;
                 }
                 self.server_supervisor.stop_server_tunnel(&server_id);
+                self.server_supervisor.stop_server_virtual_host(&server_id);
                 if let Err(e) = self.db.delete_server(&server_id) {
                     self.push_toast(ToastKind::Error, e.to_string());
                     return;
                 }
                 let _ = self.db.set_kv(&format!("server_ftp_cfg:{server_id}"), None);
+                let _ = self
+                    .db
+                    .set_kv(&format!("server_room_cfg:{server_id}"), None);
+                self.servers.server_virtual_hosts.remove(&server_id);
+                self.servers.server_room_configs.remove(&server_id);
                 let _ = delete_server_ftp_password(&server_id);
                 self.servers.servers = self.db.list_servers().unwrap_or_default();
                 self.servers.selected_server_id =
                     self.servers.servers.first().map(|s| s.id.clone());
                 self.sync_server_edit_draft();
                 self.sync_selected_server_ftp_config();
+                self.sync_selected_server_room_config();
                 self.refresh_selected_server_tabs();
 
                 let shared_with_other = self
@@ -7065,6 +7103,147 @@ impl LauncherAppState {
         self.servers.network_snapshot = local;
     }
 
+    fn save_server_virtual_room_config(&self, server_id: &str, cfg: &ServerVirtualRoomConfig) {
+        if let Ok(json) = serde_json::to_string(cfg) {
+            let _ = self
+                .db
+                .set_kv(&format!("server_room_cfg:{server_id}"), Some(&json));
+        }
+    }
+
+    pub fn ensure_server_virtual_room_config(
+        &mut self,
+        server_id: &str,
+    ) -> ServerVirtualRoomConfig {
+        if let Some(cfg) = self.servers.server_room_configs.get(server_id) {
+            if parse_virtual_room_secret_key(&cfg.secret_key_b64).is_ok() {
+                return cfg.clone();
+            }
+        }
+
+        let mut needs_persist = false;
+        let mut cfg = self
+            .db
+            .get_kv(&format!("server_room_cfg:{server_id}"))
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<ServerVirtualRoomConfig>(&raw).ok())
+            .unwrap_or_else(|| {
+                needs_persist = true;
+                ServerVirtualRoomConfig::default()
+            });
+
+        if parse_virtual_room_secret_key(&cfg.secret_key_b64).is_err() {
+            cfg.secret_key_b64 = generate_virtual_room_secret_key();
+            needs_persist = true;
+        }
+        if needs_persist {
+            self.save_server_virtual_room_config(server_id, &cfg);
+        }
+        self.servers
+            .server_room_configs
+            .insert(server_id.to_string(), cfg.clone());
+        cfg
+    }
+
+    pub fn sync_selected_server_room_config(&mut self) {
+        if let Some(server_id) = self.servers.selected_server_id.clone() {
+            let _ = self.ensure_server_virtual_room_config(&server_id);
+        }
+    }
+
+    pub fn selected_server_permanent_room_code(&self) -> Option<(String, bool)> {
+        let server_id = self.servers.selected_server_id.as_deref()?;
+        let cfg = self.servers.server_room_configs.get(server_id)?;
+        let room_code = derive_permanent_room_code(&cfg.secret_key_b64).ok()?;
+        Some((room_code, cfg.auto_open_on_start))
+    }
+
+    pub fn set_server_auto_open_room(&mut self, server_id: &str, auto_open: bool) {
+        let mut cfg = self.ensure_server_virtual_room_config(server_id);
+        cfg.auto_open_on_start = auto_open;
+        self.servers
+            .server_room_configs
+            .insert(server_id.to_string(), cfg.clone());
+        self.save_server_virtual_room_config(server_id, &cfg);
+    }
+
+    fn start_server_virtual_host_by_id(&mut self, server_id: &str) {
+        let Some(srv) = self
+            .servers
+            .servers
+            .iter()
+            .find(|s| s.id == server_id)
+            .cloned()
+        else {
+            return;
+        };
+        let status = self.server_supervisor.server_virtual_host_status(&srv.id);
+        let ui_active = matches!(
+            self.servers.server_virtual_hosts.get(&srv.id),
+            Some(VirtualPortHostStatus::Running(_) | VirtualPortHostStatus::Starting { .. })
+        );
+        if ui_active
+            || matches!(
+                status,
+                VirtualPortHostStatus::Running(_) | VirtualPortHostStatus::Starting { .. }
+            )
+        {
+            return;
+        }
+
+        let local_port = resolve_effective_server_port(&srv);
+        let motd = if self.servers.selected_server_id.as_deref() == Some(server_id) {
+            self.servers
+                .properties_map
+                .get("motd")
+                .cloned()
+                .filter(|s| !s.trim().is_empty())
+        } else {
+            read_server_properties(&srv.server_dir)
+                .ok()
+                .and_then(|props| props.get("motd").cloned())
+                .filter(|s| !s.trim().is_empty())
+        }
+        .unwrap_or_else(|| srv.name.clone());
+        let cfg = self.ensure_server_virtual_room_config(&srv.id);
+
+        self.servers.server_virtual_hosts.insert(
+            srv.id.clone(),
+            VirtualPortHostStatus::Starting { local_port },
+        );
+        self.sync_android_keep_alive_service();
+        let sup = self.server_supervisor.clone();
+        let lang = self.settings.language;
+        let tx = self.ui_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        let secret_key_b64 = cfg.secret_key_b64;
+        self.rt.spawn(async move {
+            if let Err(e) = sup
+                .start_server_virtual_host(&srv.id, local_port, motd, Some(secret_key_b64.as_str()))
+                .await
+            {
+                if !matches!(e, thk_core::ThkError::Cancelled) {
+                    let err_msg = e.to_string();
+                    let _ = tx.send(AppAsyncEvent::Server(
+                        ServerSupervisorEvent::VirtualHostChanged {
+                            server_id: srv.id,
+                            status: VirtualPortHostStatus::Error(err_msg.clone()),
+                        },
+                    ));
+                    let _ = tx.send(AppAsyncEvent::Toast {
+                        kind: ToastKind::Error,
+                        text: format!(
+                            "{}: {err_msg}",
+                            tr_lang(lang, "Không thể tạo Mã Phòng", "Failed to create Room Code")
+                        ),
+                    });
+                    ctx.request_repaint();
+                }
+            }
+        });
+    }
+
     pub fn toggle_selected_server_virtual_host(&mut self) {
         let Some(srv) = self.selected_server().cloned() else {
             return;
@@ -7088,47 +7267,50 @@ impl LauncherAppState {
             return;
         }
 
-        let local_port = resolve_effective_server_port(&srv);
-        let motd = self
-            .servers
-            .properties_map
-            .get("motd")
-            .cloned()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| srv.name.clone());
-        self.servers.server_virtual_hosts.insert(
-            srv.id.clone(),
-            VirtualPortHostStatus::Starting { local_port },
+        self.start_server_virtual_host_by_id(&srv.id);
+    }
+
+    pub fn regenerate_selected_server_room_code(&mut self) {
+        let Some(srv) = self.selected_server().cloned() else {
+            return;
+        };
+        let status = self.server_supervisor.server_virtual_host_status(&srv.id);
+        let ui_active = matches!(
+            self.servers.server_virtual_hosts.get(&srv.id),
+            Some(VirtualPortHostStatus::Running(_) | VirtualPortHostStatus::Starting { .. })
         );
-        self.sync_android_keep_alive_service();
-        let sup = self.server_supervisor.clone();
-        let lang = self.settings.language;
-        let tx = self.ui_tx.clone();
-        let ctx = self.egui_ctx.clone();
-        self.rt.spawn(async move {
-            if let Err(e) = sup
-                .start_server_virtual_host(&srv.id, local_port, motd)
-                .await
-            {
-                if !matches!(e, thk_core::ThkError::Cancelled) {
-                    let err_msg = e.to_string();
-                    let _ = tx.send(AppAsyncEvent::Server(
-                        ServerSupervisorEvent::VirtualHostChanged {
-                            server_id: srv.id,
-                            status: VirtualPortHostStatus::Error(err_msg.clone()),
-                        },
-                    ));
-                    let _ = tx.send(AppAsyncEvent::Toast {
-                        kind: ToastKind::Error,
-                        text: format!(
-                            "{}: {err_msg}",
-                            tr_lang(lang, "Không thể tạo Mã Phòng", "Failed to create Room Code")
-                        ),
-                    });
-                    ctx.request_repaint();
-                }
-            }
-        });
+        let was_active = ui_active
+            || matches!(
+                status,
+                VirtualPortHostStatus::Running(_) | VirtualPortHostStatus::Starting { .. }
+            );
+        if was_active {
+            self.server_supervisor.stop_server_virtual_host(&srv.id);
+            self.servers
+                .server_virtual_hosts
+                .insert(srv.id.clone(), VirtualPortHostStatus::Stopped);
+        }
+
+        let mut cfg = self.ensure_server_virtual_room_config(&srv.id);
+        cfg.secret_key_b64 = generate_virtual_room_secret_key();
+        self.servers
+            .server_room_configs
+            .insert(srv.id.clone(), cfg.clone());
+        self.save_server_virtual_room_config(&srv.id, &cfg);
+
+        if was_active {
+            self.start_server_virtual_host_by_id(&srv.id);
+        } else {
+            let msg = self
+                .i18n
+                .tr(
+                    "Đã đổi Mã Phòng cố định mới cho máy chủ.",
+                    "Generated a new permanent Room Code for this server.",
+                )
+                .to_string();
+            self.push_toast(ToastKind::Success, msg);
+            self.sync_android_keep_alive_service();
+        }
     }
 
     pub fn sync_selected_server_ftp_config(&mut self) {
@@ -8090,6 +8272,11 @@ impl LauncherAppState {
         });
     }
 
+    pub fn clear_lan_join_room_code(&mut self) {
+        self.lan_modal.virtual_join_code_input.clear();
+        let _ = self.db.set_kv("lan_last_join_room_code", None);
+    }
+
     pub fn toggle_lan_virtual_client(&mut self) {
         let current = self.lan_coordinator.virtual_client_status();
         let ui_active = matches!(
@@ -8136,6 +8323,7 @@ impl LauncherAppState {
         };
 
         let announce_on_lan = self.lan_modal.virtual_join_announce_lan;
+        let _ = self.db.set_kv("lan_last_join_room_code", Some(&room_code));
         self.lan_modal.virtual_client_status =
             VirtualPortClientStatus::Connecting { preferred_port };
         self.sync_android_keep_alive_service();
@@ -9732,10 +9920,19 @@ impl LauncherAppState {
         match ev {
             ServerSupervisorEvent::StatusChanged { server_id, state } => {
                 self.update_keyed_task(format!("server-jvm-prep:{server_id}"), None, None, None);
+                let prev_state = self.servers.server_states.get(&server_id).copied();
                 if state == ServerRuntimeState::Offline {
                     self.servers.server_stats.remove(&server_id);
                 }
-                self.servers.server_states.insert(server_id, state);
+                self.servers.server_states.insert(server_id.clone(), state);
+                if state == ServerRuntimeState::Online
+                    && prev_state != Some(ServerRuntimeState::Online)
+                {
+                    let cfg = self.ensure_server_virtual_room_config(&server_id);
+                    if cfg.auto_open_on_start {
+                        self.start_server_virtual_host_by_id(&server_id);
+                    }
+                }
                 self.sync_idle_discord_presence();
                 self.sync_android_keep_alive_service();
             }

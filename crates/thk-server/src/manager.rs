@@ -13,7 +13,7 @@ use thk_core::models::{DownloadProgress, ManagedServer};
 use thk_core::{AppPaths, DownloadManager, SafePath, ThkError, ThkResult};
 use thk_java::{ensure_mojang_java, ensure_optimal_java, probe_java_binary, RequiredJavaSpec};
 use thk_network::{
-    start_bore_tunnel, start_direct_port_host, start_virtual_port_host, BoreTunnelHandle,
+    start_bore_tunnel, start_direct_port_host, start_virtual_port_host_with_key, BoreTunnelHandle,
     DirectHostConfig, DirectHostStatus, DirectPortHostHandle, LanTunnelEvent, TunnelStatus,
     VirtualPortHostHandle, VirtualPortHostStatus,
 };
@@ -934,6 +934,7 @@ impl LocalServerSupervisor {
         server_id: &str,
         local_port: u16,
         motd: String,
+        secret_key_b64: Option<&str>,
     ) -> ThkResult<VirtualPortHostHandle> {
         let session_gen = {
             let mut gens = self
@@ -977,23 +978,26 @@ impl LocalServerSupervisor {
             }
         });
 
-        let handle = match start_virtual_port_host(local_port, motd, Some(lan_tx)).await {
-            Ok(h) => h,
-            Err(err) => {
-                let still_current = self
-                    .virtual_host_generations
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(server_id)
-                    .copied()
-                    .unwrap_or(0)
-                    == session_gen;
-                if !still_current {
-                    return Err(ThkError::Cancelled);
+        let handle =
+            match start_virtual_port_host_with_key(local_port, motd, secret_key_b64, Some(lan_tx))
+                .await
+            {
+                Ok(h) => h,
+                Err(err) => {
+                    let still_current = self
+                        .virtual_host_generations
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(server_id)
+                        .copied()
+                        .unwrap_or(0)
+                        == session_gen;
+                    if !still_current {
+                        return Err(ThkError::Cancelled);
+                    }
+                    return Err(err);
                 }
-                return Err(err);
-            }
-        };
+            };
         let still_current = self
             .virtual_host_generations
             .read()

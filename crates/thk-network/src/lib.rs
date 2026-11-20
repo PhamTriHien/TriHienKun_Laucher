@@ -26,9 +26,11 @@ pub use ping::{
     strip_section_codes, MotdSpan, ServerStatusPing,
 };
 pub use virtual_port::{
-    decode_room_ticket, encode_room_ticket, start_virtual_port_client, start_virtual_port_host,
-    VirtualPortClientHandle, VirtualPortClientInfo, VirtualPortClientStatus, VirtualPortHostHandle,
-    VirtualPortHostInfo, VirtualPortHostStatus, VirtualRoomTicket, VIRTUAL_PORT_ALPN,
+    decode_room_ticket, derive_permanent_room_code, encode_room_ticket,
+    generate_virtual_room_secret_key, parse_virtual_room_secret_key, start_virtual_port_client,
+    start_virtual_port_host, start_virtual_port_host_with_key, VirtualPortClientHandle,
+    VirtualPortClientInfo, VirtualPortClientStatus, VirtualPortHostHandle, VirtualPortHostInfo,
+    VirtualPortHostStatus, VirtualRoomTicket, VIRTUAL_PORT_ALPN,
 };
 
 #[cfg(test)]

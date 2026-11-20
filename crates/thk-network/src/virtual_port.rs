@@ -10,7 +10,7 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -351,11 +351,54 @@ async fn bridge_tcp_and_quic(
     }
 }
 
-async fn build_host_endpoint(offline_local_only: bool) -> ThkResult<Endpoint> {
+/// Generates a fresh 32-byte server virtual room secret key encoded as URL-safe Base64.
+pub fn generate_virtual_room_secret_key() -> String {
+    let secret = SecretKey::generate();
+    base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        secret.to_bytes(),
+    )
+}
+
+/// Parses a persisted URL-safe Base64 virtual room secret key into its 32 raw bytes.
+pub fn parse_virtual_room_secret_key(secret_b64: &str) -> ThkResult<[u8; 32]> {
+    let trimmed = secret_b64.trim();
+    if trimmed.is_empty() {
+        return Err(ThkError::InvalidInput(
+            "Khóa bí mật phòng Online không được để trống.".into(),
+        ));
+    }
+    let decoded =
+        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, trimmed)
+            .map_err(|e| {
+                ThkError::InvalidInput(format!("Khóa bí mật phòng Online không hợp lệ: {e}"))
+            })?;
+    decoded.try_into().map_err(|_| {
+        ThkError::InvalidInput("Khóa bí mật phòng Online phải có đúng 32 byte.".into())
+    })
+}
+
+/// Derives the deterministic permanent `thk1_...` room code for a persisted room secret key.
+pub fn derive_permanent_room_code(secret_b64: &str) -> ThkResult<String> {
+    let bytes = parse_virtual_room_secret_key(secret_b64)?;
+    let secret = SecretKey::from_bytes(&bytes);
+    let addr = EndpointAddr::from(secret.public());
+    encode_room_ticket(&addr, "Minecraft Server")
+}
+
+async fn build_host_endpoint(
+    offline_local_only: bool,
+    secret_key: Option<SecretKey>,
+) -> ThkResult<Endpoint> {
     let builder = if offline_local_only {
         Endpoint::builder(presets::Minimal)
     } else {
         Endpoint::builder(presets::N0)
+    };
+    let builder = if let Some(secret) = secret_key {
+        builder.secret_key(secret)
+    } else {
+        builder
     };
     builder
         .alpns(vec![VIRTUAL_PORT_ALPN.to_vec()])
@@ -373,17 +416,33 @@ async fn build_client_endpoint(offline_local_only: bool) -> ThkResult<Endpoint> 
     res.map_err(|e| ThkError::Process(format!("Không thể khởi tạo kết nối cổng ảo: {e}")))
 }
 
+/// Opens an ephemeral virtual port host for single-session LAN sharing.
 pub async fn start_virtual_port_host(
     local_port: u16,
     motd: String,
     events_tx: Option<mpsc::UnboundedSender<LanTunnelEvent>>,
 ) -> ThkResult<VirtualPortHostHandle> {
-    start_virtual_port_host_inner(local_port, motd, false, events_tx).await
+    start_virtual_port_host_inner(local_port, motd, None, false, events_tx).await
+}
+
+/// Opens a virtual port host optionally bound to a persisted URL-safe Base64 secret key.
+pub async fn start_virtual_port_host_with_key(
+    local_port: u16,
+    motd: String,
+    secret_key_b64: Option<&str>,
+    events_tx: Option<mpsc::UnboundedSender<LanTunnelEvent>>,
+) -> ThkResult<VirtualPortHostHandle> {
+    let secret = match secret_key_b64 {
+        Some(raw) => Some(SecretKey::from_bytes(&parse_virtual_room_secret_key(raw)?)),
+        None => None,
+    };
+    start_virtual_port_host_inner(local_port, motd, secret, false, events_tx).await
 }
 
 pub(crate) async fn start_virtual_port_host_inner(
     local_port: u16,
     motd: String,
+    secret_key: Option<SecretKey>,
     offline_local_only: bool,
     events_tx: Option<mpsc::UnboundedSender<LanTunnelEvent>>,
 ) -> ThkResult<VirtualPortHostHandle> {
@@ -417,7 +476,8 @@ pub(crate) async fn start_virtual_port_host_inner(
         VirtualPortHostStatus::Starting { local_port },
     );
 
-    let endpoint = match build_host_endpoint(offline_local_only).await {
+    let is_persistent = secret_key.is_some();
+    let endpoint = match build_host_endpoint(offline_local_only, secret_key).await {
         Ok(ep) => ep,
         Err(err) => {
             emit_host_status(
@@ -443,7 +503,17 @@ pub(crate) async fn start_virtual_port_host_inner(
         }
     };
 
-    let room_code = match encode_room_ticket(&endpoint.addr(), &motd) {
+    let ticket_addr = if is_persistent && !offline_local_only {
+        EndpointAddr::from(endpoint.id())
+    } else {
+        endpoint.addr()
+    };
+    let ticket_motd = if is_persistent && !offline_local_only {
+        "Minecraft Server"
+    } else {
+        motd.as_str()
+    };
+    let room_code = match encode_room_ticket(&ticket_addr, ticket_motd) {
         Ok(code) => code,
         Err(err) => {
             endpoint.close().await;
@@ -832,7 +902,7 @@ mod tests {
 
         rt.block_on(async {
             assert!(
-                start_virtual_port_host_inner(65431, "NoListener".into(), true, None)
+                start_virtual_port_host_inner(65431, "NoListener".into(), None, true, None)
                     .await
                     .is_err()
             );
@@ -859,6 +929,7 @@ mod tests {
             let host = start_virtual_port_host_inner(
                 target_port,
                 "§bThế giới Test".into(),
+                None,
                 true,
                 Some(tx.clone()),
             )
@@ -941,6 +1012,70 @@ mod tests {
                 host.current_status(),
                 VirtualPortHostStatus::Stopped
             ));
+        });
+    }
+
+    #[test]
+    fn persistent_room_key_produces_deterministic_code_and_reuses_same_node_id() {
+        let key_a = generate_virtual_room_secret_key();
+        let key_b = generate_virtual_room_secret_key();
+        assert_ne!(key_a, key_b);
+        assert!(parse_virtual_room_secret_key("").is_err());
+        assert!(parse_virtual_room_secret_key("not-valid-base64!!!").is_err());
+
+        let code_a1 = derive_permanent_room_code(&key_a).expect("derive permanent code 1");
+        let code_a2 = derive_permanent_room_code(&key_a).expect("derive permanent code 2");
+        assert_eq!(code_a1, code_a2);
+        assert!(code_a1.starts_with("thk1_"));
+        let ticket_expected = decode_room_ticket(&code_a1).expect("decode permanent ticket");
+        assert_eq!(ticket_expected.motd, "Minecraft Server");
+
+        let raw_bytes = parse_virtual_room_secret_key(&key_a).expect("parse secret bytes");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind local test server listener");
+            let target_port = listener.local_addr().expect("listener addr").port();
+
+            let h1 = start_virtual_port_host_inner(
+                target_port,
+                "Dynamic MOTD A".into(),
+                Some(SecretKey::from_bytes(&raw_bytes)),
+                true,
+                None,
+            )
+            .await
+            .expect("start persistent host 1");
+            let info1 = match h1.current_status() {
+                VirtualPortHostStatus::Running(info) => info,
+                other => panic!("expected Running status 1, got {other:?}"),
+            };
+            h1.stop();
+            tokio::time::sleep(Duration::from_millis(80)).await;
+
+            let h2 = start_virtual_port_host_inner(
+                target_port,
+                "Dynamic MOTD B".into(),
+                Some(SecretKey::from_bytes(&raw_bytes)),
+                true,
+                None,
+            )
+            .await
+            .expect("start persistent host 2");
+            let info2 = match h2.current_status() {
+                VirtualPortHostStatus::Running(info) => info,
+                other => panic!("expected Running status 2, got {other:?}"),
+            };
+            assert_eq!(info1.node_id, info2.node_id);
+            assert_eq!(info1.node_id, ticket_expected.addr.id.to_string());
+            let decoded_live = decode_room_ticket(&info1.room_code).expect("decode live ticket");
+            assert_eq!(decoded_live.addr.id, ticket_expected.addr.id);
+            h2.stop();
+            drop(listener);
         });
     }
 }

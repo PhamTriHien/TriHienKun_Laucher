@@ -8,8 +8,8 @@ use crate::theme::{
     ACCENT_VIOLET, BG_SLOT_LIGHT, BORDER_GAME_OUTER_LIGHT, TEXT_INK_LIGHT,
 };
 use crate::views::{
-    badge, danger_icon_button, format_bytes, format_duration_hms, primary_icon_button,
-    render_virtual_host_active_ui, secondary_button, secondary_icon_button,
+    badge, danger_icon_button, format_bytes, format_duration_hms, format_room_code_preview,
+    primary_icon_button, render_virtual_host_active_ui, secondary_button, secondary_icon_button,
 };
 use egui::{
     pos2, vec2, Color32, CornerRadius, Frame, Margin, Rect, RichText, ScrollArea, Sense, Stroke,
@@ -4101,6 +4101,9 @@ fn render_tab_network(
     if app.servers.ftp_loaded_for_id != srv.id {
         app.sync_selected_server_ftp_config();
     }
+    if !app.servers.server_room_configs.contains_key(&srv.id) {
+        app.sync_selected_server_room_config();
+    }
     let live_stats = app
         .servers
         .server_stats
@@ -4127,9 +4130,18 @@ fn render_tab_network(
             .unwrap_or_else(|| app.server_supervisor.server_virtual_host_status(&srv.id));
         let vhost_running = matches!(vhost_status, VirtualPortHostStatus::Running(_));
 
+        let permanent_room_info = app.selected_server_permanent_room_code();
+        let mut auto_open_room = permanent_room_info
+            .as_ref()
+            .map(|(_, auto)| *auto)
+            .unwrap_or(true);
+        let orig_auto_open = auto_open_room;
+        let permanent_room_code = permanent_room_info.map(|(code, _)| code);
+
         let mut ask_refresh_net = false;
         let mut ask_open_join_modal = false;
         let mut ask_toggle_virtual_host = false;
+        let mut ask_regenerate_room_code = false;
         let mut copy_target: Option<String> = None;
 
         gaming_card_3d(
@@ -4214,23 +4226,63 @@ fn render_tab_network(
                 ui.separator();
                 ui.add_space(6.0);
 
+                ui.checkbox(
+                    &mut auto_open_room,
+                    app.i18n.tr(
+                        "Tự động mở Phòng Online khi chạy Server",
+                        "Auto-open Online Room when Server starts",
+                    ),
+                );
+                ui.add_space(4.0);
+
                 match &vhost_status {
                     VirtualPortHostStatus::Idle | VirtualPortHostStatus::Stopped => {
-                        if primary_icon_button(
-                            ui,
-                            VectorIcon::Globe,
-                            app.i18n
-                                .tr("Tạo Mã Phòng Online", "Create Online Room Code"),
-                        )
-                        .clicked()
-                        {
-                            ask_toggle_virtual_host = true;
+                        if let Some(ref perm_code) = permanent_room_code {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    RichText::new(
+                                        app.i18n.tr("Mã Phòng cố định:", "Permanent Room Code:"),
+                                    )
+                                    .strong(),
+                                );
+                                badge(ui, &format_room_code_preview(perm_code), ACCENT_CYAN);
+                                if primary_icon_button(
+                                    ui,
+                                    VectorIcon::Copy,
+                                    app.i18n.tr("Sao chép Mã Phòng", "Copy Room Code"),
+                                )
+                                .clicked()
+                                {
+                                    copy_target = Some(perm_code.clone());
+                                }
+                            });
+                            ui.add_space(4.0);
                         }
+                        ui.horizontal_wrapped(|ui| {
+                            if primary_icon_button(
+                                ui,
+                                VectorIcon::Globe,
+                                app.i18n.tr("Mở Phòng Online", "Open Online Room"),
+                            )
+                            .clicked()
+                            {
+                                ask_toggle_virtual_host = true;
+                            }
+                            if secondary_icon_button(
+                                ui,
+                                VectorIcon::Refresh,
+                                app.i18n.tr("Đổi mã mới", "New Code"),
+                            )
+                            .clicked()
+                            {
+                                ask_regenerate_room_code = true;
+                            }
+                        });
                         ui.add_space(4.0);
                         ui.label(
                             RichText::new(app.i18n.tr(
-                                "Tạo Mã Phòng để bạn bè khác mạng kết nối vào từ xa mà không cần mở cổng Modem.",
-                                "Create a Room Code so cross-network friends can join without router setup.",
+                                "Mã Phòng được giữ cố định cho máy chủ này qua mọi lần khởi động lại.",
+                                "This Room Code stays permanent for this server across restarts.",
                             ))
                             .size(11.5)
                             .weak(),
@@ -4240,9 +4292,9 @@ fn render_tab_network(
                         ui.horizontal_wrapped(|ui| {
                             ui.spinner();
                             ui.label(if app.settings.language == Language::Vi {
-                                format!("Đang tạo Mã Phòng cho cổng {local_port}...")
+                                format!("Đang mở Phòng Online cho cổng {local_port}...")
                             } else {
-                                format!("Creating Room Code for port {local_port}...")
+                                format!("Opening Online Room for port {local_port}...")
                             });
                             if danger_icon_button(ui, VectorIcon::Stop, app.i18n.t("common.cancel"))
                                 .clicked()
@@ -4256,15 +4308,26 @@ fn render_tab_network(
                             copy_target = Some(code);
                         }
                         ui.add_space(4.0);
-                        if danger_icon_button(
-                            ui,
-                            VectorIcon::Stop,
-                            app.i18n.tr("Đóng Phòng", "Close Room"),
-                        )
-                        .clicked()
-                        {
-                            ask_toggle_virtual_host = true;
-                        }
+                        ui.horizontal_wrapped(|ui| {
+                            if danger_icon_button(
+                                ui,
+                                VectorIcon::Stop,
+                                app.i18n.tr("Đóng Phòng", "Close Room"),
+                            )
+                            .clicked()
+                            {
+                                ask_toggle_virtual_host = true;
+                            }
+                            if secondary_icon_button(
+                                ui,
+                                VectorIcon::Refresh,
+                                app.i18n.tr("Đổi mã mới", "New Code"),
+                            )
+                            .clicked()
+                            {
+                                ask_regenerate_room_code = true;
+                            }
+                        });
                     }
                     VirtualPortHostStatus::Error(err) => {
                         ui.label(
@@ -4274,15 +4337,26 @@ fn render_tab_network(
                             ))
                             .color(ACCENT_RED),
                         );
-                        if primary_icon_button(
-                            ui,
-                            VectorIcon::Refresh,
-                            app.i18n.tr("Tạo lại Mã Phòng", "Retry Room Code"),
-                        )
-                        .clicked()
-                        {
-                            ask_toggle_virtual_host = true;
-                        }
+                        ui.horizontal_wrapped(|ui| {
+                            if primary_icon_button(
+                                ui,
+                                VectorIcon::Refresh,
+                                app.i18n.tr("Thử mở lại Phòng", "Retry Online Room"),
+                            )
+                            .clicked()
+                            {
+                                ask_toggle_virtual_host = true;
+                            }
+                            if secondary_icon_button(
+                                ui,
+                                VectorIcon::Refresh,
+                                app.i18n.tr("Đổi mã mới", "New Code"),
+                            )
+                            .clicked()
+                            {
+                                ask_regenerate_room_code = true;
+                            }
+                        });
                     }
                 }
             },
@@ -4300,6 +4374,14 @@ fn render_tab_network(
         if ask_toggle_virtual_host {
             app.click_sfx();
             app.toggle_selected_server_virtual_host();
+        }
+        if auto_open_room != orig_auto_open {
+            app.click_sfx();
+            app.set_server_auto_open_room(&srv.id, auto_open_room);
+        }
+        if ask_regenerate_room_code {
+            app.click_sfx();
+            app.regenerate_selected_server_room_code();
         }
         if let Some(txt) = copy_target {
             app.copy_text_with_toast(ui.ctx(), txt);

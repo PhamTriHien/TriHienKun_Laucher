@@ -1837,7 +1837,7 @@ fn render_lan_share_modal(app: &mut LauncherAppState, ctx: &egui::Context) {
                                                     )
                                                     .clicked()
                                                 {
-                                                    app.lan_modal.virtual_join_code_input.clear();
+                                                    app.clear_lan_join_room_code();
                                                 }
                                             });
                                             ui.horizontal_wrapped(|ui| {

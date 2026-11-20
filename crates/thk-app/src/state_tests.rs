@@ -1133,3 +1133,116 @@ fn startup_reconciles_legacy_slim_skin_variant_once_and_preserves_manual_overrid
     drop(rt);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn server_permanent_room_code_persists_rotates_and_remembers_join_code() {
+    let root = std::env::temp_dir().join(format!("thk-room-persist-{}", Uuid::new_v4()));
+    let paths = AppPaths::from_root(root.clone()).unwrap();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let mut settings = db.load_settings().unwrap();
+    settings.language = Language::En;
+    settings.auto_check_updates = false;
+    settings.music_enabled = false;
+    settings.discord_rpc_enabled = false;
+    db.save_settings(&settings).unwrap();
+
+    let srv_id = "srv-persist-test".to_string();
+    let srv_dir = paths.servers_dir.join(&srv_id);
+    std::fs::create_dir_all(&srv_dir).unwrap();
+    db.upsert_server(&ManagedServer {
+        id: srv_id.clone(),
+        name: "Survival Node".into(),
+        engine: ServerEngine::Paper,
+        game_version: "1.21.4".into(),
+        server_dir: srv_dir,
+        jar_file: "server.jar".into(),
+        port: 25565,
+        ram_min_mb: 1024,
+        ram_max_mb: 2048,
+        java_path: None,
+        jvm_flags: String::new(),
+        is_custom_dir: false,
+        created_at: 1,
+    })
+    .unwrap();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let mut app1 = LauncherAppState::initialize(
+        rt.handle().clone(),
+        egui::Context::default(),
+        paths.clone(),
+        Arc::clone(&db),
+        None,
+    )
+    .unwrap();
+    let (code_1, auto_1) = app1
+        .selected_server_permanent_room_code()
+        .expect("permanent room code on startup");
+    assert!(code_1.starts_with("thk1_"));
+    assert!(auto_1);
+    app1.set_server_auto_open_room(&srv_id, false);
+    app1.lan_modal.virtual_join_code_input = format!("  {code_1}  ");
+    app1.toggle_lan_virtual_client();
+    app1.lan_coordinator.stop_virtual_client();
+    assert_eq!(
+        db.get_kv("lan_last_join_room_code").unwrap().as_deref(),
+        Some(code_1.as_str())
+    );
+    app1.lan_coordinator.shutdown_all();
+    app1.audio.shutdown();
+    drop(app1);
+
+    let mut app2 = LauncherAppState::initialize(
+        rt.handle().clone(),
+        egui::Context::default(),
+        paths.clone(),
+        Arc::clone(&db),
+        None,
+    )
+    .unwrap();
+    let (code_2, auto_2) = app2
+        .selected_server_permanent_room_code()
+        .expect("persisted permanent room code");
+    assert_eq!(code_2, code_1);
+    assert!(!auto_2);
+    assert_eq!(app2.lan_modal.virtual_join_code_input, code_1);
+
+    app2.regenerate_selected_server_room_code();
+    let (code_rotated, auto_after) = app2
+        .selected_server_permanent_room_code()
+        .expect("rotated permanent room code");
+    assert!(code_rotated.starts_with("thk1_"));
+    assert_ne!(code_rotated, code_1);
+    assert!(!auto_after);
+
+    app2.clear_lan_join_room_code();
+    assert!(app2.lan_modal.virtual_join_code_input.is_empty());
+    assert_eq!(db.get_kv("lan_last_join_room_code").unwrap(), None);
+    app2.lan_coordinator.shutdown_all();
+    app2.audio.shutdown();
+    drop(app2);
+
+    let app3 = LauncherAppState::initialize(
+        rt.handle().clone(),
+        egui::Context::default(),
+        paths,
+        Arc::clone(&db),
+        None,
+    )
+    .unwrap();
+    let (code_3, auto_3) = app3
+        .selected_server_permanent_room_code()
+        .expect("rotated permanent code across restart");
+    assert_eq!(code_3, code_rotated);
+    assert!(!auto_3);
+    assert!(app3.lan_modal.virtual_join_code_input.is_empty());
+    app3.lan_coordinator.shutdown_all();
+    app3.audio.shutdown();
+    drop(app3);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}

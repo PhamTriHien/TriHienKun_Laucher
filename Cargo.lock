@@ -7256,7 +7256,7 @@ dependencies = [
 
 [[package]]
 name = "thk-android-ffi"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "jni-sys 0.4.1",
  "libc",
@@ -7267,7 +7267,7 @@ dependencies = [
 
 [[package]]
 name = "thk-app"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "chrono",
  "eframe",
@@ -7308,7 +7308,7 @@ dependencies = [
 
 [[package]]
 name = "thk-auth"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -7337,7 +7337,7 @@ dependencies = [
 
 [[package]]
 name = "thk-core"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "chrono",
  "dirs",
@@ -7364,7 +7364,7 @@ dependencies = [
 
 [[package]]
 name = "thk-java"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "reqwest",
  "serde",
@@ -7380,7 +7380,7 @@ dependencies = [
 
 [[package]]
 name = "thk-launcher"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "chrono",
  "futures-util",
@@ -7404,7 +7404,7 @@ dependencies = [
 
 [[package]]
 name = "thk-mods"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "chrono",
  "futures-util",
@@ -7428,7 +7428,7 @@ dependencies = [
 
 [[package]]
 name = "thk-network"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "base64 0.23.1",
  "bore-cli",
@@ -7451,7 +7451,7 @@ dependencies = [
 
 [[package]]
 name = "thk-renderer3d"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "bytemuck",
  "egui",
@@ -7468,7 +7468,7 @@ dependencies = [
 
 [[package]]
 name = "thk-server"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "chrono",
  "keyring",
